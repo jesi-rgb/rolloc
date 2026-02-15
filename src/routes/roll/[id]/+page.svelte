@@ -12,7 +12,7 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { getRoll, getRollHandle } from "$lib/db/rolls";
-	import { getFrames, putFrame } from "$lib/db/idb";
+	import { getFrames, putFrame, getHandle } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
@@ -28,6 +28,7 @@
 	let selIdx = $state(0);
 	let loading = $state(true);
 	let permError = $state(false);
+	let permDenied = $state(false);
 
 	const selected = $derived(frames[selIdx] ?? null);
 
@@ -46,7 +47,10 @@
 			return;
 		}
 
-		const h = await getRollHandle(rollId, { request: true });
+		// Only query permission on mount — requestPermission() requires a user
+		// gesture (SecurityError otherwise). If not granted, show the Grant Access
+		// button which calls requestPermission() via a click handler.
+		const h = await getRollHandle(rollId, { request: false });
 		if (h) {
 			handle = h;
 		} else {
@@ -57,10 +61,25 @@
 
 	async function requestPermission() {
 		if (!rollId) return;
-		const h = await getRollHandle(rollId, { request: true });
-		if (h) {
-			handle = h;
-			permError = false;
+		permDenied = false;
+		try {
+			// Fetch the raw handle from IDB first, then call requestPermission()
+			// as the very next step so the browser user-gesture token is still live.
+			const rawHandle = await getHandle(rollId);
+			if (!rawHandle) {
+				permDenied = true;
+				return;
+			}
+			const result = await rawHandle.requestPermission({ mode: "read" });
+			if (result === "granted") {
+				handle = rawHandle;
+				permError = false;
+			} else {
+				permDenied = true;
+			}
+		} catch (err) {
+			console.error("requestPermission failed:", err);
+			permDenied = true;
 		}
 	}
 
@@ -175,11 +194,10 @@
 		<div
 			class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l"
 		>
-			<div class="text-5xl opacity-30">🔒</div>
 			<h2 class="text-xl font-semibold text-content">
 				Permission required
 			</h2>
-			<p class="text-content-muted max-w-sm text-sm">
+			<p class="text-content-muted text-sm">
 				Roloc needs read access to
 				<strong class="text-content">{roll.label}</strong>'s image
 				directory.
@@ -191,6 +209,12 @@
 			>
 				Grant Access
 			</button>
+			{#if permDenied}
+				<p class="text-sm text-red-500 max-w-sm">
+					Permission was denied. You can try again or re-open the roll
+					from the library.
+				</p>
+			{/if}
 		</div>
 	{:else if frames.length === 0}
 		<div class="flex-1 flex items-center justify-center text-content-muted">
