@@ -225,7 +225,7 @@
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
 		<PaneGroup direction="horizontal" class="flex-1 min-h-0">
 			<!-- Filmstrip grid pane -->
-			<Pane defaultSize={75} minSize={40} order={1}>
+			<Pane defaultSize={45} minSize={20} order={1}>
 				<div class="h-full overflow-y-auto p-l">
 					<ul
 						class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
@@ -244,28 +244,30 @@
 				</div>
 			</Pane>
 
-		<!-- Metadata panel pane -->
-		{#if selected}
-			<PaneResizer
-				class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
-			/>
-			<Pane defaultSize={35} minSize={20} maxSize={60} order={2}>
-				<FrameMetaPanel
-					frame={selected}
-					dirHandle={handle}
-					onUpdate={onFrameUpdated}
+			<!-- Metadata panel pane -->
+			{#if selected}
+				<PaneResizer
+					class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
 				/>
-			</Pane>
-		{/if}
+				<Pane defaultSize={55} minSize={20} order={2}>
+					<FrameMetaPanel
+						frame={selected}
+						dirHandle={handle}
+						onUpdate={onFrameUpdated}
+					/>
+				</Pane>
+			{/if}
 		</PaneGroup>
 
 		<!-- Keyboard shortcut hint bar -->
-		<KeyboardHintBar hints={[
-			{ keys: ["←", "→"], label: "navigate" },
-			{ keys: ["e"],      label: "edit" },
-			{ keys: ["0–5"],    label: "rate" },
-			{ keys: ["p"],      label: "pick" },
-			{ keys: ["x"],      label: "reject" },
-		]} />
+		<KeyboardHintBar
+			hints={[
+				{ keys: ["←", "→"], label: "navigate" },
+				{ keys: ["e"], label: "edit" },
+				{ keys: ["0–5"], label: "rate" },
+				{ keys: ["p"], label: "pick" },
+				{ keys: ["x"], label: "reject" },
+			]}
+		/>
 	{/if}
 </div>

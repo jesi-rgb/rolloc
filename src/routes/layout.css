@@ -28,8 +28,8 @@
 
 @theme {
 	/* ── Fonts ────────────────────────────────────────────────────────────── */
-	--font-sans: 'Output Sans 2 Beta';
-	--font-mono: 'Input Mono';
+	--font-sans: 'AT Name Sans Variable', 'Output Sans 2 Beta';
+	--font-mono: 'AT Name Mono Variable';
 
 	/* ── Color tokens — backed by CSS vars that flip per theme ───────────── */
 

@@ -67,27 +67,42 @@
 
 		let cancelled = false;
 
-		getFile(handle, name).then(async (file) => {
-			// Phase 1: show thumb immediately (almost always cached)
-			const thumbUrl = await getThumbURL(id, file);
-			if (cancelled) { URL.revokeObjectURL(thumbUrl); return; }
-			const oldUrl = untrack(() => previewUrl);
-			previewUrl = thumbUrl;
-			if (oldUrl) URL.revokeObjectURL(oldUrl);
+		getFile(handle, name)
+			.then(async (file) => {
+				// Phase 1: show thumb immediately (almost always cached)
+				const thumbUrl = await getThumbURL(id, file);
+				if (cancelled) {
+					URL.revokeObjectURL(thumbUrl);
+					return;
+				}
+				const oldUrl = untrack(() => previewUrl);
+				previewUrl = thumbUrl;
+				if (oldUrl) URL.revokeObjectURL(oldUrl);
 
-			// Phase 2: upgrade to full 1200px preview
-			const fullUrl = await getPreviewURL(id, file);
-			if (cancelled) { URL.revokeObjectURL(fullUrl); return; }
-			const prevThumbUrl = untrack(() => previewUrl);
-			previewUrl = fullUrl;
-			if (prevThumbUrl) URL.revokeObjectURL(prevThumbUrl);
-		}).catch((err) => {
-			console.error("FrameMetaPanel: failed to load preview", err);
-		}).finally(() => {
-			if (!cancelled) previewLoading = false;
-		});
+				// Phase 2: upgrade to full 1200px preview
+				const fullUrl = await getPreviewURL(id, file);
+				if (cancelled) {
+					URL.revokeObjectURL(fullUrl);
+					return;
+				}
+				const prevThumbUrl = untrack(() => previewUrl);
+				previewUrl = fullUrl;
+				if (prevThumbUrl)
+					URL.revokeObjectURL(prevThumbUrl);
+			})
+			.catch((err) => {
+				console.error(
+					"FrameMetaPanel: failed to load preview",
+					err,
+				);
+			})
+			.finally(() => {
+				if (!cancelled) previewLoading = false;
+			});
 
-		return () => { cancelled = true; };
+		return () => {
+			cancelled = true;
+		};
 	});
 
 	onDestroy(() => {
@@ -135,11 +150,13 @@
 </script>
 
 <aside
-	class="flex flex-col gap-base p-base border-l border-base-subtle bg-base
+	class="flex flex-col gap-base p-base border-base-subtle bg-base
               h-full w-full overflow-y-auto"
 >
 	<!-- Image preview -->
-	<div class="w-full rounded-lg overflow-hidden bg-base-muted aspect-[3/2] relative">
+	<div
+		class="w-full rounded-lg overflow-hidden bg-base-muted aspect-3/2 relative"
+	>
 		{#if previewUrl}
 			<img
 				src={previewUrl}
@@ -147,9 +164,13 @@
 				class="w-full h-full object-contain"
 			/>
 		{:else if previewLoading}
-			<div class="w-full h-full animate-pulse bg-base-subtle"></div>
+			<div
+				class="w-full h-full animate-pulse bg-base-subtle"
+			></div>
 		{:else if !dirHandle}
-			<div class="w-full h-full flex items-center justify-center text-xs text-content-subtle">
+			<div
+				class="w-full h-full flex items-center justify-center text-xs text-content-subtle"
+			>
 				No access
 			</div>
 		{/if}
@@ -162,7 +183,7 @@
 		>
 			Frame {frame.index}
 		</p>
-		<p class="text-xs font-mono truncate mt-0.5">
+		<p class="text-xs font-mono truncate mt-xs">
 			{frame.filename}
 		</p>
 	</div>
@@ -170,7 +191,8 @@
 	<!-- Rating -->
 	<div>
 		<p
-			class="text-xs text-content-muted font-medium uppercase tracking-wide mb-2"
+			class="text-xs text-content-muted font-medium uppercase
+			tracking-wide mb-xs"
 		>
 			Rating
 		</p>
@@ -201,7 +223,8 @@
 	<!-- Flags -->
 	<div>
 		<p
-			class="text-xs text-content-muted font-medium uppercase tracking-wide mb-2"
+			class="text-xs text-content-muted font-medium uppercase
+			tracking-wide mb-xs"
 		>
 			Flags
 		</p>
@@ -242,7 +265,8 @@
 	<!-- Notes -->
 	<div class="flex flex-col">
 		<p
-			class="text-xs text-content-muted font-medium uppercase tracking-wide mb-2"
+			class="text-xs text-content-muted font-medium uppercase
+			tracking-wide mb-xs"
 		>
 			Notes
 		</p>
