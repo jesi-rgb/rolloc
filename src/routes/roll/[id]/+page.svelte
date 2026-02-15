@@ -1,0 +1,222 @@
+<script lang="ts">
+	/**
+	 * Roll detail page — filmstrip grid + metadata panel.
+	 *
+	 * Keyboard shortcuts:
+	 *   ← / → (or j / k)   — prev / next frame
+	 *   0–5                 — set rating on selected frame
+	 *   p                   — toggle pick flag
+	 *   x                   — toggle reject flag
+	 */
+	import { onMount } from "svelte";
+	import { page } from "$app/state";
+	import { getRoll, getRollHandle } from "$lib/db/rolls";
+	import { getFrames, putFrame } from "$lib/db/idb";
+	import type { Roll, Frame, FrameFlag } from "$lib/types";
+	import FrameThumb from "$lib/components/FrameThumb.svelte";
+	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
+	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
+
+	// $page.params.id is typed string | undefined in SvelteKit; guard below
+	const rollId = $derived(page.params.id ?? "");
+
+	let roll = $state<Roll | null>(null);
+	let frames = $state<Frame[]>([]);
+	let handle = $state<FileSystemDirectoryHandle | null>(null);
+	let selIdx = $state(0);
+	let loading = $state(true);
+	let permError = $state(false);
+
+	const selected = $derived(frames[selIdx] ?? null);
+
+	onMount(async () => {
+		if (!rollId) {
+			loading = false;
+			return;
+		}
+
+		const [r, f] = await Promise.all([getRoll(rollId), getFrames(rollId)]);
+		roll = r ?? null;
+		frames = f;
+
+		if (!roll) {
+			loading = false;
+			return;
+		}
+
+		const h = await getRollHandle(rollId, { request: true });
+		if (h) {
+			handle = h;
+		} else {
+			permError = true;
+		}
+		loading = false;
+	});
+
+	async function requestPermission() {
+		if (!rollId) return;
+		const h = await getRollHandle(rollId, { request: true });
+		if (h) {
+			handle = h;
+			permError = false;
+		}
+	}
+
+	function selectFrame(f: Frame) {
+		const idx = frames.findIndex((fr) => fr.id === f.id);
+		if (idx >= 0) selIdx = idx;
+	}
+
+	function onFrameUpdated(updated: Frame) {
+		frames = frames.map((f) => (f.id === updated.id ? updated : f));
+	}
+
+	// ─── Keyboard shortcuts ───────────────────────────────────────────────────
+
+	async function handleKeydown(e: KeyboardEvent) {
+		// Don't intercept when typing in an input or textarea
+		const tag = (e.target as HTMLElement | null)?.tagName;
+		if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+		switch (e.key) {
+			case "ArrowLeft":
+			case "k":
+				e.preventDefault();
+				selIdx = Math.max(0, selIdx - 1);
+				break;
+			case "ArrowRight":
+			case "j":
+				e.preventDefault();
+				selIdx = Math.min(frames.length - 1, selIdx + 1);
+				break;
+			default:
+				if (/^[0-5]$/.test(e.key) && selected) {
+					await setRating(selected, Number(e.key));
+				} else if (e.key === "p" && selected) {
+					await toggleFlag(selected, "pick");
+				} else if (e.key === "x" && selected) {
+					await toggleFlag(selected, "reject");
+				}
+		}
+	}
+
+	async function setRating(f: Frame, r: number) {
+		const updated: Frame = { ...$state.snapshot(f), rating: r };
+		await putFrame(updated);
+		onFrameUpdated(updated);
+	}
+
+	async function toggleFlag(f: Frame, flag: FrameFlag) {
+		const snap = $state.snapshot(f);
+		const hasIt = snap.flags.includes(flag);
+		const updated: Frame = {
+			...snap,
+			flags: hasIt
+				? snap.flags.filter((fl) => fl !== flag)
+				: [...snap.flags, flag],
+		};
+		await putFrame(updated);
+		onFrameUpdated(updated);
+	}
+</script>
+
+<svelte:head>
+	<title>{roll?.label ?? "Roll"} — Roloc</title>
+</svelte:head>
+
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="min-h-screen bg-base text-content flex flex-col">
+	<!-- Top bar -->
+	<header
+		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
+	>
+		<a
+			href="/"
+			class="text-content-muted hover:text-content transition text-sm"
+			>← Library</a
+		>
+		{#if roll}
+			<span class="font-semibold text-content">{roll.label}</span>
+			{#if roll.filmStock}
+				<span class="text-primary-muted/80 text-sm"
+					>{roll.filmStock}</span
+				>
+			{/if}
+			{#if roll.camera}
+				<span class="text-content-muted text-sm">{roll.camera}</span>
+			{/if}
+			<span class="text-xs text-content-subtle">
+				{frames.length} frame{frames.length !== 1 ? "s" : ""}
+			</span>
+		{/if}
+		<div class="ml-auto"><ThemeSwitcher /></div>
+	</header>
+
+	{#if loading}
+		<div class="flex-1 flex items-center justify-center text-content-muted">
+			Loading…
+		</div>
+	{:else if !roll}
+		<div class="flex-1 flex items-center justify-center text-content-muted">
+			Roll not found.
+		</div>
+	{:else if permError}
+		<!-- Permission request screen -->
+		<div
+			class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l"
+		>
+			<div class="text-5xl opacity-30">🔒</div>
+			<h2 class="text-xl font-semibold text-content">
+				Permission required
+			</h2>
+			<p class="text-content-muted max-w-sm text-sm">
+				Roloc needs read access to
+				<strong class="text-content">{roll.label}</strong>'s image
+				directory.
+			</p>
+			<button
+				onclick={requestPermission}
+				class="px-base py-sm rounded-lg bg-primary text-primary-content
+				       text-sm font-medium hover:bg-primary-muted transition"
+			>
+				Grant Access
+			</button>
+		</div>
+	{:else if frames.length === 0}
+		<div class="flex-1 flex items-center justify-center text-content-muted">
+			No frames found in this roll.
+		</div>
+	{:else}
+		<!-- Main layout: scrollable grid + sticky metadata panel -->
+		<div class="flex flex-1 min-h-0">
+			<!-- Filmstrip grid -->
+			<div class="flex-1 overflow-y-auto p-l">
+				<p class="text-xs text-content-subtle mb-base select-none">
+					← → to navigate &nbsp;·&nbsp; 0–5 to rate &nbsp;·&nbsp; p =
+					pick &nbsp;·&nbsp; x = reject
+				</p>
+
+				<ul
+					class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
+				>
+					{#each frames as frame, i (frame.id)}
+						<li>
+							<FrameThumb
+								{frame}
+								dirHandle={handle!}
+								selected={i === selIdx}
+								onSelect={selectFrame}
+							/>
+						</li>
+					{/each}
+				</ul>
+			</div>
+
+			<!-- Metadata panel -->
+			{#if selected}
+				<FrameMetaPanel frame={selected} onUpdate={onFrameUpdated} />
+			{/if}
+		</div>
+	{/if}
+</div>

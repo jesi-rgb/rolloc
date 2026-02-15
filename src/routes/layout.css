@@ -1,0 +1,265 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/typography';
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   ROLOC DESIGN TOKENS
+   Tailwind v4 @theme block — all tokens become utility classes automatically.
+   Colors are semantic aliases backed by CSS custom properties that flip
+   per theme (light / dark). No dark: prefix needed in markup.
+
+   Color families:
+     base      — page backgrounds, panels, surfaces
+     primary   — amber; CTAs, selection, brand
+     accent    — sky/teal; edit-mode UI, informational
+     danger    — red; destructive actions, reject flag
+     success   — green; pick flag, positive states
+
+   Each color family exposes:
+     bg-{family}          — main surface
+     bg-{family}-muted    — secondary / elevated surface
+     bg-{family}-subtle   — borders, dividers, wells
+     text-{family}-content — readable text on that surface
+
+   Neutral text (on base surfaces):
+     text-content         — primary text
+     text-content-muted   — secondary / supporting
+     text-content-subtle  — placeholder, disabled, captions
+───────────────────────────────────────────────────────────────────────────── */
+
+@theme {
+	/* ── Fonts ────────────────────────────────────────────────────────────── */
+	--font-sans: 'Output Sans 2 Beta';
+	--font-mono: 'Input Mono';
+
+	/* ── Color tokens — backed by CSS vars that flip per theme ───────────── */
+
+	/* Base (neutral backgrounds) */
+	--color-base: var(--base);
+	--color-base-muted: var(--base-muted);
+	--color-base-subtle: var(--base-subtle);
+
+	/* Content (text on base surfaces) */
+	--color-content: var(--content);
+	--color-content-muted: var(--content-muted);
+	--color-content-subtle: var(--content-subtle);
+
+	/* Primary — amber */
+	--color-primary: var(--primary);
+	--color-primary-muted: var(--primary-muted);
+	--color-primary-subtle: var(--primary-subtle);
+	--color-primary-content: var(--primary-content);
+
+	/* Accent — sky */
+	--color-accent: var(--accent);
+	--color-accent-muted: var(--accent-muted);
+	--color-accent-subtle: var(--accent-subtle);
+	--color-accent-content: var(--accent-content);
+
+	/* Danger — red */
+	--color-danger: var(--danger);
+	--color-danger-muted: var(--danger-muted);
+	--color-danger-subtle: var(--danger-subtle);
+	--color-danger-content: var(--danger-content);
+
+	/* Success — green */
+	--color-success: var(--success);
+	--color-success-muted: var(--success-muted);
+	--color-success-subtle: var(--success-subtle);
+	--color-success-content: var(--success-content);
+
+	/* ── Spacing scale ───────────────────────────────────────────────────── */
+	/* Used for padding, gap, margin. Complements Tailwind's numeric scale.  */
+	--spacing-xs: 0.25rem;
+	/* 4px  */
+	--spacing-sm: 0.5rem;
+	/* 8px  */
+	--spacing-base: 1rem;
+	/* 16px */
+	--spacing-l: 1.5rem;
+	/* 24px */
+	--spacing-xl: 2rem;
+	/* 32px */
+	--spacing-2xl: 3rem;
+	/* 48px */
+
+	/* ── Typography scale ────────────────────────────────────────────────── */
+	--text-xs: 0.6875rem;
+	/* 11px */
+	--text-sm: 0.8125rem;
+	/* 13px */
+	--text-base: 0.9375rem;
+	/* 15px */
+	--text-l: 1.0625rem;
+	/* 17px */
+	--text-xl: 1.25rem;
+	/* 20px */
+	--text-2xl: 1.5rem;
+	/* 24px */
+
+	--font-weight-normal: 400;
+	--font-weight-medium: 500;
+	--font-weight-semibold: 600;
+	--font-weight-bold: 700;
+
+	--tracking-tight: -0.02em;
+	--tracking-normal: 0em;
+	--tracking-wide: 0.06em;
+	--tracking-widest: 0.12em;
+
+	/* ── Border radius scale ─────────────────────────────────────────────── */
+	--radius-sm: 0.25rem;
+	/* 4px  */
+	--radius-base: 0.5rem;
+	/* 8px  */
+	--radius-lg: 0.75rem;
+	/* 12px */
+	--radius-xl: 1rem;
+	/* 16px */
+	--radius-full: 9999px;
+
+	/* ── Shadow / elevation ──────────────────────────────────────────────── */
+	--shadow-sm: 0 1px 2px 0 oklch(0% 0 0 / 0.3);
+	--shadow-base: 0 4px 12px -2px oklch(0% 0 0 / 0.4), 0 1px 3px -1px oklch(0% 0 0 / 0.3);
+	--shadow-lg: 0 16px 40px -4px oklch(0% 0 0 / 0.5), 0 4px 12px -2px oklch(0% 0 0 / 0.35);
+
+	/* ── Icon size scale ─────────────────────────────────────────────────── */
+	--icon-sm: 1rem;
+	/* 16px */
+	--icon-base: 1.25rem;
+	/* 20px */
+	--icon-lg: 1.5rem;
+	/* 24px */
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   LIGHT THEME
+   Default values; applied when no .dark class is on <html>.
+───────────────────────────────────────────────────────────────────────────── */
+:root {
+	/* Base surfaces — light end of zinc */
+	--base: oklch(97.5% 0.002 264);
+	/* ≈ zinc-50  */
+	--base-muted: oklch(94% 0.004 264);
+	/* ≈ zinc-100 */
+	--base-subtle: oklch(88% 0.006 264);
+	/* ≈ zinc-200 */
+
+	/* Content — dark end of zinc */
+	--content: oklch(20% 0.006 264);
+	/* ≈ zinc-900 */
+	--content-muted: oklch(45% 0.006 264);
+	/* ≈ zinc-500 */
+	--content-subtle: oklch(62% 0.006 264);
+	/* ≈ zinc-400 */
+
+	/* Primary — amber (same in both themes; it's already vibrant) */
+	--primary: oklch(76% 0.165 75);
+	/* ≈ amber-500 */
+	--primary-muted: oklch(82% 0.155 78);
+	/* ≈ amber-400 */
+	--primary-subtle: oklch(95% 0.06 88);
+	/* ≈ amber-100 */
+	--primary-content: oklch(18% 0.02 75);
+	/* near-black on amber */
+
+	/* Accent — sky */
+	--accent: oklch(64% 0.16 232);
+	/* ≈ sky-500  */
+	--accent-muted: oklch(72% 0.15 230);
+	/* ≈ sky-400  */
+	--accent-subtle: oklch(94% 0.05 225);
+	/* ≈ sky-100  */
+	--accent-content: oklch(99% 0 0);
+	/* white      */
+
+	/* Danger — red */
+	--danger: oklch(60% 0.22 25);
+	/* ≈ red-500  */
+	--danger-muted: oklch(68% 0.20 25);
+	/* ≈ red-400  */
+	--danger-subtle: oklch(94% 0.06 25);
+	/* ≈ red-100  */
+	--danger-content: oklch(99% 0 0);
+	/* white      */
+
+	/* Success — green */
+	--success: oklch(63% 0.20 145);
+	/* ≈ green-500 */
+	--success-muted: oklch(70% 0.18 148);
+	/* ≈ green-400 */
+	--success-subtle: oklch(94% 0.05 145);
+	/* ≈ green-100 */
+	--success-content: oklch(99% 0 0);
+	/* white       */
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DARK THEME
+   Applied when <html class="dark"> (default for Roloc).
+───────────────────────────────────────────────────────────────────────────── */
+:root.dark {
+	/* Base surfaces — dark end of zinc */
+	--base: oklch(11% 0.005 264);
+	/* ≈ zinc-950 */
+	--base-muted: oklch(16% 0.006 264);
+	/* ≈ zinc-900 */
+	--base-subtle: oklch(22% 0.008 264);
+	/* ≈ zinc-800 */
+
+	/* Content — light end of zinc */
+	--content: oklch(93% 0.004 264);
+	/* ≈ zinc-100 */
+	--content-muted: oklch(56% 0.006 264);
+	/* ≈ zinc-400 */
+	--content-subtle: oklch(38% 0.006 264);
+	/* ≈ zinc-600 */
+
+	/* Primary — amber (slightly shifted for dark-bg contrast) */
+	--primary: oklch(76% 0.165 75);
+	/* ≈ amber-500 */
+	--primary-muted: oklch(82% 0.155 78);
+	/* ≈ amber-400 */
+	--primary-subtle: oklch(20% 0.06 75);
+	/* ≈ amber-950 */
+	--primary-content: oklch(11% 0.01 75);
+	/* near-black on amber */
+
+	/* Accent — sky (lighter in dark for readability) */
+	--accent: oklch(72% 0.15 230);
+	/* ≈ sky-400  */
+	--accent-muted: oklch(79% 0.13 228);
+	/* ≈ sky-300  */
+	--accent-subtle: oklch(16% 0.05 232);
+	/* ≈ sky-950  */
+	--accent-content: oklch(11% 0.01 232);
+	/* near-black */
+
+	/* Danger — red */
+	--danger: oklch(68% 0.20 25);
+	/* ≈ red-400  */
+	--danger-muted: oklch(75% 0.18 25);
+	/* ≈ red-300  */
+	--danger-subtle: oklch(18% 0.07 25);
+	/* ≈ red-950  */
+	--danger-content: oklch(11% 0.01 25);
+	/* near-black */
+
+	/* Success — green */
+	--success: oklch(70% 0.18 148);
+	/* ≈ green-400 */
+	--success-muted: oklch(76% 0.16 150);
+	/* ≈ green-300 */
+	--success-subtle: oklch(16% 0.05 145);
+	/* ≈ green-950 */
+	--success-content: oklch(11% 0.01 145);
+	/* near-black  */
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   BASE STYLES
+───────────────────────────────────────────────────────────────────────────── */
+html,
+body {
+	background-color: var(--base);
+	color: var(--content);
+}
