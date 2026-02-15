@@ -55,6 +55,8 @@ export interface RollEditParams {
 	baseToneCurve: CurvePoints;
 	/** Default per-channel RGB curves [R, G, B]. */
 	baseRGBCurves: [CurvePoints, CurvePoints, CurvePoints];
+	/** Whether to invert the image (true = film negative; false = positive/already-scanned). */
+	invert: boolean;
 }
 
 /**
@@ -85,6 +87,7 @@ export interface EffectiveEdit {
 	whiteBalance: WhiteBalance;
 	toneCurve: CurvePoints;
 	rgbCurves: [CurvePoints, CurvePoints, CurvePoints];
+	invert: boolean;
 }
 
 // ─── Domain entities ──────────────────────────────────────────────────────────
@@ -138,6 +141,7 @@ export const DEFAULT_ROLL_EDIT: RollEditParams = {
 	lightSourceTemp: 5500,
 	baseToneCurve: identityCurve,
 	baseRGBCurves: [identityCurve, identityCurve, identityCurve],
+	invert: false,
 };
 
 export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
@@ -166,5 +170,6 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		whiteBalance:         f.whiteBalance         ?? DEFAULT_WHITE_BALANCE,
 		toneCurve:            f.toneCurve            ?? r.baseToneCurve,
 		rgbCurves:            f.rgbCurves            ?? r.baseRGBCurves,
+		invert:               r.invert,
 	};
 }

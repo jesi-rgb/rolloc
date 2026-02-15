@@ -9,10 +9,12 @@
 	 *   x                   — toggle reject flag
 	 */
 	import { onMount } from "svelte";
+	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { getRoll, getRollHandle } from "$lib/db/rolls";
 	import { getFrames, putFrame } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag } from "$lib/types";
+	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
@@ -89,6 +91,13 @@
 				e.preventDefault();
 				selIdx = Math.min(frames.length - 1, selIdx + 1);
 				break;
+			case "e":
+			case "Enter":
+				if (selected) {
+					e.preventDefault();
+					await goto(`/roll/${rollId}/frame/${selected.id}`);
+				}
+				break;
 			default:
 				if (/^[0-5]$/.test(e.key) && selected) {
 					await setRating(selected, Number(e.key));
@@ -126,7 +135,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="min-h-screen bg-base text-content flex flex-col">
+<div class="h-screen bg-base text-content flex flex-col">
 	<!-- Top bar -->
 	<header
 		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
@@ -188,35 +197,104 @@
 			No frames found in this roll.
 		</div>
 	{:else}
-		<!-- Main layout: scrollable grid + sticky metadata panel -->
-		<div class="flex flex-1 min-h-0">
-			<!-- Filmstrip grid -->
-			<div class="flex-1 overflow-y-auto p-l">
-				<p class="text-xs text-content-subtle mb-base select-none">
-					← → to navigate &nbsp;·&nbsp; 0–5 to rate &nbsp;·&nbsp; p =
-					pick &nbsp;·&nbsp; x = reject
-				</p>
+		<!-- Main layout: resizable filmstrip grid + metadata panel -->
+		<PaneGroup direction="horizontal" class="flex-1 min-h-0">
+			<!-- Filmstrip grid pane -->
+			<Pane defaultSize={75} minSize={40} order={1}>
+				<div class="h-full overflow-y-auto p-l">
+					<ul
+						class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
+					>
+						{#each frames as frame, i (frame.id)}
+							<li>
+								<FrameThumb
+									{frame}
+									dirHandle={handle!}
+									selected={i === selIdx}
+									onSelect={selectFrame}
+								/>
+							</li>
+						{/each}
+					</ul>
+				</div>
+			</Pane>
 
-				<ul
-					class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
-				>
-					{#each frames as frame, i (frame.id)}
-						<li>
-							<FrameThumb
-								{frame}
-								dirHandle={handle!}
-								selected={i === selIdx}
-								onSelect={selectFrame}
-							/>
-						</li>
-					{/each}
-				</ul>
-			</div>
-
-			<!-- Metadata panel -->
+			<!-- Metadata panel pane -->
 			{#if selected}
-				<FrameMetaPanel frame={selected} onUpdate={onFrameUpdated} />
+				<PaneResizer
+					class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
+				/>
+				<Pane defaultSize={25} minSize={15} maxSize={50} order={2}>
+					<FrameMetaPanel
+						frame={selected}
+						onUpdate={onFrameUpdated}
+					/>
+				</Pane>
 			{/if}
-		</div>
+		</PaneGroup>
+
+		<!-- Keyboard shortcut hint bar -->
+		<footer
+			class="flex gap-l px-l py-xs
+			       border-t border-base-subtle bg-base-muted select-none"
+		>
+			<span class="text-xs text-content-subtle flex items-center gap-xs">
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">←</kbd
+				>
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">→</kbd
+				>
+				navigate
+			</span>
+			<span class="text-xs text-content-subtle flex items-center gap-xs">
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">e</kbd
+				>
+				edit
+			</span>
+			<span class="text-xs text-content-subtle flex items-center gap-xs">
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">0–5</kbd
+				>
+				rate
+			</span>
+			<span class="text-xs text-content-subtle flex items-center gap-xs">
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">p</kbd
+				>
+				pick
+			</span>
+			<span class="text-xs text-content-subtle flex items-center gap-xs">
+				<kbd
+					class="inline-flex items-center justify-center font-mono text-xs
+				            px-xs py-xs min-w-[1.4rem]
+				            rounded border border-base-subtle bg-base
+				            shadow-[0_2px_0_0_var(--color-base-subtle)]
+				            text-content-muted leading-none">x</kbd
+				>
+				reject
+			</span>
+		</footer>
 	{/if}
 </div>

@@ -76,7 +76,7 @@
 
 <aside
 	class="flex flex-col gap-base p-base border-l border-base-subtle bg-base
-              min-w-[220px] max-w-xs w-64 shrink-0"
+              h-full w-full overflow-y-auto"
 >
 	<!-- Header -->
 	<div>

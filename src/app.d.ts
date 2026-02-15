@@ -10,4 +10,10 @@ declare global {
 	}
 }
 
+// Vite ?raw imports return the file content as a string
+declare module '*.wgsl?raw' {
+	const source: string;
+	export default source;
+}
+
 export {};
