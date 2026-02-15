@@ -22,6 +22,7 @@
 	import type { Roll, Frame, FrameEditOverrides, RollEditParams, CurvePoints, WhiteBalance } from '$lib/types';
 	import WhiteBalanceControls from '$lib/components/WhiteBalanceControls.svelte';
 	import CurvesEditor from '$lib/components/CurvesEditor.svelte';
+	import KeyboardHintBar from '$lib/components/KeyboardHintBar.svelte';
 
 	// ─── Route params ──────────────────────────────────────────────────────────
 
@@ -402,28 +403,8 @@
 	</div>
 
 	<!-- ── Keyboard hint bar ──────────────────────────────────────────────── -->
-	<footer class="shrink-0 flex items-center justify-center gap-l px-l py-xs
-	               border-t border-base-subtle bg-base-muted select-none">
-		<span class="text-xs text-content-subtle flex items-center gap-xs">
-			<kbd class="inline-flex items-center justify-center font-mono text-xs
-			            px-[5px] py-[2px] min-w-[1.4rem]
-			            rounded border border-base-subtle bg-base
-			            shadow-[0_2px_0_0_var(--color-base-subtle)]
-			            text-content-muted leading-none">←</kbd>
-			<kbd class="inline-flex items-center justify-center font-mono text-xs
-			            px-[5px] py-[2px] min-w-[1.4rem]
-			            rounded border border-base-subtle bg-base
-			            shadow-[0_2px_0_0_var(--color-base-subtle)]
-			            text-content-muted leading-none">→</kbd>
-			navigate frames
-		</span>
-		<span class="text-xs text-content-subtle flex items-center gap-xs">
-			<kbd class="inline-flex items-center justify-center font-mono text-xs
-			            px-[5px] py-[2px] min-w-[1.4rem]
-			            rounded border border-base-subtle bg-base
-			            shadow-[0_2px_0_0_var(--color-base-subtle)]
-			            text-content-muted leading-none">Esc</kbd>
-			back to roll
-		</span>
-	</footer>
+	<KeyboardHintBar hints={[
+		{ keys: ["←", "→"], label: "navigate frames" },
+		{ keys: ["Esc"],    label: "back to roll" },
+	]} />
 </div>

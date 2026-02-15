@@ -1,23 +1,26 @@
 <script lang="ts">
 	/**
-	 * Frame metadata panel — rating (0–5 stars), pick/reject flags, notes.
+	 * Frame metadata panel — image preview, rating (0–5 stars), pick/reject flags, notes.
 	 * Emits updates via onUpdate; parent is responsible for persisting to IDB.
 	 */
-	import { untrack } from "svelte";
+	import { untrack, onDestroy } from "svelte";
 	import {
 		StarIcon,
 		ThumbsUpIcon,
 		ThumbsDownIcon,
 	} from "phosphor-svelte";
 	import { putFrame } from "$lib/db/idb";
+	import { getFile } from "$lib/fs/directory";
+	import { getThumbURL, getPreviewURL } from "$lib/image/thumbgen";
 	import type { Frame, FrameFlag } from "$lib/types";
 
 	interface Props {
 		frame: Frame;
+		dirHandle?: FileSystemDirectoryHandle | null;
 		onUpdate?: (updated: Frame) => void;
 	}
 
-	let { frame, onUpdate }: Props = $props();
+	let { frame, dirHandle = null, onUpdate }: Props = $props();
 
 	// Local editable copies — initialised without tracking the prop
 	// so Svelte doesn't warn about capturing the initial value only.
@@ -27,11 +30,68 @@
 	let saving = $state(false);
 	let notesTimeout: ReturnType<typeof setTimeout> | null = null;
 
+	// Image preview
+	let previewUrl = $state<string | null>(null);
+	let previewLoading = $state(false);
+
 	// Re-sync local copies whenever the selected frame changes
 	$effect(() => {
 		rating = frame.rating;
 		notes = frame.notes;
 		flags = [...frame.flags];
+	});
+
+	// Stable primitives derived from the frame — these only change value when
+	// a genuinely different frame is selected, not when its metadata is updated.
+	const frameId = $derived(frame.id);
+	const filename = $derived(frame.filename);
+
+	// Load preview only when frame identity (id) or dirHandle changes.
+	// We derive stable primitives above so that rating/flag/notes updates on
+	// the same frame (which swap in a new proxy object) don't retrigger this.
+	$effect(() => {
+		const id = frameId;
+		const name = filename;
+		const handle = dirHandle;
+
+		// Revoke any previous URL
+		const prevUrl = untrack(() => previewUrl);
+		if (prevUrl) {
+			URL.revokeObjectURL(prevUrl);
+			previewUrl = null;
+		}
+
+		if (!handle) return;
+
+		previewLoading = true;
+
+		let cancelled = false;
+
+		getFile(handle, name).then(async (file) => {
+			// Phase 1: show thumb immediately (almost always cached)
+			const thumbUrl = await getThumbURL(id, file);
+			if (cancelled) { URL.revokeObjectURL(thumbUrl); return; }
+			const oldUrl = untrack(() => previewUrl);
+			previewUrl = thumbUrl;
+			if (oldUrl) URL.revokeObjectURL(oldUrl);
+
+			// Phase 2: upgrade to full 1200px preview
+			const fullUrl = await getPreviewURL(id, file);
+			if (cancelled) { URL.revokeObjectURL(fullUrl); return; }
+			const prevThumbUrl = untrack(() => previewUrl);
+			previewUrl = fullUrl;
+			if (prevThumbUrl) URL.revokeObjectURL(prevThumbUrl);
+		}).catch((err) => {
+			console.error("FrameMetaPanel: failed to load preview", err);
+		}).finally(() => {
+			if (!cancelled) previewLoading = false;
+		});
+
+		return () => { cancelled = true; };
+	});
+
+	onDestroy(() => {
+		if (previewUrl) URL.revokeObjectURL(previewUrl);
 	});
 
 	function hasFlag(f: FrameFlag): boolean {
@@ -78,6 +138,23 @@
 	class="flex flex-col gap-base p-base border-l border-base-subtle bg-base
               h-full w-full overflow-y-auto"
 >
+	<!-- Image preview -->
+	<div class="w-full rounded-lg overflow-hidden bg-base-muted aspect-[3/2] relative">
+		{#if previewUrl}
+			<img
+				src={previewUrl}
+				alt="Frame {frame.index}"
+				class="w-full h-full object-contain"
+			/>
+		{:else if previewLoading}
+			<div class="w-full h-full animate-pulse bg-base-subtle"></div>
+		{:else if !dirHandle}
+			<div class="w-full h-full flex items-center justify-center text-xs text-content-subtle">
+				No access
+			</div>
+		{/if}
+	</div>
+
 	<!-- Header -->
 	<div>
 		<p

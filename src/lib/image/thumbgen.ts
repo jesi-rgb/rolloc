@@ -94,3 +94,13 @@ export async function getThumbURL(frameId: string, file: File): Promise<string> 
 	const blob = await ensureThumb(frameId, file);
 	return URL.createObjectURL(blob);
 }
+
+/**
+ * Returns an object URL for the frame's full preview (1200px long edge).
+ * Generates the preview if not yet cached (requires the source File).
+ * Caller must call URL.revokeObjectURL() when done.
+ */
+export async function getPreviewURL(frameId: string, file: File): Promise<string> {
+	const blob = await ensurePreview(frameId, file);
+	return URL.createObjectURL(blob);
+}

@@ -18,6 +18,7 @@
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
+	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
 	// $page.params.id is typed string | undefined in SvelteKit; guard below
 	const rollId = $derived(page.params.id ?? "");
@@ -243,82 +244,28 @@
 				</div>
 			</Pane>
 
-			<!-- Metadata panel pane -->
-			{#if selected}
-				<PaneResizer
-					class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
+		<!-- Metadata panel pane -->
+		{#if selected}
+			<PaneResizer
+				class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
+			/>
+			<Pane defaultSize={35} minSize={20} maxSize={60} order={2}>
+				<FrameMetaPanel
+					frame={selected}
+					dirHandle={handle}
+					onUpdate={onFrameUpdated}
 				/>
-				<Pane defaultSize={25} minSize={15} maxSize={50} order={2}>
-					<FrameMetaPanel
-						frame={selected}
-						onUpdate={onFrameUpdated}
-					/>
-				</Pane>
-			{/if}
+			</Pane>
+		{/if}
 		</PaneGroup>
 
 		<!-- Keyboard shortcut hint bar -->
-		<footer
-			class="flex gap-l px-l py-xs
-			       border-t border-base-subtle bg-base-muted select-none"
-		>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">←</kbd
-				>
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">→</kbd
-				>
-				navigate
-			</span>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">e</kbd
-				>
-				edit
-			</span>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">0–5</kbd
-				>
-				rate
-			</span>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">p</kbd
-				>
-				pick
-			</span>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd
-					class="inline-flex items-center justify-center font-mono text-xs
-				            px-xs py-xs min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">x</kbd
-				>
-				reject
-			</span>
-		</footer>
+		<KeyboardHintBar hints={[
+			{ keys: ["←", "→"], label: "navigate" },
+			{ keys: ["e"],      label: "edit" },
+			{ keys: ["0–5"],    label: "rate" },
+			{ keys: ["p"],      label: "pick" },
+			{ keys: ["x"],      label: "reject" },
+		]} />
 	{/if}
 </div>
