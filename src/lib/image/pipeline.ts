@@ -213,7 +213,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			sourceTexture?.destroy();
 			sourceTexture = device.createTexture({
 				size: [w, h],
-				format: 'rgba8unorm-srgb',
+				format: 'rgba8unorm',
 				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
 			});
 			device.queue.copyExternalImageToTexture(

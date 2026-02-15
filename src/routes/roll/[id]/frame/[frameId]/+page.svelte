@@ -307,59 +307,60 @@
 		</div>
 	</header>
 
-	<!-- ── Loading / error states ───────────────────────────────────────────── -->
-	{#if loading}
-		<div class="flex-1 flex items-center justify-center text-content-muted">
-			Loading…
+	<!-- ── Main editor layout (always mounted so canvas persists) ──────────── -->
+	<div class="flex-1 min-h-0 flex overflow-hidden relative">
+
+		<!-- Canvas / preview area — always in DOM so the pipeline stays alive -->
+		<div class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative">
+			<canvas
+				bind:this={canvasEl}
+				class="max-w-full max-h-full object-contain rounded shadow-lg"
+				style="display: block;"
+			></canvas>
+
+			<!-- Loading overlay -->
+			{#if loading}
+				<div class="absolute inset-0 flex items-center justify-center bg-base-muted text-content-muted">
+					Loading…
+				</div>
+			{/if}
+
+			<!-- GPU error overlay -->
+			{#if gpuError}
+				<div class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted">
+					<div class="text-5xl opacity-30">⚠</div>
+					<h2 class="text-xl font-semibold text-content">WebGPU unavailable</h2>
+					<p class="text-content-muted max-w-sm text-sm">{gpuError}</p>
+					<a href="/roll/{rollId}" class="text-sm text-primary hover:underline">← Back to roll</a>
+				</div>
+			{/if}
+
+			<!-- Frame not found overlay -->
+			{#if !loading && !gpuError && (!roll || !frame)}
+				<div class="absolute inset-0 flex items-center justify-center bg-base-muted text-content-muted">
+					Frame not found.
+				</div>
+			{/if}
+
+			<!-- Render error overlay -->
+			{#if renderError}
+				<div class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted">
+					<div class="text-5xl opacity-30">⚠</div>
+					<h2 class="text-xl font-semibold text-content">Preview unavailable</h2>
+					<p class="text-content-muted max-w-sm text-sm">{renderError}</p>
+					<a href="/roll/{rollId}" class="text-sm text-primary hover:underline">← Back to roll</a>
+				</div>
+			{/if}
 		</div>
 
-	{:else if gpuError}
-		<div class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l">
-			<div class="text-5xl opacity-30">⚠</div>
-			<h2 class="text-xl font-semibold text-content">WebGPU unavailable</h2>
-			<p class="text-content-muted max-w-sm text-sm">{gpuError}</p>
-			<a
-				href="/roll/{rollId}"
-				class="text-sm text-primary hover:underline"
-			>← Back to roll</a>
-		</div>
+		<!-- Edit panel sidebar -->
+		<aside
+			class="w-72 shrink-0 border-l border-base-subtle bg-base
+			       overflow-y-auto flex flex-col"
+		>
+			<div class="flex flex-col gap-l p-l">
 
-	{:else if !roll || !frame}
-		<div class="flex-1 flex items-center justify-center text-content-muted">
-			Frame not found.
-		</div>
-
-	{:else if renderError}
-		<div class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l">
-			<div class="text-5xl opacity-30">⚠</div>
-			<h2 class="text-xl font-semibold text-content">Preview unavailable</h2>
-			<p class="text-content-muted max-w-sm text-sm">{renderError}</p>
-			<a
-				href="/roll/{rollId}"
-				class="text-sm text-primary hover:underline"
-			>← Back to roll</a>
-		</div>
-
-	{:else}
-		<!-- ── Main editor layout ─────────────────────────────────────────────── -->
-		<div class="flex-1 min-h-0 flex overflow-hidden">
-
-			<!-- Canvas / preview area -->
-			<div class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base">
-				<canvas
-					bind:this={canvasEl}
-					class="max-w-full max-h-full object-contain rounded shadow-lg"
-					style="display: block;"
-				></canvas>
-			</div>
-
-			<!-- Edit panel sidebar -->
-			<aside
-				class="w-72 shrink-0 border-l border-base-subtle bg-base
-				       overflow-y-auto flex flex-col"
-			>
-				<div class="flex flex-col gap-l p-l">
-
+				{#if roll && frame}
 					<!-- Negative inversion toggle -->
 					<section>
 						<label class="flex items-center gap-sm cursor-pointer">
@@ -394,34 +395,35 @@
 						</h3>
 						<p class="text-xs text-content-muted font-mono break-all">{frame.filename}</p>
 					</section>
-				</div>
-			</aside>
-		</div>
+				{/if}
 
-		<!-- ── Keyboard hint bar ──────────────────────────────────────────────── -->
-		<footer class="shrink-0 flex items-center justify-center gap-l px-l py-xs
-		               border-t border-base-subtle bg-base-muted select-none">
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd class="inline-flex items-center justify-center font-mono text-xs
-				            px-[5px] py-[2px] min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">←</kbd>
-				<kbd class="inline-flex items-center justify-center font-mono text-xs
-				            px-[5px] py-[2px] min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">→</kbd>
-				navigate frames
-			</span>
-			<span class="text-xs text-content-subtle flex items-center gap-xs">
-				<kbd class="inline-flex items-center justify-center font-mono text-xs
-				            px-[5px] py-[2px] min-w-[1.4rem]
-				            rounded border border-base-subtle bg-base
-				            shadow-[0_2px_0_0_var(--color-base-subtle)]
-				            text-content-muted leading-none">Esc</kbd>
-				back to roll
-			</span>
-		</footer>
-	{/if}
+			</div>
+		</aside>
+	</div>
+
+	<!-- ── Keyboard hint bar ──────────────────────────────────────────────── -->
+	<footer class="shrink-0 flex items-center justify-center gap-l px-l py-xs
+	               border-t border-base-subtle bg-base-muted select-none">
+		<span class="text-xs text-content-subtle flex items-center gap-xs">
+			<kbd class="inline-flex items-center justify-center font-mono text-xs
+			            px-[5px] py-[2px] min-w-[1.4rem]
+			            rounded border border-base-subtle bg-base
+			            shadow-[0_2px_0_0_var(--color-base-subtle)]
+			            text-content-muted leading-none">←</kbd>
+			<kbd class="inline-flex items-center justify-center font-mono text-xs
+			            px-[5px] py-[2px] min-w-[1.4rem]
+			            rounded border border-base-subtle bg-base
+			            shadow-[0_2px_0_0_var(--color-base-subtle)]
+			            text-content-muted leading-none">→</kbd>
+			navigate frames
+		</span>
+		<span class="text-xs text-content-subtle flex items-center gap-xs">
+			<kbd class="inline-flex items-center justify-center font-mono text-xs
+			            px-[5px] py-[2px] min-w-[1.4rem]
+			            rounded border border-base-subtle bg-base
+			            shadow-[0_2px_0_0_var(--color-base-subtle)]
+			            text-content-muted leading-none">Esc</kbd>
+			back to roll
+		</span>
+	</footer>
 </div>
