@@ -119,6 +119,28 @@ export interface Frame {
 	frameEdit: FrameEditOverrides;
 }
 
+// ─── Library (image browsing mode) ────────────────────────────────────────────
+
+export interface Library {
+	id: string;
+	createdAt: number; // unix ms
+	label: string;
+	notes: string;
+}
+
+export interface LibraryImage {
+	id: string;
+	libraryId: string;
+	/** Filename only — directory comes from the Library's stored handle. */
+	filename: string;
+	/** 0-based index within the library. */
+	index: number;
+	rating: number; // 0–5
+	notes: string;
+	/** Unix ms, set when the image is added to the library. */
+	createdAt: number;
+}
+
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
 const identityCurve: CurvePoints = {

@@ -256,6 +256,42 @@
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   FUJIFILM ICON FONTS
+   Icon fonts for film simulation icons. Character mapping in film-sim-icons.ts
+───────────────────────────────────────────────────────────────────────────── */
+@font-face {
+	font-family: 'fficn30';
+	src: url('/fonts/fficn30.woff2') format('woff2');
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'fficn32';
+	src: url('/fonts/fficn32.woff2') format('woff2');
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'fficn33';
+	src: url('/fonts/fficn33.woff2') format('woff2');
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'fficn62';
+	src: url('/fonts/fficn62.woff2') format('woff2');
+	font-weight: normal;
+	font-style: normal;
+	font-display: swap;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    BASE STYLES
 ───────────────────────────────────────────────────────────────────────────── */
 html,

@@ -2,21 +2,25 @@
  * IndexedDB wrapper for Roloc.
  *
  * Stores:
- *   rolls   — Roll records (without directory handle)
- *   frames  — Frame records
- *   handles — { rollId, handle: FileSystemDirectoryHandle }
+ *   rolls     — Roll records (without directory handle)
+ *   frames    — Frame records
+ *   libraries — Library records (without directory handle)
+ *   images    — LibraryImage records
+ *   handles   — { rollId/libraryId, handle: FileSystemDirectoryHandle }
  */
 
-import type { Roll, Frame } from '$lib/types';
+import type { Roll, Frame, Library, LibraryImage } from '$lib/types';
 
 const DB_NAME = 'roloc';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 
 // ─── Store names ──────────────────────────────────────────────────────────────
 
-const STORE_ROLLS   = 'rolls';
-const STORE_FRAMES  = 'frames';
-const STORE_HANDLES = 'handles';
+const STORE_ROLLS     = 'rolls';
+const STORE_FRAMES    = 'frames';
+const STORE_LIBRARIES = 'libraries';
+const STORE_IMAGES    = 'images';
+const STORE_HANDLES   = 'handles';
 
 // ─── Open ─────────────────────────────────────────────────────────────────────
 
@@ -34,23 +38,32 @@ export function openDB(): Promise<IDBDatabase> {
 	return new Promise((resolve, reject) => {
 		const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-		req.onupgradeneeded = (event) => {
-			const db = (event.target as IDBOpenDBRequest).result;
+	req.onupgradeneeded = (event) => {
+		const db = (event.target as IDBOpenDBRequest).result;
 
-			if (!db.objectStoreNames.contains(STORE_ROLLS)) {
-				db.createObjectStore(STORE_ROLLS, { keyPath: 'id' });
-			}
+		if (!db.objectStoreNames.contains(STORE_ROLLS)) {
+			db.createObjectStore(STORE_ROLLS, { keyPath: 'id' });
+		}
 
-			if (!db.objectStoreNames.contains(STORE_FRAMES)) {
-				const frameStore = db.createObjectStore(STORE_FRAMES, { keyPath: 'id' });
-				frameStore.createIndex('rollId', 'rollId', { unique: false });
-			}
+		if (!db.objectStoreNames.contains(STORE_FRAMES)) {
+			const frameStore = db.createObjectStore(STORE_FRAMES, { keyPath: 'id' });
+			frameStore.createIndex('rollId', 'rollId', { unique: false });
+		}
 
-			if (!db.objectStoreNames.contains(STORE_HANDLES)) {
-				// Key is rollId, value is { rollId, handle }
-				db.createObjectStore(STORE_HANDLES, { keyPath: 'rollId' });
-			}
-		};
+		if (!db.objectStoreNames.contains(STORE_LIBRARIES)) {
+			db.createObjectStore(STORE_LIBRARIES, { keyPath: 'id' });
+		}
+
+		if (!db.objectStoreNames.contains(STORE_IMAGES)) {
+			const imageStore = db.createObjectStore(STORE_IMAGES, { keyPath: 'id' });
+			imageStore.createIndex('libraryId', 'libraryId', { unique: false });
+		}
+
+		if (!db.objectStoreNames.contains(STORE_HANDLES)) {
+			// Key is rollId or libraryId, value is { rollId/libraryId, handle }
+			db.createObjectStore(STORE_HANDLES, { keyPath: 'rollId' });
+		}
+	};
 
 		req.onsuccess = (event) => {
 			_db = (event.target as IDBOpenDBRequest).result;
@@ -203,4 +216,111 @@ export async function putHandle(rollId: string, handle: FileSystemDirectoryHandl
 	const db = await openDB();
 	const record: HandleRecord = { rollId, handle };
 	await request(tx(db, STORE_HANDLES, 'readwrite').objectStore(STORE_HANDLES).put(record));
+}
+
+// ─── Libraries ────────────────────────────────────────────────────────────────
+
+export async function getLibraries(): Promise<Library[]> {
+	const db = await openDB();
+	return cursorAll<Library>(tx(db, STORE_LIBRARIES).objectStore(STORE_LIBRARIES));
+}
+
+export async function getLibrary(id: string): Promise<Library | undefined> {
+	const db = await openDB();
+	return request(tx(db, STORE_LIBRARIES).objectStore(STORE_LIBRARIES).get(id));
+}
+
+export async function putLibrary(library: Library): Promise<void> {
+	const db = await openDB();
+	await request(tx(db, STORE_LIBRARIES, 'readwrite').objectStore(STORE_LIBRARIES).put(library));
+}
+
+export async function deleteLibrary(id: string): Promise<void> {
+	const db = await openDB();
+	const t = tx(db, [STORE_LIBRARIES, STORE_IMAGES, STORE_HANDLES], 'readwrite');
+	// Delete library
+	t.objectStore(STORE_LIBRARIES).delete(id);
+	// Delete its handle
+	t.objectStore(STORE_HANDLES).delete(id);
+	// Delete all images belonging to this library
+	const imageIdx = t.objectStore(STORE_IMAGES).index('libraryId');
+	const imageReq = imageIdx.openCursor(IDBKeyRange.only(id));
+	await new Promise<void>((resolve, reject) => {
+		imageReq.onsuccess = () => {
+			const cursor = imageReq.result;
+			if (cursor) {
+				cursor.delete();
+				cursor.continue();
+			} else {
+				resolve();
+			}
+		};
+		imageReq.onerror = () => reject(imageReq.error);
+	});
+}
+
+// ─── Library Images ───────────────────────────────────────────────────────────
+
+export async function getImages(libraryId: string): Promise<LibraryImage[]> {
+	const images = await getImagesByLibrary(libraryId);
+	// Migration: add createdAt to existing images that don't have it
+	const now = Date.now();
+	const needsMigration: LibraryImage[] = [];
+	const migratedImages = images.map((img, idx) => {
+		if (!img.createdAt) {
+			// Use index to give each image a unique timestamp
+			const migrated = { ...img, createdAt: now + idx } as LibraryImage;
+			needsMigration.push(migrated);
+			return migrated;
+		}
+		return img;
+	});
+
+	// Persist migrated images back to the database
+	if (needsMigration.length > 0) {
+		await putImages(needsMigration);
+	}
+
+	return migratedImages.sort((a, b) => a.index - b.index);
+}
+
+async function getImagesByLibrary(libraryId: string): Promise<LibraryImage[]> {
+	const db = await openDB();
+	return new Promise((resolve, reject) => {
+		const results: LibraryImage[] = [];
+		const t = tx(db, STORE_IMAGES);
+		const index = t.objectStore(STORE_IMAGES).index('libraryId');
+		const req = index.openCursor(IDBKeyRange.only(libraryId));
+		req.onsuccess = () => {
+			const cursor = req.result;
+			if (cursor) {
+				results.push(cursor.value);
+				cursor.continue();
+			} else {
+				resolve(results);
+			}
+		};
+		req.onerror = () => reject(req.error);
+	});
+}
+
+export async function getImage(id: string): Promise<LibraryImage | undefined> {
+	const db = await openDB();
+	return request(tx(db, STORE_IMAGES).objectStore(STORE_IMAGES).get(id));
+}
+
+export async function putImage(image: LibraryImage): Promise<void> {
+	const db = await openDB();
+	await request(tx(db, STORE_IMAGES, 'readwrite').objectStore(STORE_IMAGES).put(image));
+}
+
+export async function putImages(images: LibraryImage[]): Promise<void> {
+	const db = await openDB();
+	const store = tx(db, STORE_IMAGES, 'readwrite').objectStore(STORE_IMAGES);
+	await Promise.all(images.map((img) => request(store.put(img))));
+}
+
+export async function deleteImage(id: string): Promise<void> {
+	const db = await openDB();
+	await request(tx(db, STORE_IMAGES, 'readwrite').objectStore(STORE_IMAGES).delete(id));
 }

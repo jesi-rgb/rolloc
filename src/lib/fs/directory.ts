@@ -30,8 +30,12 @@ export async function pickDirectory(): Promise<FileSystemDirectoryHandle | null>
 	try {
 		return await window.showDirectoryPicker({ mode: 'read' });
 	} catch (err) {
-		// User cancelled — DOMException with name 'AbortError'
-		if (err instanceof DOMException && err.name === 'AbortError') return null;
+		if (err instanceof DOMException) {
+			// User cancelled
+			if (err.name === 'AbortError') return null;
+			// Picker already open (rapid double-click, etc.) — silently ignore
+			if (err.name === 'NotAllowedError') return null;
+		}
 		throw err;
 	}
 }

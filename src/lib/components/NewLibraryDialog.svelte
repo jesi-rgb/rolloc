@@ -1,24 +1,22 @@
 <script lang="ts">
 	import { pickDirectory } from '$lib/fs/directory';
-	import { createRoll } from '$lib/db/rolls';
-	import type { Roll } from '$lib/types';
+	import { createLibrary } from '$lib/db/libraries';
+	import type { Library } from '$lib/types';
 
 	interface Props {
-		onCreated: (roll: Roll) => void;
+		onCreated: (library: Library) => void;
 		onClose: () => void;
 	}
 
 	let { onCreated, onClose }: Props = $props();
 
-	let label     = $state('');
-	let filmStock = $state('');
-	let camera    = $state('');
-	let notes     = $state('');
-	let handle    = $state<FileSystemDirectoryHandle | null>(null);
-	let dirName   = $state('');
-	let busy      = $state(false);
-	let picking   = $state(false);
-	let error     = $state('');
+	let label   = $state('');
+	let notes   = $state('');
+	let handle  = $state<FileSystemDirectoryHandle | null>(null);
+	let dirName = $state('');
+	let busy    = $state(false);
+	let picking = $state(false);
+	let error   = $state('');
 
 	async function pickDir() {
 		if (picking) return;
@@ -47,8 +45,8 @@
 		busy  = true;
 		error = '';
 		try {
-			const roll = await createRoll({ label: label.trim(), filmStock, camera, notes, handle });
-			onCreated(roll);
+			const library = await createLibrary(label.trim(), handle);
+			onCreated(library);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -73,7 +71,7 @@
 	<div class="w-full max-w-md rounded-xl bg-base-muted border border-base-subtle
 	            shadow-lg p-l space-y-base">
 		<div class="flex items-center justify-between">
-			<h2 id="dialog-title" class="text-l font-semibold text-content">New Roll</h2>
+			<h2 id="dialog-title" class="text-l font-semibold text-content">New Library</h2>
 			<button
 				onclick={onClose}
 				class="text-content-muted hover:text-content transition-colors"
@@ -104,29 +102,7 @@
 				<input
 					bind:value={label}
 					type="text"
-					placeholder="e.g. Kodak Gold 200 — Paris"
-					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
-					       text-content placeholder-content-subtle
-					       focus:outline-none focus:border-primary transition"
-				/>
-			</label>
-			<label class="block">
-				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Film stock</span>
-				<input
-					bind:value={filmStock}
-					type="text"
-					placeholder="e.g. Kodak Portra 400"
-					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
-					       text-content placeholder-content-subtle
-					       focus:outline-none focus:border-primary transition"
-				/>
-			</label>
-			<label class="block">
-				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Camera</span>
-				<input
-					bind:value={camera}
-					type="text"
-					placeholder="e.g. Nikon FM2"
+					placeholder="e.g. Fujifilm X-T4 — SSD Photos"
 					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
 					       text-content placeholder-content-subtle
 					       focus:outline-none focus:border-primary transition"
@@ -161,7 +137,7 @@
 				class="px-base py-sm text-sm font-medium rounded-lg bg-primary text-primary-content
 				       hover:bg-primary-muted disabled:opacity-50 disabled:cursor-not-allowed transition"
 			>
-				{busy ? 'Creating…' : 'Create Roll'}
+				{busy ? 'Creating…' : 'Create Library'}
 			</button>
 		</div>
 	</div>
