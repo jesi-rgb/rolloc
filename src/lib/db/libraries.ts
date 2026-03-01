@@ -18,7 +18,7 @@ import { listImageFiles, getFile } from '$lib/fs/directory';
 /**
  * Re-export IDB functions for convenience.
  */
-export { getLibraries, getLibrary, getImages };
+export { getLibraries, getLibrary, getImages, putLibrary };
 
 /**
  * Create a new library from a directory path.
@@ -83,4 +83,50 @@ export async function getImageFile(libraryId: string, filename: string): Promise
 		console.error(`Failed to get file ${filename}:`, err);
 		return null;
 	}
+}
+
+/**
+ * Re-scans a library directory for new images.
+ * Adds only images that don't already exist in the database.
+ * Returns the number of new images added.
+ */
+export async function rescanLibrary(libraryId: string): Promise<number> {
+	const path = await getLibraryPath(libraryId);
+	if (!path) {
+		throw new Error('Library path not found');
+	}
+
+	// Get current images
+	const existingImages = await getImages(libraryId);
+	const existingFilenames = new Set(existingImages.map((img) => img.filename));
+
+	// Scan directory
+	const files = await listImageFiles(path);
+
+	// Filter out images that already exist
+	const newFiles = files.filter((file) => !existingFilenames.has(file.filename));
+
+	if (newFiles.length === 0) {
+		return 0;
+	}
+
+	// Find the highest existing index
+	const maxIndex = existingImages.reduce((max, img) => Math.max(max, img.index), -1);
+
+	// Create LibraryImage records for new files
+	const now = Date.now();
+	const newImages: LibraryImage[] = newFiles.map((file, idx) => ({
+		id: crypto.randomUUID(),
+		libraryId,
+		filename: file.filename,
+		index: maxIndex + 1 + idx,
+		rating: 0,
+		notes: '',
+		createdAt: now + idx,
+	}));
+
+	// Store new images
+	await putImages(newImages);
+
+	return newImages.length;
 }

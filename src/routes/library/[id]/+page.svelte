@@ -3,13 +3,19 @@
 	 * Library grid page — displays all images in a library as thumbnails.
 	 *
 	 * Clicking an image navigates to /library/[id]/[imageId] for full view.
+	 *
+	 * Keyboard shortcuts:
+	 *   ← / → (or j / k)   — prev / next image
+	 *   e / Enter          — view selected image
 	 */
 	import { onMount } from "svelte";
+	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { getLibrary, getImages, getLibraryPath } from "$lib/db/libraries";
+	import { getLibrary, getImages, getLibraryPath, rescanLibrary } from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
+	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
 	type SortKey = 'createdAt-desc' | 'createdAt-asc' | 'filename-asc' | 'filename-desc' 
 	             | 'rating-desc' | 'rating-asc' | 'index-asc' | 'index-desc';
@@ -21,6 +27,7 @@
 	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
 	let sortBy = $state<SortKey>('createdAt-desc');
+	let selIdx = $state(0);
 
 	let sortedImages = $derived(
 		sortBy === 'createdAt-desc' ? [...images].sort((a, b) => b.createdAt - a.createdAt) :
@@ -58,6 +65,18 @@
 		if (path) {
 			dirPath = path;
 		}
+
+		// Automatically rescan for new images
+		try {
+			const newCount = await rescanLibrary(libraryId);
+			if (newCount > 0) {
+				// Reload images if new ones were found
+				images = await getImages(libraryId);
+			}
+		} catch (err) {
+			console.error('Auto-rescan failed:', err);
+		}
+
 		loading = false;
 	});
 
@@ -68,13 +87,46 @@
 			day: "numeric",
 		});
 	}
+
+	// ─── Keyboard shortcuts ───────────────────────────────────────────────────
+
+	async function handleKeydown(e: KeyboardEvent) {
+		// Don't intercept when typing in an input or textarea
+		const tag = (e.target as HTMLElement | null)?.tagName;
+		if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+		if (sortedImages.length === 0) return;
+
+		switch (e.key) {
+			case "ArrowLeft":
+			case "k":
+				e.preventDefault();
+				selIdx = Math.max(0, selIdx - 1);
+				break;
+			case "ArrowRight":
+			case "j":
+				e.preventDefault();
+				selIdx = Math.min(sortedImages.length - 1, selIdx + 1);
+				break;
+			case "e":
+			case "Enter":
+				e.preventDefault();
+				const selected = sortedImages[selIdx];
+				if (selected) {
+					await goto(`/library/${libraryId}/${selected.id}`);
+				}
+				break;
+		}
+	}
 </script>
 
 <svelte:head>
 	<title>{library?.label ?? "Library"} — Roloc</title>
 </svelte:head>
 
-<div class="min-h-screen bg-base text-content flex flex-col">
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="h-screen bg-base text-content flex flex-col">
 	<!-- Top bar -->
 	<header
 		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
@@ -142,16 +194,25 @@
 			<ul
 				class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
 			>
-				{#each sortedImages as image (image.id)}
+				{#each sortedImages as image, i (image.id)}
 					<li>
 						<LibraryImageThumb
 							{image}
 							{libraryId}
 							dirPath={dirPath!}
+							selected={i === selIdx}
 						/>
 					</li>
 				{/each}
 			</ul>
 		</main>
+
+		<!-- Keyboard shortcut hint bar -->
+		<KeyboardHintBar
+			hints={[
+				{ keys: ["←", "→"], label: "navigate" },
+				{ keys: ["e"], label: "view" },
+			]}
+		/>
 	{/if}
 </div>

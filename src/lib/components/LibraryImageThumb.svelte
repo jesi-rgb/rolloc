@@ -15,9 +15,10 @@
 		image: LibraryImage;
 		libraryId: string;
 		dirPath: string;
+		selected?: boolean;
 	}
 
-	let { image, libraryId, dirPath }: Props = $props();
+	let { image, libraryId, dirPath, selected = false }: Props = $props();
 
 	type ThumbStatus = "idle" | "loading" | "ready" | "error";
 	let status = $state<ThumbStatus>("idle");
@@ -70,9 +71,9 @@
 <a
 	bind:this={el}
 	href="/library/{libraryId}/{image.id}"
-	class="relative flex flex-col rounded-lg overflow-hidden border border-base-subtle
-	       hover:border-content-subtle transition-all w-full
-	       focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 focus:ring-offset-base"
+	class="relative flex flex-col rounded-lg overflow-hidden border transition-all w-full
+	       focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 focus:ring-offset-base
+	       {selected ? 'border-primary ring-2 ring-primary ring-offset-1 ring-offset-base' : 'border-base-subtle hover:border-content-subtle'}"
 	aria-label="Image {image.index + 1}: {image.filename}"
 >
 	<!-- Thumbnail area — 3:2 aspect ratio -->

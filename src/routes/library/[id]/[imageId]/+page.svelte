@@ -3,7 +3,7 @@
 	 * Individual library image viewer with EXIF panel.
 	 *
 	 * Displays a single image at /library/[id]/[imageId] with prev/next navigation.
-	 * Keyboard shortcuts: ← / → for navigation
+	 * Keyboard shortcuts: ← / → for navigation, Esc to return to library grid
 	 */
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
@@ -19,6 +19,7 @@
 	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
 	import MiniCalendar from "$lib/components/MiniCalendar.svelte";
 	import AnalogClock from "$lib/components/AnalogClock.svelte";
+	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
 	interface ImageWithExif {
 		image: LibraryImage;
@@ -49,6 +50,13 @@
 	let images = $state<ImageWithExif[]>([]);
 	let loading = $state(true);
 	let error = $state("");
+
+	// Zoom state
+	let zoomed = $state(false);
+	let zoomLevel = $state(2); // 2x zoom by default when zoomed in
+	let mouseX = $state(0); // Normalized 0-1
+	let mouseY = $state(0); // Normalized 0-1
+	let imageContainer = $state<HTMLDivElement | null>(null);
 
 	// Derived values for current image
 	const currentIndex = $derived(
@@ -202,11 +210,15 @@
 		switch (e.key) {
 			case "ArrowLeft":
 				e.preventDefault();
-				await prevImage();
+				await nextImage();
 				break;
 			case "ArrowRight":
 				e.preventDefault();
-				await nextImage();
+				await prevImage();
+				break;
+			case "Escape":
+				e.preventDefault();
+				await goto(resolve(`/library/${libraryId}`));
 				break;
 		}
 	}
@@ -232,6 +244,38 @@
 		const sign = ev >= 0 ? "+" : "";
 		return `${sign}${ev.toFixed(1)} EV`;
 	}
+
+	// Zoom handlers
+	function handleImageClick() {
+		zoomed = !zoomed;
+		if (!zoomed) {
+			// Reset zoom level when exiting zoom mode
+			zoomLevel = 2;
+		}
+	}
+
+	function handleMouseMove(e: MouseEvent) {
+		if (!imageContainer) return;
+		const rect = imageContainer.getBoundingClientRect();
+		mouseX = (e.clientX - rect.left) / rect.width;
+		mouseY = (e.clientY - rect.top) / rect.height;
+	}
+
+	function handleWheel(e: WheelEvent) {
+		if (!zoomed) return;
+		e.preventDefault();
+		// Adjust zoom level: scroll up increases, scroll down decreases
+		const delta = -e.deltaY * 0.01;
+		zoomLevel = Math.max(1.5, Math.min(10, zoomLevel + delta));
+	}
+
+	// Reset zoom when navigating to a different image
+	$effect(() => {
+		if (imageId) {
+			zoomed = false;
+			zoomLevel = 2;
+		}
+	});
 </script>
 
 <svelte:head>
@@ -240,10 +284,10 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="min-h-screen bg-base text-content">
+<div class="h-screen bg-base text-content flex flex-col">
 	<!-- Header -->
 	<header
-		class="flex items-center justify-between px-l py-base border-b border-base-subtle"
+		class="flex items-center justify-between px-l py-base border-b border-base-subtle shrink-0"
 	>
 		<div class="flex items-center gap-sm">
 			<a
@@ -265,22 +309,27 @@
 	</header>
 
 	{#if loading}
-		<div class="flex items-center justify-center h-96">
+		<div class="flex-1 flex items-center justify-center">
 			<p class="text-content-muted">Loading…</p>
 		</div>
 	{:else if error}
-		<div class="flex items-center justify-center h-96">
+		<div class="flex-1 flex items-center justify-center">
 			<p class="text-danger">{error}</p>
 		</div>
 	{:else if !current}
-		<div class="flex items-center justify-center h-96">
+		<div class="flex-1 flex items-center justify-center">
 			<p class="text-content-muted">Image not found</p>
 		</div>
 	{:else}
-		<div class="flex h-[calc(100vh-4rem)]">
+		<div class="flex flex-1 min-h-0">
 			<!-- Main image viewer -->
 			<div
-				class="flex-1 flex flex-col items-center justify-center p-l gap-base"
+				bind:this={imageContainer}
+				class="flex-1 flex items-center justify-center p-l overflow-hidden"
+				class:cursor-zoom-in={!zoomed && current.url}
+				class:cursor-zoom-out={zoomed}
+				onmousemove={handleMouseMove}
+				onwheel={handleWheel}
 			>
 				{#if current.loading}
 					<p class="text-content-muted">Loading image…</p>
@@ -291,31 +340,12 @@
 						src={current.url}
 						alt={current.image.filename}
 						class="max-w-full max-h-full object-contain rounded-lg"
+						style={zoomed
+							? `transform: scale(${zoomLevel}) translate(${(0.5 - mouseX) * 100}%, ${(0.5 - mouseY) * 100}%); transform-origin: center;`
+							: ""}
+						onclick={handleImageClick}
 					/>
 				{/if}
-
-				<!-- Navigation -->
-				<div class="flex gap-sm items-center">
-					<button
-						onclick={prevImage}
-						disabled={currentIndex === 0}
-						class="px-base py-sm text-sm rounded-lg bg-base-muted border border-base-subtle
-						       text-content hover:bg-base-subtle disabled:opacity-30 disabled:cursor-not-allowed transition"
-					>
-						← Prev
-					</button>
-					<span class="text-sm text-content-muted"
-						>{current.image.filename}</span
-					>
-					<button
-						onclick={nextImage}
-						disabled={currentIndex === images.length - 1}
-						class="px-base py-sm text-sm rounded-lg bg-base-muted border border-base-subtle
-						       text-content hover:bg-base-subtle disabled:opacity-30 disabled:cursor-not-allowed transition"
-					>
-						Next →
-					</button>
-				</div>
 			</div>
 
 			<!-- EXIF panel -->
@@ -426,7 +456,8 @@
 										Film Simulation
 									</dt>
 									<dd
-										class="text-content font-medium flex items-center gap-sm"
+										class="text-content font-medium flex
+										items-baseline gap-sm"
 									>
 										{#if icon}
 											<span
@@ -504,5 +535,15 @@
 				{/if}
 			</aside>
 		</div>
+
+		<!-- Keyboard shortcut hint bar -->
+		<KeyboardHintBar
+			hints={[
+				{ keys: ["←", "→"], label: "navigate" },
+				{ keys: ["Esc"], label: "back to grid" },
+				{ keys: ["Click"], label: "zoom in/out" },
+				{ keys: ["Scroll"], label: "zoom level" },
+			]}
+		/>
 	{/if}
 </div>
