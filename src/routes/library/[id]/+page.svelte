@@ -6,7 +6,7 @@
 	 */
 	import { onMount } from "svelte";
 	import { page } from "$app/state";
-	import { getLibrary, getImages, getLibraryHandle } from "$lib/db/libraries";
+	import { getLibrary, getImages, getLibraryPath } from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
@@ -18,10 +18,8 @@
 
 	let library = $state<Library | null>(null);
 	let images = $state<LibraryImage[]>([]);
-	let handle = $state<FileSystemDirectoryHandle | null>(null);
+	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
-	let permError = $state(false);
-	let permDenied = $state(false);
 	let sortBy = $state<SortKey>('createdAt-desc');
 
 	let sortedImages = $derived(
@@ -55,45 +53,13 @@
 			return;
 		}
 
-		// Only query permission on mount — requestPermission() requires a user
-		// gesture (SecurityError otherwise). If not granted, show the Grant Access
-		// button which calls requestPermission() via a click handler.
-		const h = await getLibraryHandle(libraryId);
-		if (h) {
-			// Check if permission is actually granted
-			const permission = await h.queryPermission({ mode: "read" });
-			if (permission === "granted") {
-				handle = h;
-			} else {
-				permError = true;
-			}
-		} else {
-			permError = true;
+		// Get the directory path for this library
+		const path = await getLibraryPath(libraryId);
+		if (path) {
+			dirPath = path;
 		}
 		loading = false;
 	});
-
-	async function requestPermission() {
-		if (!libraryId) return;
-		permDenied = false;
-		try {
-			const h = await getLibraryHandle(libraryId);
-			if (!h) {
-				permDenied = true;
-				return;
-			}
-			const result = await h.requestPermission({ mode: "read" });
-			if (result === "granted") {
-				handle = h;
-				permError = false;
-			} else {
-				permDenied = true;
-			}
-		} catch (err) {
-			console.error("requestPermission failed:", err);
-			permDenied = true;
-		}
-	}
 
 	function formatDate(ms: number): string {
 		return new Date(ms).toLocaleDateString(undefined, {
@@ -166,33 +132,6 @@
 		<div class="flex-1 flex items-center justify-center text-content-muted">
 			Library not found.
 		</div>
-	{:else if permError}
-		<!-- Permission request screen -->
-		<div
-			class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l"
-		>
-			<h2 class="text-xl font-semibold text-content">
-				Permission required
-			</h2>
-			<p class="text-content-muted text-sm">
-				Roloc needs read access to
-				<strong class="text-content">{library.label}</strong>'s image
-				directory.
-			</p>
-			<button
-				onclick={requestPermission}
-				class="px-base py-sm rounded-lg bg-primary text-primary-content
-				       text-sm font-medium hover:bg-primary-muted transition"
-			>
-				Grant Access
-			</button>
-			{#if permDenied}
-				<p class="text-sm text-red-500 max-w-sm">
-					Permission was denied. You can try again or re-open the
-					library from the home page.
-				</p>
-			{/if}
-		</div>
 	{:else if images.length === 0}
 		<div class="flex-1 flex items-center justify-center text-content-muted">
 			No images found in this library.
@@ -208,7 +147,7 @@
 						<LibraryImageThumb
 							{image}
 							{libraryId}
-							dirHandle={handle!}
+							dirPath={dirPath!}
 						/>
 					</li>
 				{/each}

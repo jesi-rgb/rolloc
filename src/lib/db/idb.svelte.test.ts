@@ -22,8 +22,8 @@ import {
 	putFrame,
 	putFrames,
 	deleteFrame,
-	getHandle,
-	putHandle,
+	getPath,
+	putPath,
 } from './idb';
 import type { Roll, Frame } from '$lib/types';
 import { DEFAULT_ROLL_EDIT, DEFAULT_FRAME_EDIT } from '$lib/types';
@@ -156,14 +156,13 @@ describe('rolls', () => {
 		expect(frames).toEqual([]);
 	});
 
-	it('deleteRoll removes the handle record', async () => {
+	it('deleteRoll removes the path record', async () => {
 		await putRoll(makeRoll());
-		// Store a mock handle value (the store accepts any structured-cloneable value)
-		// We use a plain object cast to satisfy the type; real handle tests are in handles suite.
-		await putHandle('roll-1', {} as FileSystemDirectoryHandle);
+		// Store a mock path value
+		await putPath('roll-1', '/fake/path/to/roll');
 		await deleteRoll('roll-1');
-		const handle = await getHandle('roll-1');
-		expect(handle).toBeUndefined();
+		const path = await getPath('roll-1');
+		expect(path).toBeUndefined();
 	});
 
 	it('deleteRoll on a non-existent id does not throw', async () => {
@@ -245,43 +244,41 @@ describe('frames', () => {
 	});
 });
 
-// ─── Handles ─────────────────────────────────────────────────────────────────
+// ─── Paths ───────────────────────────────────────────────────────────────────
 
-describe('handles', () => {
+describe('paths', () => {
 	beforeEach(wipeDB);
 	afterEach(wipeDB);
 
-	it('getHandle returns undefined when no handle is stored', async () => {
-		const result = await getHandle('roll-1');
+	it('getPath returns undefined when no path is stored', async () => {
+		const result = await getPath('roll-1');
 		expect(result).toBeUndefined();
 	});
 
-	it('putHandle stores a handle and getHandle retrieves it', async () => {
-		// FileSystemDirectoryHandle is not available in this test environment,
-		// so we store a plain object as a stand-in for the structured-clone check.
-		const fakeHandle = { kind: 'directory', name: 'photos' } as unknown as FileSystemDirectoryHandle;
-		await putHandle('roll-1', fakeHandle);
-		const retrieved = await getHandle('roll-1');
-		expect(retrieved).toEqual(fakeHandle);
+	it('putPath stores a path and getPath retrieves it', async () => {
+		const testPath = '/Users/test/photos';
+		await putPath('roll-1', testPath);
+		const retrieved = await getPath('roll-1');
+		expect(retrieved).toEqual(testPath);
 	});
 
-	it('putHandle overwrites an existing handle (upsert)', async () => {
-		const h1 = { kind: 'directory', name: 'old' } as unknown as FileSystemDirectoryHandle;
-		const h2 = { kind: 'directory', name: 'new' } as unknown as FileSystemDirectoryHandle;
-		await putHandle('roll-1', h1);
-		await putHandle('roll-1', h2);
-		const retrieved = await getHandle('roll-1');
-		expect((retrieved as unknown as { name: string }).name).toBe('new');
+	it('putPath overwrites an existing path (upsert)', async () => {
+		const oldPath = '/Users/test/old';
+		const newPath = '/Users/test/new';
+		await putPath('roll-1', oldPath);
+		await putPath('roll-1', newPath);
+		const retrieved = await getPath('roll-1');
+		expect(retrieved).toBe(newPath);
 	});
 
-	it('getHandle is keyed per rollId — separate rolls have separate handles', async () => {
-		const h1 = { name: 'roll-one' } as unknown as FileSystemDirectoryHandle;
-		const h2 = { name: 'roll-two' } as unknown as FileSystemDirectoryHandle;
-		await putHandle('roll-1', h1);
-		await putHandle('roll-2', h2);
-		const r1 = await getHandle('roll-1') as unknown as { name: string };
-		const r2 = await getHandle('roll-2') as unknown as { name: string };
-		expect(r1.name).toBe('roll-one');
-		expect(r2.name).toBe('roll-two');
+	it('getPath is keyed per rollId — separate rolls have separate paths', async () => {
+		const path1 = '/Users/test/roll-one';
+		const path2 = '/Users/test/roll-two';
+		await putPath('roll-1', path1);
+		await putPath('roll-2', path2);
+		const r1 = await getPath('roll-1');
+		const r2 = await getPath('roll-2');
+		expect(r1).toBe(path1);
+		expect(r2).toBe(path2);
 	});
 });

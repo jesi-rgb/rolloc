@@ -11,8 +11,8 @@
 	import { onMount } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { getRoll, getRollHandle } from "$lib/db/rolls";
-	import { getFrames, putFrame, getHandle } from "$lib/db/idb";
+	import { getRoll, getRollPath } from "$lib/db/rolls";
+	import { getFrames, putFrame } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
@@ -25,11 +25,9 @@
 
 	let roll = $state<Roll | null>(null);
 	let frames = $state<Frame[]>([]);
-	let handle = $state<FileSystemDirectoryHandle | null>(null);
+	let dirPath = $state<string | null>(null);
 	let selIdx = $state(0);
 	let loading = $state(true);
-	let permError = $state(false);
-	let permDenied = $state(false);
 
 	const selected = $derived(frames[selIdx] ?? null);
 
@@ -48,41 +46,13 @@
 			return;
 		}
 
-		// Only query permission on mount — requestPermission() requires a user
-		// gesture (SecurityError otherwise). If not granted, show the Grant Access
-		// button which calls requestPermission() via a click handler.
-		const h = await getRollHandle(rollId, { request: false });
-		if (h) {
-			handle = h;
-		} else {
-			permError = true;
+		// Get the directory path for this roll
+		const path = await getRollPath(rollId);
+		if (path) {
+			dirPath = path;
 		}
 		loading = false;
 	});
-
-	async function requestPermission() {
-		if (!rollId) return;
-		permDenied = false;
-		try {
-			// Fetch the raw handle from IDB first, then call requestPermission()
-			// as the very next step so the browser user-gesture token is still live.
-			const rawHandle = await getHandle(rollId);
-			if (!rawHandle) {
-				permDenied = true;
-				return;
-			}
-			const result = await rawHandle.requestPermission({ mode: "read" });
-			if (result === "granted") {
-				handle = rawHandle;
-				permError = false;
-			} else {
-				permDenied = true;
-			}
-		} catch (err) {
-			console.error("requestPermission failed:", err);
-			permDenied = true;
-		}
-	}
 
 	function selectFrame(f: Frame) {
 		const idx = frames.findIndex((fr) => fr.id === f.id);
@@ -190,33 +160,6 @@
 		<div class="flex-1 flex items-center justify-center text-content-muted">
 			Roll not found.
 		</div>
-	{:else if permError}
-		<!-- Permission request screen -->
-		<div
-			class="flex-1 flex flex-col items-center justify-center gap-base text-center px-l"
-		>
-			<h2 class="text-xl font-semibold text-content">
-				Permission required
-			</h2>
-			<p class="text-content-muted text-sm">
-				Roloc needs read access to
-				<strong class="text-content">{roll.label}</strong>'s image
-				directory.
-			</p>
-			<button
-				onclick={requestPermission}
-				class="px-base py-sm rounded-lg bg-primary text-primary-content
-				       text-sm font-medium hover:bg-primary-muted transition"
-			>
-				Grant Access
-			</button>
-			{#if permDenied}
-				<p class="text-sm text-red-500 max-w-sm">
-					Permission was denied. You can try again or re-open the roll
-					from the library.
-				</p>
-			{/if}
-		</div>
 	{:else if frames.length === 0}
 		<div class="flex-1 flex items-center justify-center text-content-muted">
 			No frames found in this roll.
@@ -234,7 +177,7 @@
 							<li>
 								<FrameThumb
 									{frame}
-									dirHandle={handle!}
+									dirPath={dirPath!}
 									selected={i === selIdx}
 									onSelect={selectFrame}
 								/>
@@ -252,7 +195,7 @@
 				<Pane defaultSize={55} minSize={20} order={2}>
 					<FrameMetaPanel
 						frame={selected}
-						dirHandle={handle}
+						dirPath={dirPath}
 						onUpdate={onFrameUpdated}
 					/>
 				</Pane>

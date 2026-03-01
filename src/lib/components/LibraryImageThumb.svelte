@@ -14,10 +14,10 @@
 	interface Props {
 		image: LibraryImage;
 		libraryId: string;
-		dirHandle: FileSystemDirectoryHandle;
+		dirPath: string;
 	}
 
-	let { image, libraryId, dirHandle }: Props = $props();
+	let { image, libraryId, dirPath }: Props = $props();
 
 	type ThumbStatus = "idle" | "loading" | "ready" | "error";
 	let status = $state<ThumbStatus>("idle");
@@ -55,7 +55,7 @@
 	async function loadThumb() {
 		status = "loading";
 		try {
-			const file = await getFile(dirHandle, image.filename);
+			const file = await getFile(dirPath, image.filename);
 			const objUrl = await getThumbURL(image.id, file);
 			if (currentUrl) URL.revokeObjectURL(currentUrl);
 			currentUrl = objUrl;

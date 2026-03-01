@@ -11,7 +11,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { getRoll, getRollHandle, updateRoll } from '$lib/db/rolls';
+	import { getRoll, getRollPath, updateRoll } from '$lib/db/rolls';
 	import { getFile } from '$lib/fs/directory';
 	import { getFrame, getFrames, putFrame } from '$lib/db/idb';
 	import { readPreview, readThumb } from '$lib/fs/opfs';
@@ -103,15 +103,15 @@
 			// Priority: generate preview from original (full res) →
 			//           cached preview → cached thumb (low-res fallback).
 
-			const dirHandle = await getRollHandle(rid);
+			const dirPath = await getRollPath(rid);
 			let blob: Blob | null = null;
 
-			if (dirHandle) {
+			if (dirPath) {
 				try {
-					const file = await getFile(dirHandle, frame.filename);
+					const file = await getFile(dirPath, frame.filename);
 					blob = await ensurePreview(frame.id, file);
 				} catch {
-					// Permission denied or file missing — try OPFS cache.
+					// File missing — try OPFS cache.
 				}
 			}
 

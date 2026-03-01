@@ -13,12 +13,12 @@
 
 	interface Props {
 		frame: Frame;
-		dirHandle: FileSystemDirectoryHandle;
+		dirPath: string;
 		selected?: boolean;
 		onSelect?: (frame: Frame) => void;
 	}
 
-	let { frame, dirHandle, selected = false, onSelect }: Props = $props();
+	let { frame, dirPath, selected = false, onSelect }: Props = $props();
 
 	// Avoid shadowing the $state rune — use a distinct name
 	type ThumbStatus = "idle" | "loading" | "ready" | "error";
@@ -57,7 +57,7 @@
 	async function loadThumb() {
 		status = "loading";
 		try {
-			const file = await getFile(dirHandle, frame.filename);
+			const file = await getFile(dirPath, frame.filename);
 			const objUrl = await getThumbURL(frame.id, file);
 			if (currentUrl) URL.revokeObjectURL(currentUrl);
 			currentUrl = objUrl;

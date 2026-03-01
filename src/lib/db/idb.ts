@@ -2,11 +2,11 @@
  * IndexedDB wrapper for Roloc.
  *
  * Stores:
- *   rolls     — Roll records (without directory handle)
+ *   rolls     — Roll records (without directory path)
  *   frames    — Frame records
- *   libraries — Library records (without directory handle)
+ *   libraries — Library records (without directory path)
  *   images    — LibraryImage records
- *   handles   — { rollId/libraryId, handle: FileSystemDirectoryHandle }
+ *   handles   — { rollId/libraryId, path: string } (absolute filesystem paths)
  */
 
 import type { Roll, Frame, Library, LibraryImage } from '$lib/types';
@@ -197,24 +197,24 @@ export async function deleteFrame(id: string): Promise<void> {
 	await request(tx(db, STORE_FRAMES, 'readwrite').objectStore(STORE_FRAMES).delete(id));
 }
 
-// ─── Directory handles ────────────────────────────────────────────────────────
+// ─── Directory paths ──────────────────────────────────────────────────────────
 
-export interface HandleRecord {
+export interface PathRecord {
 	rollId: string;
-	handle: FileSystemDirectoryHandle;
+	path: string;  // Absolute filesystem path
 }
 
-export async function getHandle(rollId: string): Promise<FileSystemDirectoryHandle | undefined> {
+export async function getPath(rollId: string): Promise<string | undefined> {
 	const db = await openDB();
-	const record: HandleRecord | undefined = await request(
+	const record: PathRecord | undefined = await request(
 		tx(db, STORE_HANDLES).objectStore(STORE_HANDLES).get(rollId)
 	);
-	return record?.handle;
+	return record?.path;
 }
 
-export async function putHandle(rollId: string, handle: FileSystemDirectoryHandle): Promise<void> {
+export async function putPath(rollId: string, path: string): Promise<void> {
 	const db = await openDB();
-	const record: HandleRecord = { rollId, handle };
+	const record: PathRecord = { rollId, path };
 	await request(tx(db, STORE_HANDLES, 'readwrite').objectStore(STORE_HANDLES).put(record));
 }
 

@@ -8,6 +8,10 @@ node_modules
 /.svelte-kit
 /build
 
+# Tauri
+/src-tauri/target
+/src-tauri/WixTools
+
 # OS
 .DS_Store
 Thumbs.db

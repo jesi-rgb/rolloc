@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { getFrames } from '$lib/db/idb';
-	import { getRollHandle } from '$lib/db/rolls';
+	import { getRollPath } from '$lib/db/rolls';
 	import { thumbURL } from '$lib/fs/opfs';
 	import { getThumbURL } from '$lib/image/thumbgen';
 	import { getFile } from '$lib/fs/directory';
@@ -30,20 +30,20 @@
 		// Populate with placeholders so skeleton shows immediately
 		entries = frames.map((frame) => ({ frame, url: null }));
 
-		let handle: FileSystemDirectoryHandle | null = null;
+		let dirPath: string | null = null;
 
 		for (let i = 0; i < frames.length; i++) {
 			const frame = frames[i];
 
-			// Try OPFS cache first (no handle needed)
+			// Try OPFS cache first (no path needed)
 			let url = await thumbURL(frame.id);
 
 			if (!url) {
-				// Lazily acquire the directory handle
-				if (!handle) handle = await getRollHandle(rollId);
-				if (handle) {
+				// Lazily acquire the directory path
+				if (!dirPath) dirPath = await getRollPath(rollId);
+				if (dirPath) {
 					try {
-						const file = await getFile(handle, frame.filename);
+						const file = await getFile(dirPath, frame.filename);
 						url = await getThumbURL(frame.id, file);
 					} catch {
 						// leave null — thumbnail stays as skeleton

@@ -1,5 +1,5 @@
 /**
- * High-level library operations combining IDB + File System Access API.
+ * High-level library operations combining IDB + Tauri filesystem API.
  */
 
 import type { Library, LibraryImage } from '$lib/types';
@@ -10,10 +10,10 @@ import {
 	deleteLibrary as deleteLibraryRecord,
 	getImages,
 	putImages,
-	getHandle,
-	putHandle,
+	getPath,
+	putPath,
 } from './idb';
-import { listImageFiles } from '$lib/fs/directory';
+import { listImageFiles, getFile } from '$lib/fs/directory';
 
 /**
  * Re-export IDB functions for convenience.
@@ -21,12 +21,9 @@ import { listImageFiles } from '$lib/fs/directory';
 export { getLibraries, getLibrary, getImages };
 
 /**
- * Create a new library from a directory handle.
+ * Create a new library from a directory path.
  */
-export async function createLibrary(
-	label: string,
-	dirHandle: FileSystemDirectoryHandle
-): Promise<Library> {
+export async function createLibrary(label: string, dirPath: string): Promise<Library> {
 	const id = crypto.randomUUID();
 	const library: Library = {
 		id,
@@ -36,7 +33,7 @@ export async function createLibrary(
 	};
 
 	// Scan directory for image files
-	const files = await listImageFiles(dirHandle);
+	const files = await listImageFiles(dirPath);
 	const now = Date.now();
 	const images: LibraryImage[] = files.map((file, idx) => ({
 		id: crypto.randomUUID(),
@@ -49,10 +46,10 @@ export async function createLibrary(
 		createdAt: now + idx,
 	}));
 
-	// Store library, images, and handle
+	// Store library, images, and path
 	await putLibrary(library);
 	await putImages(images);
-	await putHandle(id, dirHandle);
+	await putPath(id, dirPath);
 
 	return library;
 }
@@ -65,36 +62,23 @@ export async function deleteLibrary(id: string): Promise<void> {
 }
 
 /**
- * Get the directory handle for a library.
- * Requests permission if needed.
+ * Get the directory path for a library.
+ * In Tauri, no permission verification is needed — paths are persistent.
  */
-export async function getLibraryHandle(
-	libraryId: string
-): Promise<FileSystemDirectoryHandle | null> {
-	const handle = await getHandle(libraryId);
-	if (!handle) return null;
-
-	// Request permission if needed
-	const permission = await handle.queryPermission({ mode: 'read' });
-	if (permission === 'granted') return handle;
-
-	const requested = await handle.requestPermission({ mode: 'read' });
-	return requested === 'granted' ? handle : null;
+export async function getLibraryPath(libraryId: string): Promise<string | null> {
+	const path = await getPath(libraryId);
+	return path ?? null;
 }
 
 /**
- * Get a file handle for an image in a library.
+ * Get a file for an image in a library.
  */
-export async function getImageFile(
-	libraryId: string,
-	filename: string
-): Promise<File | null> {
-	const handle = await getLibraryHandle(libraryId);
-	if (!handle) return null;
+export async function getImageFile(libraryId: string, filename: string): Promise<File | null> {
+	const path = await getLibraryPath(libraryId);
+	if (!path) return null;
 
 	try {
-		const fileHandle = await handle.getFileHandle(filename);
-		return await fileHandle.getFile();
+		return await getFile(path, filename);
 	} catch (err) {
 		console.error(`Failed to get file ${filename}:`, err);
 		return null;

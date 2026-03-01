@@ -9,11 +9,16 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { resolve } from "$app/paths";
-	import { getLibrary, getImages, getLibraryHandle } from "$lib/db/libraries";
+	import { getLibrary, getImages, getLibraryPath } from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
 	import exifr from "exifr";
-	import { parseFujifilmMakerNote, type FujifilmSettings } from "$lib/image/fuji-makernote";
+	import {
+		parseFujifilmMakerNote,
+		type FujifilmSettings,
+	} from "$lib/image/fuji-makernote";
 	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
+	import MiniCalendar from "$lib/components/MiniCalendar.svelte";
+	import AnalogClock from "$lib/components/AnalogClock.svelte";
 
 	interface ImageWithExif {
 		image: LibraryImage;
@@ -47,7 +52,7 @@
 
 	// Derived values for current image
 	const currentIndex = $derived(
-		images.findIndex((img) => img.image.id === imageId)
+		images.findIndex((img) => img.image.id === imageId),
 	);
 	const current = $derived(images[currentIndex] ?? null);
 
@@ -113,16 +118,14 @@
 
 		item.loading = true;
 		try {
-			const handle = await getLibraryHandle(library!.id);
-			if (!handle) {
-				item.error = "Permission denied";
+			const dirPath = await getLibraryPath(library!.id);
+			if (!dirPath) {
+				item.error = "Directory path not found";
 				return;
 			}
 
-			const fileHandle = await handle.getFileHandle(
-				item.image.filename
-			);
-			const file = await fileHandle.getFile();
+			const { getFile } = await import("$lib/fs/directory");
+			const file = await getFile(dirPath, item.image.filename);
 			const url = URL.createObjectURL(file);
 			item.url = url;
 
@@ -224,16 +227,6 @@
 		return `${Math.round(fl)}mm`;
 	}
 
-	function formatDateTime(dt: string | undefined): string {
-		if (!dt) return "—";
-		try {
-			const date = new Date(dt);
-			return date.toLocaleString();
-		} catch {
-			return dt;
-		}
-	}
-
 	function formatEV(ev: number | undefined): string {
 		if (ev === undefined || ev === null) return "—";
 		const sign = ev >= 0 ? "+" : "";
@@ -259,7 +252,9 @@
 				>← {library?.label || "Back"}</a
 			>
 			{#if library}
-				<h1 class="text-l font-semibold text-content">{library.label}</h1>
+				<h1 class="text-l font-semibold text-content">
+					{library.label}
+				</h1>
 			{/if}
 		</div>
 		<div class="text-sm text-content-muted">
@@ -328,13 +323,25 @@
 				class="w-80 border-l border-base-subtle bg-base-muted overflow-y-auto p-base"
 			>
 				<h2
-					class="text-sm font-medium text-content-muted uppercase tracking-wide mb-base"
+					class="text-sm font-medium text-center text-content-muted uppercase tracking-wide mb-base"
 				>
 					EXIF Data
 				</h2>
 
 				{#if current.exif}
-					<dl class="space-y-sm text-sm">
+					{#if current.exif.dateTime}
+						<div class="mb-base">
+							<dd class="text-content font-medium">
+								<div class="flex flex-row gap-base items-start">
+									<MiniCalendar
+										date={current.exif.dateTime}
+									/>
+									<AnalogClock date={current.exif.dateTime} />
+								</div>
+							</dd>
+						</div>
+					{/if}
+					<dl class="grid grid-cols-2 gap-base text-sm">
 						{#if current.exif.make || current.exif.model}
 							<div>
 								<dt class="text-content-muted">Camera</dt>
@@ -374,9 +381,13 @@
 
 						{#if current.exif.exposureTime}
 							<div>
-								<dt class="text-content-muted">Shutter Speed</dt>
+								<dt class="text-content-muted">
+									Shutter Speed
+								</dt>
 								<dd class="text-content font-medium">
-									{formatExposureTime(current.exif.exposureTime)}
+									{formatExposureTime(
+										current.exif.exposureTime,
+									)}
 								</dd>
 							</div>
 						{/if}
@@ -385,26 +396,38 @@
 							<div>
 								<dt class="text-content-muted">Focal Length</dt>
 								<dd class="text-content font-medium">
-									{formatFocalLength(current.exif.focalLength)}
+									{formatFocalLength(
+										current.exif.focalLength,
+									)}
 								</dd>
 							</div>
 						{/if}
 
 						{#if current.exif.exposureCompensation !== undefined && current.exif.exposureCompensation !== null}
 							<div>
-								<dt class="text-content-muted">Exposure Comp</dt>
+								<dt class="text-content-muted">
+									Exposure Comp
+								</dt>
 								<dd class="text-content font-medium">
-									{formatEV(current.exif.exposureCompensation)}
+									{formatEV(
+										current.exif.exposureCompensation,
+									)}
 								</dd>
 							</div>
 						{/if}
 
 						{#if current.exif.fuji}
 							{#if current.exif.fuji.filmMode}
-								{@const icon = getFilmSimIcon(current.exif.fuji.filmMode)}
+								{@const icon = getFilmSimIcon(
+									current.exif.fuji.filmMode,
+								)}
 								<div>
-									<dt class="text-content-muted">Film Simulation</dt>
-									<dd class="text-content font-medium flex items-center gap-sm">
+									<dt class="text-content-muted">
+										Film Simulation
+									</dt>
+									<dd
+										class="text-content font-medium flex items-center gap-sm"
+									>
 										{#if icon}
 											<span
 												class="inline-block leading-none"
@@ -414,39 +437,46 @@
 												{icon.char}
 											</span>
 										{/if}
-										<span>{current.exif.fuji.filmMode}</span>
+										<span>{current.exif.fuji.filmMode}</span
+										>
 									</dd>
 								</div>
 							{/if}
 
-							{#if current.exif.fuji.grainEffect && current.exif.fuji.grainEffect !== 'Off'}
+							{#if current.exif.fuji.grainEffect && current.exif.fuji.grainEffect !== "Off"}
 								<div>
-									<dt class="text-content-muted">Grain Effect</dt>
+									<dt class="text-content-muted">
+										Grain Effect
+									</dt>
 									<dd class="text-content font-medium">
 										{current.exif.fuji.grainEffect}
 									</dd>
 								</div>
 							{/if}
 
-							{#if current.exif.fuji.colorChromeEffect && current.exif.fuji.colorChromeEffect !== 'Off'}
+							{#if current.exif.fuji.colorChromeEffect && current.exif.fuji.colorChromeEffect !== "Off"}
 								<div>
-									<dt class="text-content-muted">Color Chrome</dt>
+									<dt class="text-content-muted">
+										Color Chrome
+									</dt>
 									<dd class="text-content font-medium">
 										{current.exif.fuji.colorChromeEffect}
 									</dd>
 								</div>
 							{/if}
 
-							{#if current.exif.fuji.colorChromeFXBlue && current.exif.fuji.colorChromeFXBlue !== 'Off'}
+							{#if current.exif.fuji.colorChromeFXBlue && current.exif.fuji.colorChromeFXBlue !== "Off"}
 								<div>
-									<dt class="text-content-muted">Color Chrome FX Blue</dt>
+									<dt class="text-content-muted">
+										Color Chrome FX Blue
+									</dt>
 									<dd class="text-content font-medium">
 										{current.exif.fuji.colorChromeFXBlue}
 									</dd>
 								</div>
 							{/if}
 
-							{#if current.exif.fuji.clarity && current.exif.fuji.clarity !== '0 (Normal)'}
+							{#if current.exif.fuji.clarity && current.exif.fuji.clarity !== "0 (Normal)"}
 								<div>
 									<dt class="text-content-muted">Clarity</dt>
 									<dd class="text-content font-medium">
@@ -457,21 +487,14 @@
 
 							{#if current.exif.fuji.dynamicRange}
 								<div>
-									<dt class="text-content-muted">Dynamic Range</dt>
+									<dt class="text-content-muted">
+										Dynamic Range
+									</dt>
 									<dd class="text-content font-medium">
 										{current.exif.fuji.dynamicRange}
 									</dd>
 								</div>
 							{/if}
-						{/if}
-
-						{#if current.exif.dateTime}
-							<div>
-								<dt class="text-content-muted">Date/Time</dt>
-								<dd class="text-content font-medium">
-									{formatDateTime(current.exif.dateTime)}
-								</dd>
-							</div>
 						{/if}
 					</dl>
 				{:else}

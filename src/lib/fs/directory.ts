@@ -1,15 +1,23 @@
 /**
- * File System Access API helpers.
+ * File System helpers (Tauri version).
  *
+ * Replaces browser File System Access API with Tauri's native fs/dialog plugins.
  * Responsible for:
- *   - Prompting the user to pick a directory
+ *   - Prompting the user to pick a directory (returns absolute path)
  *   - Enumerating supported image files within it
- *   - Reading file blobs from a stored handle
+ *   - Reading file blobs from a stored path
  */
+
+import { open } from '@tauri-apps/plugin-dialog';
+import { readDir, readFile } from '@tauri-apps/plugin-fs';
+import { join } from '@tauri-apps/api/path';
 
 /** File extensions we'll accept as image input (phase 1: JPEG/TIFF). */
 const SUPPORTED_EXTENSIONS = new Set([
-	'jpg', 'jpeg', 'tif', 'tiff',
+	'jpg',
+	'jpeg',
+	'tif',
+	'tiff',
 	// Phase 5: RAW formats (added when libraw WASM is integrated)
 	// 'arw', 'cr2', 'cr3', 'nef', 'raf', 'dng', 'orf', 'rw2',
 ]);
@@ -23,20 +31,24 @@ export interface DirectoryFile {
 // ─── Directory picker ─────────────────────────────────────────────────────────
 
 /**
- * Opens the native directory picker and returns the handle.
+ * Opens the native directory picker and returns the absolute path.
  * Returns null if the user cancels.
  */
-export async function pickDirectory(): Promise<FileSystemDirectoryHandle | null> {
+export async function pickDirectory(): Promise<string | null> {
 	try {
-		return await window.showDirectoryPicker({ mode: 'read' });
+		const selected = await open({
+			directory: true,
+			multiple: false,
+			title: 'Select Image Directory',
+		});
+
+		// open() returns string | string[] | null
+		if (typeof selected === 'string') return selected;
+		return null;
 	} catch (err) {
-		if (err instanceof DOMException) {
-			// User cancelled
-			if (err.name === 'AbortError') return null;
-			// Picker already open (rapid double-click, etc.) — silently ignore
-			if (err.name === 'NotAllowedError') return null;
-		}
-		throw err;
+		// User cancelled or error occurred
+		console.error('[pickDirectory] Error:', err);
+		return null;
 	}
 }
 
@@ -48,69 +60,79 @@ function isSupported(filename: string): boolean {
 }
 
 /**
- * Recursively lists all supported image files in a directory handle.
+ * Recursively lists all supported image files in a directory path.
  * Files are returned sorted by name.
  */
 export async function listImageFiles(
-	dir: FileSystemDirectoryHandle,
+	dirPath: string,
 	prefix = ''
 ): Promise<DirectoryFile[]> {
 	const results: DirectoryFile[] = [];
 
-	for await (const [name, entry] of dir) {
-		if (entry.kind === 'file' && isSupported(name)) {
-			results.push({
-				filename: name,
-				relativePath: prefix ? `${prefix}/${name}` : name,
-			});
-		} else if (entry.kind === 'directory') {
-			const subDir = await dir.getDirectoryHandle(name);
-			const nested = await listImageFiles(subDir, prefix ? `${prefix}/${name}` : name);
-			results.push(...nested);
+	try {
+		const entries = await readDir(dirPath);
+
+		for (const entry of entries) {
+			if (!entry.isDirectory && entry.name && isSupported(entry.name)) {
+				results.push({
+					filename: entry.name,
+					relativePath: prefix ? `${prefix}/${entry.name}` : entry.name,
+				});
+			} else if (entry.isDirectory && entry.name) {
+				const subDirPath = await join(dirPath, entry.name);
+				const nested = await listImageFiles(
+					subDirPath,
+					prefix ? `${prefix}/${entry.name}` : entry.name
+				);
+				results.push(...nested);
+			}
 		}
+	} catch (err) {
+		console.error(`[listImageFiles] Error reading directory ${dirPath}:`, err);
 	}
 
-	return results.sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }));
+	return results.sort((a, b) =>
+		a.filename.localeCompare(b.filename, undefined, { numeric: true })
+	);
 }
 
 // ─── File access ──────────────────────────────────────────────────────────────
 
 /**
- * Retrieves a File object from a stored directory handle by filename.
- * Supports one level of subdirectory via relativePath.
+ * Retrieves a File object from a stored directory path by relative filename.
+ * Supports nested subdirectories via relativePath (e.g. "subdir/image.jpg").
  */
-export async function getFile(
-	dir: FileSystemDirectoryHandle,
-	relativePath: string
-): Promise<File> {
-	const parts = relativePath.split('/');
-	let current: FileSystemDirectoryHandle = dir;
+export async function getFile(dirPath: string, relativePath: string): Promise<File> {
+	const fullPath = await join(dirPath, relativePath);
+	const uint8Array = await readFile(fullPath);
 
-	for (let i = 0; i < parts.length - 1; i++) {
-		current = await current.getDirectoryHandle(parts[i]);
-	}
+	// Convert Uint8Array to Blob, then to File
+	const blob = new Blob([uint8Array]);
+	const filename = relativePath.split('/').pop() ?? 'unknown';
 
-	const filename = parts[parts.length - 1];
-	const fileHandle = await current.getFileHandle(filename);
-	return fileHandle.getFile();
+	return new File([blob], filename, {
+		type: inferMimeType(filename),
+	});
+}
+
+function inferMimeType(filename: string): string {
+	const ext = filename.split('.').pop()?.toLowerCase();
+	if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+	if (ext === 'tif' || ext === 'tiff') return 'image/tiff';
+	return 'application/octet-stream';
 }
 
 // ─── Permission check ─────────────────────────────────────────────────────────
 
 /**
- * Checks (and optionally requests) read permission for a stored handle.
- * Returns true if permission is granted.
- *
- * Browser security: stored handles lose permission across sessions.
- * Call this before any file access and prompt the user if it returns false.
+ * In Tauri, permissions are granted once at directory picker time.
+ * This is a compatibility shim for the web version's permission model.
+ * Always returns true since Tauri has persistent filesystem access.
  */
 export async function verifyPermission(
-	handle: FileSystemDirectoryHandle,
-	{ request = false }: { request?: boolean } = {}
+	_path: string,
+	_opts: { request?: boolean } = {}
 ): Promise<boolean> {
-	const opts: FileSystemHandlePermissionDescriptor = { mode: 'read' };
-	const state = await handle.queryPermission(opts);
-	if (state === 'granted') return true;
-	if (!request) return false;
-	return (await handle.requestPermission(opts)) === 'granted';
+	// No permission verification needed in Tauri
+	return true;
 }

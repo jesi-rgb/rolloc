@@ -14,7 +14,7 @@
 	let filmStock = $state('');
 	let camera    = $state('');
 	let notes     = $state('');
-	let handle    = $state<FileSystemDirectoryHandle | null>(null);
+	let dirPath   = $state<string | null>(null);
 	let dirName   = $state('');
 	let busy      = $state(false);
 	let picking   = $state(false);
@@ -22,18 +22,15 @@
 
 	async function pickDir() {
 		if (picking) return;
-		// State mutations MUST come after showDirectoryPicker is called — any $state
-		// write before it flushes a DOM update microtask that consumes the user
-		// activation token, causing the browser to throw NotAllowedError.
-		const promise = pickDirectory();
 		picking = true;
 		error = '';
 		try {
-			const h = await promise;
-			if (h) {
-				handle  = h;
-				dirName = h.name;
-				if (!label) label = h.name;
+			const path = await pickDirectory();
+			if (path) {
+				dirPath = path;
+				// Extract directory name from path (handle both / and \ separators)
+				dirName = path.split(/[\\/]/).filter(Boolean).pop() ?? '';
+				if (!label) label = dirName;
 			}
 		} finally {
 			picking = false;
@@ -41,13 +38,13 @@
 	}
 
 	async function submit() {
-		if (!handle) { error = 'Please select a directory.'; return; }
+		if (!dirPath) { error = 'Please select a directory.'; return; }
 		if (!label.trim()) { error = 'Label is required.'; return; }
 
 		busy  = true;
 		error = '';
 		try {
-			const roll = await createRoll({ label: label.trim(), filmStock, camera, notes, handle });
+			const roll = await createRoll({ label: label.trim(), filmStock, camera, notes, path: dirPath });
 			onCreated(roll);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);

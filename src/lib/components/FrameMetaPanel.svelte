@@ -16,11 +16,11 @@
 
 	interface Props {
 		frame: Frame;
-		dirHandle?: FileSystemDirectoryHandle | null;
+		dirPath?: string | null;
 		onUpdate?: (updated: Frame) => void;
 	}
 
-	let { frame, dirHandle = null, onUpdate }: Props = $props();
+	let { frame, dirPath = null, onUpdate }: Props = $props();
 
 	// Local editable copies — initialised without tracking the prop
 	// so Svelte doesn't warn about capturing the initial value only.
@@ -46,13 +46,13 @@
 	const frameId = $derived(frame.id);
 	const filename = $derived(frame.filename);
 
-	// Load preview only when frame identity (id) or dirHandle changes.
+	// Load preview only when frame identity (id) or dirPath changes.
 	// We derive stable primitives above so that rating/flag/notes updates on
 	// the same frame (which swap in a new proxy object) don't retrigger this.
 	$effect(() => {
 		const id = frameId;
 		const name = filename;
-		const handle = dirHandle;
+		const path = dirPath;
 
 		// Revoke any previous URL
 		const prevUrl = untrack(() => previewUrl);
@@ -61,13 +61,13 @@
 			previewUrl = null;
 		}
 
-		if (!handle) return;
+		if (!path) return;
 
 		previewLoading = true;
 
 		let cancelled = false;
 
-		getFile(handle, name)
+		getFile(path, name)
 			.then(async (file) => {
 				// Phase 1: show thumb immediately (almost always cached)
 				const thumbUrl = await getThumbURL(id, file);
@@ -167,7 +167,7 @@
 			<div
 				class="w-full h-full animate-pulse bg-base-subtle"
 			></div>
-		{:else if !dirHandle}
+		{:else if !dirPath}
 			<div
 				class="w-full h-full flex items-center justify-center text-xs text-content-subtle"
 			>
