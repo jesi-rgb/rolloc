@@ -60,6 +60,8 @@ const FUJI_TAGS = {
 	0x100f: 'Clarity',
 	0x1047: 'GrainEffectRoughness',
 	0x1048: 'ColorChromeEffect',
+	0x1049: 'BWAdjustment',
+	0x104b: 'BWMagentaGreen',
 	0x104c: 'GrainEffectSize',
 	0x104e: 'ColorChromeFXBlue',
 };
@@ -210,6 +212,7 @@ export interface FujifilmSettings {
 	dynamicRange?: string;
 	dynamicRangeSetting?: string;
 	whiteBalance?: string;
+	whiteBalanceAdjustment?: { warmCool: number; magentaGreen: number };
 	noiseReduction?: number;
 	sharpness?: number;
 	imageStabilization?: string;
@@ -272,18 +275,37 @@ export function parseFujifilmMakerNote(
 
 		// Read value based on type
 		let value: number;
-		if (type === 3) {
+		if (type === 1) {
+			// BYTE (1 byte unsigned)
+			value = makerNote[valueOffset];
+		} else if (type === 2) {
+			// ASCII string - skip for now
+			continue;
+		} else if (type === 3) {
 			// SHORT (2 bytes)
 			value = read16(makerNote, valueOffset, true);
 		} else if (type === 4) {
 			// LONG (4 bytes)
 			value = read32(makerNote, valueOffset, true);
+		} else if (type === 6) {
+			// SBYTE (signed 1 byte) - used for int8s values
+			const unsigned = makerNote[valueOffset];
+			value = unsigned > 0x7f ? unsigned - 0x100 : unsigned;
+		} else if (type === 8) {
+			// SSHORT (signed 2 bytes)
+			const unsigned = read16(makerNote, valueOffset, true);
+			value = unsigned > 0x7fff ? unsigned - 0x10000 : unsigned;
 		} else if (type === 9) {
 			// SLONG (signed 4 bytes)
 			const unsigned = read32(makerNote, valueOffset, true);
 			value = unsigned > 0x7fffffff ? unsigned - 0x100000000 : unsigned;
 		} else {
 			continue; // Skip other types for now
+		}
+
+		// Log all tags for debugging
+		if (tag === 0x100a || tag === 0x1049 || tag === 0x104b) {
+			console.log(`Tag 0x${tag.toString(16)}: type=${type}, count=${count}, value=${value}`);
 		}
 
 		// Decode known tags
@@ -293,6 +315,89 @@ export function parseFujifilmMakerNote(
 				break;
 			case 0x1003: // Saturation (may contain film sim for Acros/B&W)
 				saturationValue = value;
+				break;
+			case 0x100a: // WhiteBalanceFineTune (fallback for some camera models)
+				// This tag can store values in different formats depending on camera model:
+				// - Type 3 (SHORT), count=2: two 16-bit values inline, divide by 20
+				// - Type 9 (SLONG), count=2: two 32-bit signed values at offset, divide by 100
+				// Scale factor varies by camera model:
+				// - Older cameras: divide by 20 (range -180 to +180 → -9 to +9)
+				// - Newer cameras: divide by 100 (range -900 to +900 → -9 to +9)
+				if (count === 2) {
+					let red: number, blue: number;
+					
+					if (type === 3) {
+						// Type 3 (SHORT): values are inline in the 4-byte value field
+						const redRaw = read16(makerNote, valueOffset, true);
+						const blueRaw = read16(makerNote, valueOffset + 2, true);
+						// Convert unsigned to signed if needed
+						red = redRaw > 0x7fff ? redRaw - 0x10000 : redRaw;
+						blue = blueRaw > 0x7fff ? blueRaw - 0x10000 : blueRaw;
+						console.log('WhiteBalanceFineTune (SHORT) raw:', { red, blue, redRaw, blueRaw });
+					} else if (type === 9) {
+						// Type 9 (SLONG): valueOffset field contains pointer to data
+						const dataOffset = read32(makerNote, valueOffset, true);
+						// Read two 32-bit signed integers from the data location
+						const redUnsigned = read32(makerNote, dataOffset, true);
+						const blueUnsigned = read32(makerNote, dataOffset + 4, true);
+						// Convert unsigned to signed
+						red = redUnsigned > 0x7fffffff ? redUnsigned - 0x100000000 : redUnsigned;
+						blue = blueUnsigned > 0x7fffffff ? blueUnsigned - 0x100000000 : blueUnsigned;
+						console.log('WhiteBalanceFineTune (SLONG) raw:', { red, blue, redUnsigned, blueUnsigned, dataOffset });
+					} else {
+						console.log(`WhiteBalanceFineTune: unsupported type ${type}`);
+						break;
+					}
+					
+					// Only set if not already set by 0x1049/0x104b (newer tags take precedence)
+					if (!settings.whiteBalanceAdjustment) {
+						// Auto-detect the divisor based on value magnitude
+						const maxAbs = Math.max(Math.abs(red), Math.abs(blue));
+						let divisor: number;
+						
+						if (maxAbs > 180) {
+							// Values are in range -900 to +900, divide by 100
+							divisor = 100;
+						} else {
+							// Values are in range -180 to +180, divide by 20
+							divisor = 20;
+						}
+						
+						// red = magenta/green axis, blue = warm/cool axis
+						const mg = red / divisor;
+						const wc = blue / divisor;
+						
+						console.log('WhiteBalanceFineTune calculated:', { mg, wc, divisor });
+						
+						// Only set if values are in valid range (-9 to +9)
+						// This prevents displaying garbage data from uninitialized EXIF fields
+						if (mg >= -9 && mg <= 9 && wc >= -9 && wc <= 9) {
+							settings.whiteBalanceAdjustment = { 
+								warmCool: wc, 
+								magentaGreen: mg 
+							};
+							console.log('WhiteBalanceFineTune set:', settings.whiteBalanceAdjustment);
+						} else {
+							console.log('WhiteBalanceFineTune out of range, skipped');
+						}
+					}
+				}
+				break;
+			case 0x1049: // BWAdjustment (warm/cool axis)
+				// Value is int8s (-9 to +9), positive = warm, negative = cool
+				console.log('BWAdjustment (0x1049) value:', value);
+				if (!settings.whiteBalanceAdjustment) {
+					settings.whiteBalanceAdjustment = { warmCool: 0, magentaGreen: 0 };
+				}
+				settings.whiteBalanceAdjustment.warmCool = value;
+				break;
+			case 0x104b: // BWMagentaGreen (magenta/green axis)
+				// Value is int8s (-9 to +9), positive = green, negative = magenta
+				console.log('BWMagentaGreen (0x104b) value:', value);
+				if (!settings.whiteBalanceAdjustment) {
+					settings.whiteBalanceAdjustment = { warmCool: 0, magentaGreen: 0 };
+				}
+				settings.whiteBalanceAdjustment.magentaGreen = value;
 				break;
 			case 0x1047: // GrainEffectRoughness
 				settings.grainEffect = GRAIN_EFFECT[value] || `Unknown (${value})`;
@@ -340,5 +445,6 @@ export function parseFujifilmMakerNote(
 		settings.filmMode = FILM_MODES[filmModeValue] || `Unknown (0x${filmModeValue.toString(16)})`;
 	}
 
+	console.log('Final FujifilmSettings:', settings);
 	return settings;
 }

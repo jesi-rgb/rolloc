@@ -83,7 +83,6 @@
 	       {selected
 		? 'border-primary shadow-lg shadow-primary/20'
 		: 'border-base-subtle hover:border-content-subtle'}"
-	aria-label="Frame {frame.index}: {frame.filename}"
 	aria-pressed={selected}
 >
 	<!-- Thumbnail area — 3:2 aspect ratio -->

@@ -8,6 +8,7 @@
 	import MiniCalendar from "$lib/components/MiniCalendar.svelte";
 	import AnalogClock from "$lib/components/AnalogClock.svelte";
 	import ExposureCompensationScale from "$lib/components/ExposureCompensationScale.svelte";
+	import WhiteBalanceGrid from "$lib/components/WhiteBalanceGrid.svelte";
 	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
 	import type { ExifData } from "$lib/components/exif-types";
 
@@ -28,16 +29,35 @@
 		return `f/${f.toFixed(1)}`;
 	}
 
+	/**
+	 * Check if white balance adjustment is valid and non-zero.
+	 * Only show the grid if there's actually a manual adjustment.
+	 */
+	function hasValidWBAdjustment(
+		wb: { warmCool: number; magentaGreen: number } | undefined,
+	): boolean {
+		if (!wb) return false;
+		// Ensure values are in valid range (-9 to +9)
+		if (
+			wb.warmCool < -9 ||
+			wb.warmCool > 9 ||
+			wb.magentaGreen < -9 ||
+			wb.magentaGreen > 9
+		) {
+			return false;
+		}
+		// Only show if at least one axis has a non-zero adjustment
+		return wb.warmCool !== 0 || wb.magentaGreen !== 0;
+	}
+
 	function formatFocalLength(fl: number | undefined): string {
 		if (!fl) return "—";
 		return `${Math.round(fl)}mm`;
 	}
-
-
 </script>
 
 <aside
-	class="w-80 border-l border-base-subtle bg-base-muted overflow-y-auto p-base"
+	class="w-80 border-l border-base-subtle tabular-nums bg-base-muted overflow-y-auto p-base"
 >
 	<h2
 		class="text-sm font-medium text-center text-content-muted uppercase tracking-wide mb-base"
@@ -112,21 +132,27 @@
 				</div>
 			{/if}
 
-		{#if exif.exposureCompensation !== undefined && exif.exposureCompensation !== null}
-			<div class="col-span-2">
-				<dt class="text-content-muted mb-sm">Exposure Compensation</dt>
-				<dd class="text-content font-medium">
-					<ExposureCompensationScale value={exif.exposureCompensation} />
-				</dd>
-			</div>
-		{/if}
+			{#if exif.exposureCompensation !== undefined && exif.exposureCompensation !== null}
+				<div class="col-span-2">
+					<dt class="text-content-muted mb-sm">
+						Exposure Compensation
+					</dt>
+					<dd class="text-content font-medium">
+						<ExposureCompensationScale
+							value={exif.exposureCompensation}
+						/>
+					</dd>
+				</div>
+			{/if}
 
 			{#if exif.fuji}
 				{#if exif.fuji.filmMode}
 					{@const icon = getFilmSimIcon(exif.fuji.filmMode)}
 					<div>
 						<dt class="text-content-muted">Film Simulation</dt>
-						<dd class="text-content font-medium flex items-baseline gap-sm">
+						<dd
+							class="text-content font-medium flex items-baseline gap-sm"
+						>
 							{#if icon}
 								<span
 									class="inline-block leading-none"
@@ -182,6 +208,20 @@
 						<dt class="text-content-muted">Dynamic Range</dt>
 						<dd class="text-content font-medium">
 							{exif.fuji.dynamicRange}
+						</dd>
+					</div>
+				{/if}
+
+				{#if exif.fuji.whiteBalanceAdjustment && hasValidWBAdjustment(exif.fuji.whiteBalanceAdjustment)}
+					<div class="col-span-2">
+						<dt class="text-content-muted mb-sm">White Balance</dt>
+						<dd class="text-content font-medium">
+							<WhiteBalanceGrid
+								warmCool={exif.fuji.whiteBalanceAdjustment
+									.warmCool}
+								magentaGreen={exif.fuji.whiteBalanceAdjustment
+									.magentaGreen}
+							/>
 						</dd>
 					</div>
 				{/if}

@@ -24,26 +24,18 @@
 	       {selected
 		? 'border-primary ring-2 ring-primary ring-offset-1 ring-offset-base'
 		: 'border-base-subtle hover:border-content-subtle'}"
-	aria-label="Image {image.index + 1}: {image.filename}"
 >
 	<!-- Thumbnail area — 3:2 aspect ratio -->
 	<div class="relative w-full bg-base-muted" style="aspect-ratio: 3/2;">
 		{#if thumbUrl}
 			<img
 				src={thumbUrl}
-				alt="Image {image.index + 1}"
+				alt="Image {image.filename}"
 				class="absolute inset-0 w-full h-full object-cover"
 			/>
 		{:else}
 			<div class="absolute inset-0 bg-base-subtle animate-pulse"></div>
 		{/if}
-
-		<!-- Image index -->
-		<span
-			class="absolute bottom-1.5 right-1.5 text-[10px] font-mono text-white/60 bg-black/50 rounded px-1 leading-tight"
-		>
-			{image.index + 1}
-		</span>
 	</div>
 
 	<!-- Footer -->
