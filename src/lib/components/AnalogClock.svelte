@@ -40,11 +40,15 @@
 		// Format time string
 		const timeString = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 
+		// Determine AM/PM
+		const ampm = hours >= 12 ? "PM" : "AM";
+
 		return {
 			hourAngle,
 			minuteAngle,
 			secondAngle,
 			timeString,
+			ampm,
 		};
 	});
 
@@ -147,6 +151,20 @@
 				fill="currentColor"
 				class="text-primary"
 			/>
+
+			<!-- AM/PM indicator (below center, like a watch brand) -->
+			<text
+				x={CENTER}
+				y={CENTER + 40}
+				text-anchor="middle"
+				font-size="10"
+				font-weight="500"
+				fill="currentColor"
+				style="paint-order: stroke fill;"
+				class="text-content-muted z-10 stroke-2 stroke-base-muted"
+			>
+				{clockData.ampm}
+			</text>
 		</svg>
 	</div>
 {:else}

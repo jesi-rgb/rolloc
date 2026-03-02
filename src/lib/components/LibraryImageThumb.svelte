@@ -56,7 +56,7 @@
 	async function loadThumb() {
 		status = "loading";
 		try {
-			const file = await getFile(dirPath, image.filename);
+			const file = await getFile(dirPath, image.relativePath);
 			const objUrl = await getThumbURL(image.id, file);
 			if (currentUrl) URL.revokeObjectURL(currentUrl);
 			currentUrl = objUrl;

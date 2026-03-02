@@ -29,6 +29,7 @@ describe('rescanLibrary', () => {
 			{
 				id: 'img-1',
 				libraryId,
+				relativePath: 'photo1.jpg',
 				filename: 'photo1.jpg',
 				index: 0,
 				rating: 0,
@@ -38,6 +39,7 @@ describe('rescanLibrary', () => {
 			{
 				id: 'img-2',
 				libraryId,
+				relativePath: 'photo2.jpg',
 				filename: 'photo2.jpg',
 				index: 1,
 				rating: 3,
@@ -48,10 +50,10 @@ describe('rescanLibrary', () => {
 
 		// Files found in directory (includes existing + new)
 		const filesInDirectory = [
-			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg' },
-			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg' },
-			{ filename: 'photo3.jpg', relativePath: 'photo3.jpg' },
-			{ filename: 'photo4.jpg', relativePath: 'photo4.jpg' },
+			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg', createdAt: 1000 },
+			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg', createdAt: 2000 },
+			{ filename: 'photo3.jpg', relativePath: 'photo3.jpg', createdAt: 3000 },
+			{ filename: 'photo4.jpg', relativePath: 'photo4.jpg', createdAt: 4000 },
 		];
 
 		// Mock IDB functions
@@ -72,7 +74,9 @@ describe('rescanLibrary', () => {
 		const savedImages = vi.mocked(idb.putImages).mock.calls[0][0];
 		expect(savedImages).toHaveLength(2);
 		expect(savedImages[0].filename).toBe('photo3.jpg');
+		expect(savedImages[0].relativePath).toBe('photo3.jpg');
 		expect(savedImages[1].filename).toBe('photo4.jpg');
+		expect(savedImages[1].relativePath).toBe('photo4.jpg');
 
 		// Verify new images have correct indices (continuing from max existing)
 		expect(savedImages[0].index).toBe(2);
@@ -93,6 +97,7 @@ describe('rescanLibrary', () => {
 			{
 				id: 'img-1',
 				libraryId,
+				relativePath: 'photo1.jpg',
 				filename: 'photo1.jpg',
 				index: 0,
 				rating: 0,
@@ -101,7 +106,7 @@ describe('rescanLibrary', () => {
 			},
 		];
 
-		const filesInDirectory = [{ filename: 'photo1.jpg', relativePath: 'photo1.jpg' }];
+		const filesInDirectory = [{ filename: 'photo1.jpg', relativePath: 'photo1.jpg', createdAt: 1000 }];
 
 		vi.mocked(idb.getPath).mockResolvedValue(dirPath);
 		vi.mocked(idb.getImages).mockResolvedValue(existingImages);
@@ -126,8 +131,8 @@ describe('rescanLibrary', () => {
 		const dirPath = '/path/to/library';
 
 		const filesInDirectory = [
-			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg' },
-			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg' },
+			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg', createdAt: 1000 },
+			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg', createdAt: 2000 },
 		];
 
 		vi.mocked(idb.getPath).mockResolvedValue(dirPath);
@@ -154,6 +159,7 @@ describe('rescanLibrary', () => {
 			{
 				id: 'img-1',
 				libraryId,
+				relativePath: 'photo1.jpg',
 				filename: 'photo1.jpg',
 				index: 0,
 				rating: 5,
@@ -163,8 +169,8 @@ describe('rescanLibrary', () => {
 		];
 
 		const filesInDirectory = [
-			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg' },
-			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg' },
+			{ filename: 'photo1.jpg', relativePath: 'photo1.jpg', createdAt: 1000 },
+			{ filename: 'photo2.jpg', relativePath: 'photo2.jpg', createdAt: 2000 },
 		];
 
 		vi.mocked(idb.getPath).mockResolvedValue(dirPath);

@@ -34,16 +34,16 @@ export async function createLibrary(label: string, dirPath: string): Promise<Lib
 
 	// Scan directory for image files
 	const files = await listImageFiles(dirPath);
-	const now = Date.now();
 	const images: LibraryImage[] = files.map((file, idx) => ({
 		id: crypto.randomUUID(),
 		libraryId: id,
+		relativePath: file.relativePath,
 		filename: file.filename,
 		index: idx,
 		rating: 0,
 		notes: '',
-		// Increment timestamp by index so images have unique createdAt values
-		createdAt: now + idx,
+		// Use actual file creation/modification timestamp
+		createdAt: file.createdAt,
 	}));
 
 	// Store library, images, and path
@@ -73,14 +73,14 @@ export async function getLibraryPath(libraryId: string): Promise<string | null> 
 /**
  * Get a file for an image in a library.
  */
-export async function getImageFile(libraryId: string, filename: string): Promise<File | null> {
+export async function getImageFile(libraryId: string, relativePath: string): Promise<File | null> {
 	const path = await getLibraryPath(libraryId);
 	if (!path) return null;
 
 	try {
-		return await getFile(path, filename);
+		return await getFile(path, relativePath);
 	} catch (err) {
-		console.error(`Failed to get file ${filename}:`, err);
+		console.error(`Failed to get file ${relativePath}:`, err);
 		return null;
 	}
 }
@@ -114,15 +114,16 @@ export async function rescanLibrary(libraryId: string): Promise<number> {
 	const maxIndex = existingImages.reduce((max, img) => Math.max(max, img.index), -1);
 
 	// Create LibraryImage records for new files
-	const now = Date.now();
 	const newImages: LibraryImage[] = newFiles.map((file, idx) => ({
 		id: crypto.randomUUID(),
 		libraryId,
+		relativePath: file.relativePath,
 		filename: file.filename,
 		index: maxIndex + 1 + idx,
 		rating: 0,
 		notes: '',
-		createdAt: now + idx,
+		// Use actual file creation/modification timestamp
+		createdAt: file.createdAt,
 	}));
 
 	// Store new images

@@ -8,38 +8,127 @@
 	 *   ← / → (or j / k)   — prev / next image
 	 *   e / Enter          — view selected image
 	 */
-	import { onMount } from "svelte";
-	import { goto } from "$app/navigation";
+	import { onMount, untrack } from "svelte";
+	import { goto, beforeNavigate, afterNavigate } from "$app/navigation";
 	import { page } from "$app/state";
+	import { resolve } from "$app/paths";
+	import { SvelteMap } from "svelte/reactivity";
 	import { getLibrary, getImages, getLibraryPath, rescanLibrary } from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
-	type SortKey = 'createdAt-desc' | 'createdAt-asc' | 'filename-asc' | 'filename-desc' 
-	             | 'rating-desc' | 'rating-asc' | 'index-asc' | 'index-desc';
+	type SortKey = 'createdAt-desc' | 'createdAt-asc';
+	
+	type GroupBy = 'none' | 'day' | 'month' | 'year';
 
 	const libraryId = $derived(page.params.id ?? "");
+	// Capture initial value for scroll key to avoid reactivity warning
+	const SCROLL_KEY = untrack(() => `library-scroll-${libraryId}`);
+	const SORT_KEY = 'library-sort-preference';
+	const GROUP_KEY = 'library-group-preference';
 
 	let library = $state<Library | null>(null);
 	let images = $state<LibraryImage[]>([]);
 	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
-	let sortBy = $state<SortKey>('createdAt-desc');
+	
+	// Load preferences from localStorage, with fallbacks
+	const savedSort = typeof localStorage !== 'undefined' ? localStorage.getItem(SORT_KEY) : null;
+	const savedGroup = typeof localStorage !== 'undefined' ? localStorage.getItem(GROUP_KEY) : null;
+	
+	let sortBy = $state<SortKey>((savedSort as SortKey) ?? 'createdAt-desc');
+	let groupBy = $state<GroupBy>((savedGroup as GroupBy) ?? 'none');
 	let selIdx = $state(0);
+	let scrollContainer = $state<HTMLElement | null>(null);
+
+	// Save preferences to localStorage when they change
+	$effect(() => {
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(SORT_KEY, sortBy);
+		}
+	});
+
+	$effect(() => {
+		if (typeof localStorage !== 'undefined') {
+			localStorage.setItem(GROUP_KEY, groupBy);
+		}
+	});
 
 	let sortedImages = $derived(
-		sortBy === 'createdAt-desc' ? [...images].sort((a, b) => b.createdAt - a.createdAt) :
-		sortBy === 'createdAt-asc' ? [...images].sort((a, b) => a.createdAt - b.createdAt) :
-		sortBy === 'filename-asc' ? [...images].sort((a, b) => a.filename.localeCompare(b.filename)) :
-		sortBy === 'filename-desc' ? [...images].sort((a, b) => b.filename.localeCompare(a.filename)) :
-		sortBy === 'rating-desc' ? [...images].sort((a, b) => b.rating - a.rating) :
-		sortBy === 'rating-asc' ? [...images].sort((a, b) => a.rating - b.rating) :
-		sortBy === 'index-asc' ? [...images].sort((a, b) => a.index - b.index) :
-		sortBy === 'index-desc' ? [...images].sort((a, b) => b.index - a.index) :
+		sortBy === 'createdAt-desc' ? [...images].sort((a, b) => {
+			const dateDiff = b.createdAt - a.createdAt;
+			return dateDiff !== 0 ? dateDiff : a.filename.localeCompare(b.filename);
+		}) :
+		sortBy === 'createdAt-asc' ? [...images].sort((a, b) => {
+			const dateDiff = a.createdAt - b.createdAt;
+			return dateDiff !== 0 ? dateDiff : a.filename.localeCompare(b.filename);
+		}) :
 		[...images]
 	);
+
+	interface ImageGroup {
+		label: string;
+		images: LibraryImage[];
+	}
+
+	let groupedImages = $derived.by(() => {
+		if (groupBy === 'none') {
+			return [{ label: '', images: sortedImages }];
+		}
+
+		const groups = new SvelteMap<string, LibraryImage[]>();
+
+		for (const image of sortedImages) {
+			const date = new Date(image.createdAt);
+			let key: string;
+			let label: string;
+
+			if (groupBy === 'day') {
+				key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+				label = date.toLocaleDateString(undefined, {
+					year: 'numeric',
+					month: 'long',
+					day: 'numeric',
+					weekday: 'long',
+				});
+			} else if (groupBy === 'month') {
+				key = `${date.getFullYear()}-${date.getMonth()}`;
+				label = date.toLocaleDateString(undefined, {
+					year: 'numeric',
+					month: 'long',
+				});
+			} else { // year
+				key = `${date.getFullYear()}`;
+				label = date.getFullYear().toString();
+			}
+
+			if (!groups.has(key)) {
+				groups.set(key, []);
+			}
+			groups.get(key)!.push(image);
+		}
+
+		return Array.from(groups.entries()).map(([key, images]) => ({
+			label: images.length > 0 
+				? (groupBy === 'day' 
+					? new Date(images[0].createdAt).toLocaleDateString(undefined, {
+							year: 'numeric',
+							month: 'long',
+							day: 'numeric',
+							weekday: 'long',
+						})
+					: groupBy === 'month'
+					? new Date(images[0].createdAt).toLocaleDateString(undefined, {
+							year: 'numeric',
+							month: 'long',
+						})
+					: new Date(images[0].createdAt).getFullYear().toString())
+				: key,
+			images,
+		}));
+	});
 
 	onMount(async () => {
 		if (!libraryId) {
@@ -78,6 +167,34 @@
 		}
 
 		loading = false;
+
+		// Restore scroll position after content has loaded
+		const saved = sessionStorage.getItem(SCROLL_KEY);
+		if (saved) {
+			const scrollPos = parseInt(saved, 10);
+			console.log('[Library onMount] Attempting to restore scroll to:', scrollPos);
+			
+			// Wait for next tick to ensure DOM is ready
+			setTimeout(() => {
+				const main = document.querySelector('main[data-scroll-container]') as HTMLElement | null;
+				if (main) {
+					main.scrollTop = scrollPos;
+					console.log('[Library onMount] Scroll set to:', main.scrollTop);
+					// Clear the saved position
+					sessionStorage.removeItem(SCROLL_KEY);
+				}
+			}, 100);
+		}
+	});
+
+	// Save scroll position when navigating away to an image
+	beforeNavigate((nav) => {
+		const main = document.querySelector('main[data-scroll-container]') as HTMLElement | null;
+		if (main && nav.to?.route.id?.includes('[imageId]')) {
+			const pos = main.scrollTop;
+			sessionStorage.setItem(SCROLL_KEY, pos.toString());
+			console.log('[Library beforeNavigate] Saved scroll position:', pos);
+		}
 	});
 
 	function formatDate(ms: number): string {
@@ -113,7 +230,7 @@
 				e.preventDefault();
 				const selected = sortedImages[selIdx];
 				if (selected) {
-					await goto(`/library/${libraryId}/${selected.id}`);
+					await goto(resolve(`/library/${libraryId}/${selected.id}`));
 				}
 				break;
 		}
@@ -132,7 +249,7 @@
 		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
 	>
 		<a
-			href="/"
+			href={resolve("/")}
 			class="text-content-muted hover:text-content transition text-sm"
 			>← Library</a
 		>
@@ -163,12 +280,26 @@
 					>
 						<option value="createdAt-desc">Newest First</option>
 						<option value="createdAt-asc">Oldest First</option>
-						<option value="filename-asc">Filename (A-Z)</option>
-						<option value="filename-desc">Filename (Z-A)</option>
-						<option value="rating-desc">Rating (High-Low)</option>
-						<option value="rating-asc">Rating (Low-High)</option>
-						<option value="index-asc">Index (Ascending)</option>
-						<option value="index-desc">Index (Descending)</option>
+					</select>
+				</div>
+				<div class="flex items-center gap-xs">
+					<label
+						for="group-select"
+						class="text-xs text-content-subtle"
+					>
+						Group by:
+					</label>
+					<select
+						id="group-select"
+						bind:value={groupBy}
+						class="text-xs px-2 py-1 rounded border border-base-subtle bg-base
+						       text-content hover:border-content-subtle focus:border-primary
+						       focus:outline-none transition"
+					>
+						<option value="none">None</option>
+						<option value="day">Day</option>
+						<option value="month">Month</option>
+						<option value="year">Year</option>
 					</select>
 				</div>
 			{/if}
@@ -188,23 +319,38 @@
 		<div class="flex-1 flex items-center justify-center text-content-muted">
 			No images found in this library.
 		</div>
+	{:else if !dirPath}
+		<div class="flex-1 flex items-center justify-center text-content-muted">
+			Loading directory path…
+		</div>
 	{:else}
 		<!-- Grid view -->
-		<main class="flex-1 overflow-y-auto p-l">
-			<ul
-				class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
-			>
-				{#each sortedImages as image, i (image.id)}
-					<li>
-						<LibraryImageThumb
-							{image}
-							{libraryId}
-							dirPath={dirPath!}
-							selected={i === selIdx}
-						/>
-					</li>
-				{/each}
-			</ul>
+		<main bind:this={scrollContainer} data-scroll-container class="flex-1 overflow-y-auto p-l">
+			{#each groupedImages as group (group.label)}
+				{#if groupBy !== 'none'}
+					<h2 class="text-lg font-semibold text-content mb-base mt-l first:mt-0">
+						{group.label}
+						<span class="text-sm text-content-subtle font-normal ml-xs">
+							({group.images.length} image{group.images.length !== 1 ? 's' : ''})
+						</span>
+					</h2>
+				{/if}
+				<ul
+					class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm mb-xl"
+				>
+					{#each group.images as image, i (image.id)}
+						{@const globalIndex = sortedImages.findIndex(img => img.id === image.id)}
+						<li>
+							<LibraryImageThumb
+								{image}
+								{libraryId}
+								dirPath={dirPath}
+								selected={globalIndex === selIdx}
+							/>
+						</li>
+					{/each}
+				</ul>
+			{/each}
 		</main>
 
 		<!-- Keyboard shortcut hint bar -->

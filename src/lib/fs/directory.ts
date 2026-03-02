@@ -9,7 +9,7 @@
  */
 
 import { open } from '@tauri-apps/plugin-dialog';
-import { readDir, readFile } from '@tauri-apps/plugin-fs';
+import { readDir, readFile, stat } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
 /** File extensions we'll accept as image input (phase 1: JPEG/TIFF). */
@@ -26,6 +26,8 @@ export interface DirectoryFile {
 	filename: string;
 	/** Full relative path from the directory root (for nested dirs). */
 	relativePath: string;
+	/** File creation time (birthtime), or mtime if birthtime unavailable. */
+	createdAt: number;
 }
 
 // ─── Directory picker ─────────────────────────────────────────────────────────
@@ -74,9 +76,23 @@ export async function listImageFiles(
 
 		for (const entry of entries) {
 			if (!entry.isDirectory && entry.name && isSupported(entry.name)) {
+				const fullPath = await join(dirPath, entry.name);
+				const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+
+				// Get file metadata to extract creation/modification time
+				let createdAt = Date.now(); // fallback to current time
+				try {
+					const fileInfo = await stat(fullPath);
+					// Prefer birthtime (creation time), fall back to mtime (last modified)
+					createdAt = (fileInfo.birthtime ?? fileInfo.mtime)?.getTime() ?? Date.now();
+				} catch (err) {
+					console.error(`Failed to stat ${fullPath}:`, err);
+				}
+
 				results.push({
 					filename: entry.name,
-					relativePath: prefix ? `${prefix}/${entry.name}` : entry.name,
+					relativePath,
+					createdAt,
 				});
 			} else if (entry.isDirectory && entry.name) {
 				const subDirPath = await join(dirPath, entry.name);
@@ -91,9 +107,9 @@ export async function listImageFiles(
 		console.error(`[listImageFiles] Error reading directory ${dirPath}:`, err);
 	}
 
-	return results.sort((a, b) =>
-		a.filename.localeCompare(b.filename, undefined, { numeric: true })
-	);
+	// Return results without sorting - let the UI handle sort order
+	// (sorting here would override the chronological order from file metadata)
+	return results;
 }
 
 // ─── File access ──────────────────────────────────────────────────────────────

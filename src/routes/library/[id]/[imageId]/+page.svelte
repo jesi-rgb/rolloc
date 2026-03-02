@@ -16,9 +16,8 @@
 		parseFujifilmMakerNote,
 		type FujifilmSettings,
 	} from "$lib/image/fuji-makernote";
-	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
-	import MiniCalendar from "$lib/components/MiniCalendar.svelte";
-	import AnalogClock from "$lib/components/AnalogClock.svelte";
+	import type { ExifData } from "$lib/components/exif-types";
+	import ExifPanel from "$lib/components/ExifPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
 	interface ImageWithExif {
@@ -29,22 +28,18 @@
 		error: string;
 	}
 
-	interface ExifData {
-		make?: string;
-		model?: string;
-		lensModel?: string;
-		iso?: number;
-		fNumber?: number;
-		exposureTime?: number;
-		focalLength?: number;
-		dateTime?: string;
-		exposureCompensation?: number;
-		// Fujifilm-specific fields
-		fuji?: FujifilmSettings;
-	}
+	type SortKey = "createdAt-desc" | "createdAt-asc";
+	const SORT_KEY = "library-sort-preference";
 
 	const libraryId = $derived(page.params.id ?? "");
 	const imageId = $derived(page.params.imageId ?? "");
+
+	// Read sort preference from localStorage (same as library grid)
+	const savedSort =
+		typeof localStorage !== "undefined"
+			? localStorage.getItem(SORT_KEY)
+			: null;
+	const sortBy: SortKey = (savedSort as SortKey) ?? "createdAt-desc";
 
 	let library = $state<Library | null>(null);
 	let images = $state<ImageWithExif[]>([]);
@@ -58,11 +53,28 @@
 	let mouseY = $state(0); // Normalized 0-1
 	let imageContainer = $state<HTMLDivElement | null>(null);
 
-	// Derived values for current image
-	const currentIndex = $derived(
-		images.findIndex((img) => img.image.id === imageId),
+	// Sorted images (match the library grid sort order)
+	const sortedImages = $derived(
+		sortBy === "createdAt-desc"
+			? [...images].sort((a, b) => {
+					const dateDiff = b.image.createdAt - a.image.createdAt;
+					return dateDiff !== 0
+						? dateDiff
+						: a.image.filename.localeCompare(b.image.filename);
+				})
+			: [...images].sort((a, b) => {
+					const dateDiff = a.image.createdAt - b.image.createdAt;
+					return dateDiff !== 0
+						? dateDiff
+						: a.image.filename.localeCompare(b.image.filename);
+				}),
 	);
-	const current = $derived(images[currentIndex] ?? null);
+
+	// Derived values for current image (using sorted order)
+	const currentIndex = $derived(
+		sortedImages.findIndex((img) => img.image.id === imageId),
+	);
+	const current = $derived(sortedImages[currentIndex] ?? null);
 
 	onMount(async () => {
 		if (!libraryId || !imageId) {
@@ -112,6 +124,7 @@
 	$effect(() => {
 		// When imageId changes and images are loaded, load the new image
 		if (images.length > 0 && imageId) {
+			// Find in original images array (not sorted) since loadImage uses that array
 			const idx = images.findIndex((img) => img.image.id === imageId);
 			if (idx !== -1) {
 				loadImage(idx);
@@ -133,7 +146,7 @@
 			}
 
 			const { getFile } = await import("$lib/fs/directory");
-			const file = await getFile(dirPath, item.image.filename);
+			const file = await getFile(dirPath, item.image.relativePath);
 			const url = URL.createObjectURL(file);
 			item.url = url;
 
@@ -188,17 +201,21 @@
 
 	async function nextImage() {
 		const nextIdx = currentIndex + 1;
-		if (nextIdx < images.length) {
-			const nextId = images[nextIdx].image.id;
-			await goto(resolve(`/library/${libraryId}/${nextId}`));
+		if (nextIdx < sortedImages.length) {
+			const nextId = sortedImages[nextIdx].image.id;
+			await goto(resolve(`/library/${libraryId}/${nextId}`), {
+				replaceState: true,
+			});
 		}
 	}
 
 	async function prevImage() {
 		const prevIdx = currentIndex - 1;
 		if (prevIdx >= 0) {
-			const prevId = images[prevIdx].image.id;
-			await goto(resolve(`/library/${libraryId}/${prevId}`));
+			const prevId = sortedImages[prevIdx].image.id;
+			await goto(resolve(`/library/${libraryId}/${prevId}`), {
+				replaceState: true,
+			});
 		}
 	}
 
@@ -210,39 +227,17 @@
 		switch (e.key) {
 			case "ArrowLeft":
 				e.preventDefault();
-				await nextImage();
+				await prevImage();
 				break;
 			case "ArrowRight":
 				e.preventDefault();
-				await prevImage();
+				await nextImage();
 				break;
 			case "Escape":
 				e.preventDefault();
 				await goto(resolve(`/library/${libraryId}`));
 				break;
 		}
-	}
-
-	function formatExposureTime(time: number | undefined): string {
-		if (!time) return "—";
-		if (time >= 1) return `${time.toFixed(1)}s`;
-		return `1/${Math.round(1 / time)}s`;
-	}
-
-	function formatAperture(f: number | undefined): string {
-		if (!f) return "—";
-		return `f/${f.toFixed(1)}`;
-	}
-
-	function formatFocalLength(fl: number | undefined): string {
-		if (!fl) return "—";
-		return `${Math.round(fl)}mm`;
-	}
-
-	function formatEV(ev: number | undefined): string {
-		if (ev === undefined || ev === null) return "—";
-		const sign = ev >= 0 ? "+" : "";
-		return `${sign}${ev.toFixed(1)} EV`;
 	}
 
 	// Zoom handlers
@@ -290,10 +285,10 @@
 		class="flex items-center justify-between px-l py-base border-b border-base-subtle shrink-0"
 	>
 		<div class="flex items-center gap-sm">
-			<a
-				href={resolve(`/library/${libraryId}`)}
-				class="text-content-muted hover:text-content transition"
-				>← {library?.label || "Back"}</a
+			<button
+				onclick={() => goto(resolve(`/library/${libraryId}`))}
+				class="text-content-muted hover:text-content transition bg-transparent border-none cursor-pointer p-0"
+				>← {library?.label || "Back"}</button
 			>
 			{#if library}
 				<h1 class="text-l font-semibold text-content">
@@ -302,17 +297,13 @@
 			{/if}
 		</div>
 		<div class="text-sm text-content-muted">
-			{#if currentIndex >= 0 && images.length > 0}
-				{currentIndex + 1} / {images.length}
+			{#if currentIndex >= 0 && sortedImages.length > 0}
+				{currentIndex + 1} / {sortedImages.length}
 			{/if}
 		</div>
 	</header>
 
-	{#if loading}
-		<div class="flex-1 flex items-center justify-center">
-			<p class="text-content-muted">Loading…</p>
-		</div>
-	{:else if error}
+	{#if error}
 		<div class="flex-1 flex items-center justify-center">
 			<p class="text-danger">{error}</p>
 		</div>
@@ -331,9 +322,7 @@
 				onmousemove={handleMouseMove}
 				onwheel={handleWheel}
 			>
-				{#if current.loading}
-					<p class="text-content-muted">Loading image…</p>
-				{:else if current.error}
+				{#if current.error}
 					<p class="text-danger">{current.error}</p>
 				{:else if current.url}
 					<img
@@ -349,191 +338,7 @@
 			</div>
 
 			<!-- EXIF panel -->
-			<aside
-				class="w-80 border-l border-base-subtle bg-base-muted overflow-y-auto p-base"
-			>
-				<h2
-					class="text-sm font-medium text-center text-content-muted uppercase tracking-wide mb-base"
-				>
-					EXIF Data
-				</h2>
-
-				{#if current.exif}
-					{#if current.exif.dateTime}
-						<div class="mb-base">
-							<dd class="text-content font-medium">
-								<div class="flex flex-row gap-base items-start">
-									<MiniCalendar
-										date={current.exif.dateTime}
-									/>
-									<AnalogClock date={current.exif.dateTime} />
-								</div>
-							</dd>
-						</div>
-					{/if}
-					<dl class="grid grid-cols-2 gap-base text-sm">
-						{#if current.exif.make || current.exif.model}
-							<div>
-								<dt class="text-content-muted">Camera</dt>
-								<dd class="text-content font-medium">
-									{current.exif.make || ""}
-									{current.exif.model || ""}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.lensModel}
-							<div>
-								<dt class="text-content-muted">Lens</dt>
-								<dd class="text-content font-medium">
-									{current.exif.lensModel}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.iso}
-							<div>
-								<dt class="text-content-muted">ISO</dt>
-								<dd class="text-content font-medium">
-									{current.exif.iso}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.fNumber}
-							<div>
-								<dt class="text-content-muted">Aperture</dt>
-								<dd class="text-content font-medium">
-									{formatAperture(current.exif.fNumber)}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.exposureTime}
-							<div>
-								<dt class="text-content-muted">
-									Shutter Speed
-								</dt>
-								<dd class="text-content font-medium">
-									{formatExposureTime(
-										current.exif.exposureTime,
-									)}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.focalLength}
-							<div>
-								<dt class="text-content-muted">Focal Length</dt>
-								<dd class="text-content font-medium">
-									{formatFocalLength(
-										current.exif.focalLength,
-									)}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.exposureCompensation !== undefined && current.exif.exposureCompensation !== null}
-							<div>
-								<dt class="text-content-muted">
-									Exposure Comp
-								</dt>
-								<dd class="text-content font-medium">
-									{formatEV(
-										current.exif.exposureCompensation,
-									)}
-								</dd>
-							</div>
-						{/if}
-
-						{#if current.exif.fuji}
-							{#if current.exif.fuji.filmMode}
-								{@const icon = getFilmSimIcon(
-									current.exif.fuji.filmMode,
-								)}
-								<div>
-									<dt class="text-content-muted">
-										Film Simulation
-									</dt>
-									<dd
-										class="text-content font-medium flex
-										items-baseline gap-sm"
-									>
-										{#if icon}
-											<span
-												class="inline-block leading-none"
-												style="font-family: '{icon.font}'; font-size: 1.25rem;"
-												aria-hidden="true"
-											>
-												{icon.char}
-											</span>
-										{/if}
-										<span>{current.exif.fuji.filmMode}</span
-										>
-									</dd>
-								</div>
-							{/if}
-
-							{#if current.exif.fuji.grainEffect && current.exif.fuji.grainEffect !== "Off"}
-								<div>
-									<dt class="text-content-muted">
-										Grain Effect
-									</dt>
-									<dd class="text-content font-medium">
-										{current.exif.fuji.grainEffect}
-									</dd>
-								</div>
-							{/if}
-
-							{#if current.exif.fuji.colorChromeEffect && current.exif.fuji.colorChromeEffect !== "Off"}
-								<div>
-									<dt class="text-content-muted">
-										Color Chrome
-									</dt>
-									<dd class="text-content font-medium">
-										{current.exif.fuji.colorChromeEffect}
-									</dd>
-								</div>
-							{/if}
-
-							{#if current.exif.fuji.colorChromeFXBlue && current.exif.fuji.colorChromeFXBlue !== "Off"}
-								<div>
-									<dt class="text-content-muted">
-										Color Chrome FX Blue
-									</dt>
-									<dd class="text-content font-medium">
-										{current.exif.fuji.colorChromeFXBlue}
-									</dd>
-								</div>
-							{/if}
-
-							{#if current.exif.fuji.clarity && current.exif.fuji.clarity !== "0 (Normal)"}
-								<div>
-									<dt class="text-content-muted">Clarity</dt>
-									<dd class="text-content font-medium">
-										{current.exif.fuji.clarity}
-									</dd>
-								</div>
-							{/if}
-
-							{#if current.exif.fuji.dynamicRange}
-								<div>
-									<dt class="text-content-muted">
-										Dynamic Range
-									</dt>
-									<dd class="text-content font-medium">
-										{current.exif.fuji.dynamicRange}
-									</dd>
-								</div>
-							{/if}
-						{/if}
-					</dl>
-				{:else}
-					<p class="text-sm text-content-muted">
-						No EXIF data available
-					</p>
-				{/if}
-			</aside>
+			<ExifPanel exif={current.exif} />
 		</div>
 
 		<!-- Keyboard shortcut hint bar -->

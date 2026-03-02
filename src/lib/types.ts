@@ -131,7 +131,9 @@ export interface Library {
 export interface LibraryImage {
 	id: string;
 	libraryId: string;
-	/** Filename only — directory comes from the Library's stored handle. */
+	/** Relative path from library root (e.g. "subdir/image.jpg" or "image.jpg"). */
+	relativePath: string;
+	/** Filename only (basename) — for display purposes. */
 	filename: string;
 	/** 0-based index within the library. */
 	index: number;
