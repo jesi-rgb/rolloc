@@ -14,6 +14,7 @@ import {
 	putPath,
 } from './idb';
 import { listImageFiles, getFile } from '$lib/fs/directory';
+import { generateThumbnails } from '$lib/image/thumbgen';
 
 /**
  * Re-export IDB functions for convenience.
@@ -50,6 +51,36 @@ export async function createLibrary(label: string, dirPath: string): Promise<Lib
 	await putLibrary(library);
 	await putImages(images);
 	await putPath(id, dirPath);
+
+	// Pre-generate thumbnails in background (non-blocking)
+	void (async () => {
+		try {
+			const filePromises = images.map(async (img) => {
+				try {
+					const file = await getFile(dirPath, img.relativePath);
+					return { id: img.id, file };
+				} catch (err) {
+					console.error(`Failed to load file for ${img.filename}:`, err);
+					return null;
+				}
+			});
+
+			const loadedFiles = (await Promise.all(filePromises)).filter(
+				(item): item is { id: string; file: File } => item !== null
+			);
+
+			const count = await generateThumbnails(loadedFiles, {
+				concurrency: 4,
+				onProgress: (current, total) => {
+					console.log(`[createLibrary] Thumbnail generation: ${current}/${total}`);
+				},
+			});
+
+			console.log(`[createLibrary] Generated ${count} new thumbnails for library "${label}"`);
+		} catch (err) {
+			console.error('[createLibrary] Thumbnail generation failed:', err);
+		}
+	})();
 
 	return library;
 }
@@ -128,6 +159,38 @@ export async function rescanLibrary(libraryId: string): Promise<number> {
 
 	// Store new images
 	await putImages(newImages);
+
+	// Pre-generate thumbnails for new images in background (non-blocking)
+	void (async () => {
+		try {
+			const filePromises = newImages.map(async (img) => {
+				try {
+					const file = await getFile(path, img.relativePath);
+					return { id: img.id, file };
+				} catch (err) {
+					console.error(`Failed to load file for ${img.filename}:`, err);
+					return null;
+				}
+			});
+
+			const loadedFiles = (await Promise.all(filePromises)).filter(
+				(item): item is { id: string; file: File } => item !== null
+			);
+
+			if (loadedFiles.length > 0) {
+				const count = await generateThumbnails(loadedFiles, {
+					concurrency: 4,
+					onProgress: (current, total) => {
+						console.log(`[rescanLibrary] Thumbnail generation: ${current}/${total}`);
+					},
+				});
+
+				console.log(`[rescanLibrary] Generated ${count} new thumbnails`);
+			}
+		} catch (err) {
+			console.error('[rescanLibrary] Thumbnail generation failed:', err);
+		}
+	})();
 
 	return newImages.length;
 }

@@ -18,6 +18,9 @@
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
+	import { thumbURL } from "$lib/fs/opfs";
+	import { getFile } from "$lib/fs/directory";
+	import { getThumbURL } from "$lib/image/thumbgen";
 
 	type SortKey = 'createdAt-desc' | 'createdAt-asc';
 	
@@ -33,6 +36,9 @@
 	let images = $state<LibraryImage[]>([]);
 	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
+	
+	// Thumbnail URL cache — kept in memory for instant loading
+	const thumbUrls = new SvelteMap<string, string>();
 	
 	// Load preferences from localStorage, with fallbacks
 	const savedSort = typeof localStorage !== 'undefined' ? localStorage.getItem(SORT_KEY) : null;
@@ -168,6 +174,12 @@
 
 		loading = false;
 
+		// Load all thumbnail URLs upfront and keep them in memory
+		// This allows instant rendering when navigating back to the grid
+		if (path) {
+			void loadAllThumbnails(path, images);
+		}
+
 		// Restore scroll position after content has loaded
 		const saved = sessionStorage.getItem(SCROLL_KEY);
 		if (saved) {
@@ -203,6 +215,42 @@
 			month: "short",
 			day: "numeric",
 		});
+	}
+
+	/**
+	 * Loads all thumbnail URLs and keeps them in memory.
+	 * Tries cached OPFS first, falls back to generating from source file.
+	 */
+	async function loadAllThumbnails(dirPath: string, images: LibraryImage[]) {
+		// Process in batches to avoid overwhelming the system
+		const BATCH_SIZE = 20;
+		
+		for (let i = 0; i < images.length; i += BATCH_SIZE) {
+			const batch = images.slice(i, i + BATCH_SIZE);
+			
+			await Promise.all(
+				batch.map(async (image) => {
+					try {
+						// First try to load from OPFS cache
+						let url = await thumbURL(image.id);
+						
+						// If not cached, generate it
+						if (!url) {
+							const file = await getFile(dirPath, image.relativePath);
+							url = await getThumbURL(image.id, file);
+						}
+						
+						if (url) {
+							thumbUrls.set(image.id, url);
+						}
+					} catch (err) {
+						console.error(`Failed to load thumbnail for ${image.filename}:`, err);
+					}
+				})
+			);
+		}
+		
+		console.log(`[Library] Loaded ${thumbUrls.size}/${images.length} thumbnails`);
 	}
 
 	// ─── Keyboard shortcuts ───────────────────────────────────────────────────
@@ -344,7 +392,7 @@
 							<LibraryImageThumb
 								{image}
 								{libraryId}
-								dirPath={dirPath}
+								thumbUrl={thumbUrls.get(image.id)}
 								selected={globalIndex === selIdx}
 							/>
 						</li>

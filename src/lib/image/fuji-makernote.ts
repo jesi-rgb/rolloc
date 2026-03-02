@@ -55,7 +55,7 @@ const FUJI_TAGS = {
 	0x3822: 'FrameHeight',
 	0x4100: 'FacesDetected',
 	0x4103: 'FacePositions',
-	
+
 	// New tags for X-series
 	0x100f: 'Clarity',
 	0x1047: 'GrainEffectRoughness',

@@ -104,3 +104,60 @@ export async function getPreviewURL(frameId: string, file: File): Promise<string
 	const blob = await ensurePreview(frameId, file);
 	return URL.createObjectURL(blob);
 }
+
+// ─── Batch generation ─────────────────────────────────────────────────────────
+
+/**
+ * Pre-generates thumbnails for multiple images in batch.
+ * Useful for library creation/rescans.
+ * 
+ * Processes images with limited concurrency to avoid memory spikes.
+ * Skips images that already have cached thumbnails.
+ * Continues on errors (logs but doesn't throw).
+ * 
+ * Returns the number of thumbnails successfully generated.
+ */
+export async function generateThumbnails(
+	images: Array<{ id: string; file: File }>,
+	options?: {
+		concurrency?: number;
+		onProgress?: (current: number, total: number) => void;
+	}
+): Promise<number> {
+	const concurrency = options?.concurrency ?? 4;
+	const total = images.length;
+	let completed = 0;
+	let generated = 0;
+
+	// Process in batches with limited concurrency
+	const queue = [...images];
+	const workers = Array.from({ length: concurrency }, async () => {
+		while (queue.length > 0) {
+			const item = queue.shift();
+			if (!item) break;
+
+			try {
+				// Check if already cached
+				const existing = await readThumb(item.id);
+				if (existing) {
+					// Already cached, skip generation
+					completed++;
+					options?.onProgress?.(completed, total);
+					continue;
+				}
+
+				// Generate new thumbnail
+				await ensureThumb(item.id, item.file);
+				generated++;
+			} catch (err) {
+				console.error(`Failed to generate thumbnail for ${item.id}:`, err);
+			} finally {
+				completed++;
+				options?.onProgress?.(completed, total);
+			}
+		}
+	});
+
+	await Promise.all(workers);
+	return generated;
+}

@@ -7,6 +7,7 @@
 	 */
 	import MiniCalendar from "$lib/components/MiniCalendar.svelte";
 	import AnalogClock from "$lib/components/AnalogClock.svelte";
+	import ExposureCompensationScale from "$lib/components/ExposureCompensationScale.svelte";
 	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
 	import type { ExifData } from "$lib/components/exif-types";
 
@@ -32,11 +33,7 @@
 		return `${Math.round(fl)}mm`;
 	}
 
-	function formatEV(ev: number | undefined): string {
-		if (ev === undefined || ev === null) return "—";
-		const sign = ev >= 0 ? "+" : "";
-		return `${sign}${ev.toFixed(1)} EV`;
-	}
+
 </script>
 
 <aside
@@ -115,14 +112,14 @@
 				</div>
 			{/if}
 
-			{#if exif.exposureCompensation !== undefined && exif.exposureCompensation !== null}
-				<div>
-					<dt class="text-content-muted">Exposure Comp</dt>
-					<dd class="text-content font-medium">
-						{formatEV(exif.exposureCompensation)}
-					</dd>
-				</div>
-			{/if}
+		{#if exif.exposureCompensation !== undefined && exif.exposureCompensation !== null}
+			<div class="col-span-2">
+				<dt class="text-content-muted mb-sm">Exposure Compensation</dt>
+				<dd class="text-content font-medium">
+					<ExposureCompensationScale value={exif.exposureCompensation} />
+				</dd>
+			</div>
+		{/if}
 
 			{#if exif.fuji}
 				{#if exif.fuji.filmMode}
