@@ -21,8 +21,34 @@ import { generateThumbnails } from '$lib/image/thumbgen';
  */
 export { getLibraries, getLibrary, getImages, putLibrary };
 
+// ─── Progressive scan subscriber ─────────────────────────────────────────────
+
+/**
+ * Callback invoked by the background scan (Phase B of createLibrary) each time
+ * a batch of new images has been written to IDB.
+ *
+ * The library page registers itself here on mount and clears on destroy,
+ * so only the currently-visible library page receives updates.
+ */
+export type ScanBatchCallback = (libraryId: string, newImages: LibraryImage[]) => void;
+
+let _scanBatchCallback: ScanBatchCallback | null = null;
+
+/** Register a listener for background scan batches. Only one listener at a time. */
+export function onScanBatch(cb: ScanBatchCallback | null): void {
+	_scanBatchCallback = cb;
+}
+
+const SCAN_BATCH_SIZE = 50;
+
 /**
  * Create a new library from a directory path.
+ *
+ * Phase A (synchronous path): writes the Library record and path to IDB
+ * immediately and returns — the caller can navigate to the library page at once.
+ *
+ * Phase B (background): scans the directory in batches of SCAN_BATCH_SIZE,
+ * writing each batch to IDB and notifying the page via onScanBatch.
  */
 export async function createLibrary(label: string, dirPath: string): Promise<Library> {
 	const id = crypto.randomUUID();
@@ -33,56 +59,84 @@ export async function createLibrary(label: string, dirPath: string): Promise<Lib
 		notes: '',
 	};
 
-	// Scan directory for image files
-	const files = await listImageFiles(dirPath);
-	const images: LibraryImage[] = files.map((file, idx) => ({
-		id: crypto.randomUUID(),
-		libraryId: id,
-		relativePath: file.relativePath,
-		filename: file.filename,
-		index: idx,
-		rating: 0,
-		notes: '',
-		// Use actual file creation/modification timestamp
-		createdAt: file.createdAt,
-	}));
-
-	// Store library, images, and path
+	// Phase A — persist skeleton immediately so the page can render.
 	await putLibrary(library);
-	await putImages(images);
 	await putPath(id, dirPath);
 
-	// Pre-generate thumbnails in background (non-blocking)
+	// Phase B — background scan + batch write (non-blocking).
 	void (async () => {
 		try {
-			const filePromises = images.map(async (img) => {
-				try {
-					const file = await getFile(dirPath, img.relativePath);
-					return { id: img.id, file };
-				} catch (err) {
-					console.error(`Failed to load file for ${img.filename}:`, err);
-					return null;
-				}
-			});
+			const files = await listImageFiles(dirPath);
 
-			const loadedFiles = (await Promise.all(filePromises)).filter(
-				(item): item is { id: string; file: File } => item !== null
-			);
+			let globalIdx = 0;
+			for (let start = 0; start < files.length; start += SCAN_BATCH_SIZE) {
+				const batch = files.slice(start, start + SCAN_BATCH_SIZE);
+				const newImages: LibraryImage[] = batch.map((file) => ({
+					id: crypto.randomUUID(),
+					libraryId: id,
+					relativePath: file.relativePath,
+					filename: file.filename,
+					index: globalIdx++,
+					rating: 0,
+					notes: '',
+					createdAt: file.createdAt,
+				}));
 
-			const count = await generateThumbnails(loadedFiles, {
-				concurrency: 4,
-				onProgress: (current, total) => {
-					console.log(`[createLibrary] Thumbnail generation: ${current}/${total}`);
-				},
-			});
+				await putImages(newImages);
+				_scanBatchCallback?.(id, newImages);
 
-			console.log(`[createLibrary] Generated ${count} new thumbnails for library "${label}"`);
+				// Yield to keep the UI thread responsive between batches.
+				await new Promise<void>((r) => setTimeout(r, 0));
+			}
+
+			console.log(`[createLibrary] Scanned ${globalIdx} images for library "${label}"`);
+
+			// Pre-generate thumbnails in background (non-blocking).
+			void _generateThumbsForLibrary(id, dirPath, label);
 		} catch (err) {
-			console.error('[createLibrary] Thumbnail generation failed:', err);
+			console.error('[createLibrary] Background scan failed:', err);
 		}
 	})();
 
 	return library;
+}
+
+/**
+ * Generate thumbnails for all images in a library.
+ * Runs entirely in the background — no return value needed by callers.
+ */
+async function _generateThumbsForLibrary(
+	libraryId: string,
+	dirPath: string,
+	label: string,
+): Promise<void> {
+	try {
+		const images = await getImages(libraryId);
+		const filePromises = images.map(async (img) => {
+			try {
+				const file = await getFile(dirPath, img.relativePath);
+				return { id: img.id, file };
+			} catch (err) {
+				console.error(`Failed to load file for ${img.filename}:`, err);
+				return null;
+			}
+		});
+
+		const loadedFiles = (await Promise.all(filePromises)).filter(
+			(item): item is { id: string; file: File } => item !== null,
+		);
+
+		const count = await generateThumbnails(loadedFiles, {
+			concurrency: 4,
+			onProgress: (current, total) => {
+				console.log(`[createLibrary] Thumbnail generation: ${current}/${total}`);
+			},
+		});
+
+		console.log(`[createLibrary] Generated ${count} new thumbnails for library "${label}"`);
+	} catch (err) {
+		console.error('[createLibrary] Thumbnail generation failed:', err);
+	}
 }
 
 /**

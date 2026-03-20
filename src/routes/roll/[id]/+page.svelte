@@ -19,6 +19,7 @@
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
+	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
 
 	// $page.params.id is typed string | undefined in SvelteKit; guard below
 	const rollId = $derived(page.params.id ?? "");
@@ -169,22 +170,16 @@
 		<PaneGroup direction="horizontal" class="flex-1 min-h-0">
 			<!-- Filmstrip grid pane -->
 			<Pane defaultSize={45} minSize={20} order={1}>
-				<div class="h-full overflow-y-auto p-l">
-					<ul
-						class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm"
-					>
-						{#each frames as frame, i (frame.id)}
-							<li>
-								<FrameThumb
-									{frame}
-									dirPath={dirPath!}
-									selected={i === selIdx}
-									onSelect={selectFrame}
-								/>
-							</li>
-						{/each}
-					</ul>
-				</div>
+				<VirtualGrid items={frames} gap={8} overscan={3}>
+					{#snippet item(frame, i)}
+						<FrameThumb
+							{frame}
+							dirPath={dirPath!}
+							selected={i === selIdx}
+							onSelect={selectFrame}
+						/>
+					{/snippet}
+				</VirtualGrid>
 			</Pane>
 
 			<!-- Metadata panel pane -->

@@ -6,9 +6,11 @@
 
 	interface Props {
 		hints: Hint[];
+		/** Optional progress text shown on the right (e.g. "thumbnails: 12/100"). */
+		progress?: string;
 	}
 
-	let { hints }: Props = $props();
+	let { hints, progress }: Props = $props();
 </script>
 
 <footer
@@ -29,4 +31,7 @@
 			{hint.label}
 		</span>
 	{/each}
+	{#if progress}
+		<span class="ml-auto text-xs text-content-subtle">{progress}</span>
+	{/if}
 </footer>

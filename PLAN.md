@@ -104,6 +104,38 @@ Only overrides are stored; `null` means "use roll default". Resolved at render t
 - [ ] Populate `capturedAt` from EXIF (`Frame.capturedAt` is typed but always `null` currently)
 - [ ] Linear-light pipeline correct end-to-end
 
+## Performance Optimisation — Viewport-Aware Thumbnail Loading
+
+Tracking implementation of the six-phase perf plan (see conversation history for full spec).
+
+### Phase 1: Viewport-Aware Thumbnail Loading — COMPLETE
+- [x] `src/lib/image/thumb-cache.ts` — module-level LRU cache (2000 entries, `URL.revokeObjectURL` on eviction)
+- [x] `src/lib/image/thumb-queue.ts` — priority queue (high/low), 6-concurrent workers, OPFS → generate pipeline, dedup via `inflight` map, `thumbQueueProgress` counter
+- [x] `src/lib/components/LibraryImageThumb.svelte` — now "smart": owns `IntersectionObserver` (200px margin), calls `requestThumb()` on first intersection; no longer receives `thumbUrl` prop from parent
+- [x] `src/routes/library/[id]/+page.svelte` — removed `loadAllThumbnails`, removed `SvelteMap<string,string>` thumbUrls, passes `dirPath` down to `LibraryImageThumb`, rescan deferred to `requestIdleCallback`
+
+### Phase 2: DOM Virtualisation — COMPLETE
+- [x] `@tanstack/svelte-virtual` installed (v3.13.23)
+- [x] `src/lib/components/VirtualGrid.svelte` — generic row-based virtualiser; responsive column breakpoints (2/3/4/5/6 cols); `ResizeObserver` for dynamic width; store→`$state` bridge for Svelte 5 compatibility; `scrollEl` bindable prop to expose scroll container
+- [x] `VirtualGrid` used in roll detail page (replaces `{#each}` filmstrip grid in the left pane)
+- [x] `VirtualGrid` used in library page for flat (`groupBy=none`) view; grouped views retain regular DOM grid
+
+### Phase 3: Progressive Library Creation — COMPLETE
+- [x] Split `createLibrary` into Phase A (fast IDB write + navigate) and Phase B (background file scan in batches of 50)
+- [x] Library page reacts to new images streamed in from background scan
+
+### Phase 4: Module-Level Thumbnail URL Cache — COMPLETE (delivered with Phase 1)
+- [x] `src/lib/image/thumb-cache.ts` (see Phase 1)
+- [x] `thumb-queue.ts` checks cache as layer 1 before OPFS or generation
+
+### Phase 5: Defer Rescan to Idle Time — COMPLETE (delivered with Phase 1)
+- [x] `rescanLibrary()` now runs inside `requestIdleCallback` (fallback: `setTimeout 1000ms`) after page renders
+
+### Phase 6: Subtle Progress in KeyboardHintBar — COMPLETE
+- [x] Expose `thumbQueueProgress` from `thumb-queue.ts` reactively to library page (via `onThumbProgress` callback)
+- [x] `KeyboardHintBar` accepts optional `progress` prop
+- [x] Show "thumbnails: N/M" while generation is in progress
+
 ## Known Gaps / Tech Debt
 - `package.json` contains dead scripts from the `sv` scaffolding template (`db:start`, `db:push`,
   `db:generate`, `db:migrate`, `db:studio`, `auth:schema`) — Drizzle ORM and Better Auth are not

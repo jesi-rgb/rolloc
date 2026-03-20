@@ -8,26 +8,23 @@
 	 *   ← / → (or j / k)   — prev / next image
 	 *   e / Enter          — view selected image
 	 */
-	import { onMount, untrack } from "svelte";
-	import { goto, beforeNavigate, afterNavigate } from "$app/navigation";
+	import { onMount, onDestroy, untrack } from "svelte";
+	import { goto, beforeNavigate } from "$app/navigation";
 	import { page } from "$app/state";
 	import { resolve } from "$app/paths";
-	import { SvelteMap } from "svelte/reactivity";
-	import { getLibrary, getImages, getLibraryPath, rescanLibrary } from "$lib/db/libraries";
+	import { getLibrary, getImages, getLibraryPath, rescanLibrary, onScanBatch } from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
+	import { SvelteMap } from "svelte/reactivity";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
-	import { thumbURL } from "$lib/fs/opfs";
-	import { getFile } from "$lib/fs/directory";
-	import { getThumbURL } from "$lib/image/thumbgen";
+	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+	import { resetThumbQueueProgress, thumbQueueProgress, onThumbProgress } from "$lib/image/thumb-queue";
 
 	type SortKey = 'createdAt-desc' | 'createdAt-asc';
-	
 	type GroupBy = 'none' | 'day' | 'month' | 'year';
 
 	const libraryId = $derived(page.params.id ?? "");
-	// Capture initial value for scroll key to avoid reactivity warning
 	const SCROLL_KEY = untrack(() => `library-scroll-${libraryId}`);
 	const SORT_KEY = 'library-sort-preference';
 	const GROUP_KEY = 'library-group-preference';
@@ -36,20 +33,26 @@
 	let images = $state<LibraryImage[]>([]);
 	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
-	
-	// Thumbnail URL cache — kept in memory for instant loading
-	const thumbUrls = new SvelteMap<string, string>();
-	
-	// Load preferences from localStorage, with fallbacks
+
 	const savedSort = typeof localStorage !== 'undefined' ? localStorage.getItem(SORT_KEY) : null;
 	const savedGroup = typeof localStorage !== 'undefined' ? localStorage.getItem(GROUP_KEY) : null;
-	
+
 	let sortBy = $state<SortKey>((savedSort as SortKey) ?? 'createdAt-desc');
 	let groupBy = $state<GroupBy>((savedGroup as GroupBy) ?? 'none');
 	let selIdx = $state(0);
 	let scrollContainer = $state<HTMLElement | null>(null);
+	let virtualScrollEl = $state<HTMLDivElement | null>(null);
 
-	// Save preferences to localStorage when they change
+	// Reactive snapshot of thumb queue progress for KeyboardHintBar.
+	let thumbProgress = $state({ cached: 0, generating: 0, total: 0 });
+
+	/** Derived progress label — shown only while generation is in progress. */
+	let thumbProgressLabel = $derived(
+		thumbProgress.total > 0 && thumbProgress.cached < thumbProgress.total
+			? `thumbnails: ${thumbProgress.cached}/${thumbProgress.total}`
+			: undefined,
+	);
+
 	$effect(() => {
 		if (typeof localStorage !== 'undefined') {
 			localStorage.setItem(SORT_KEY, sortBy);
@@ -89,25 +92,13 @@
 		for (const image of sortedImages) {
 			const date = new Date(image.createdAt);
 			let key: string;
-			let label: string;
 
 			if (groupBy === 'day') {
 				key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-				label = date.toLocaleDateString(undefined, {
-					year: 'numeric',
-					month: 'long',
-					day: 'numeric',
-					weekday: 'long',
-				});
 			} else if (groupBy === 'month') {
 				key = `${date.getFullYear()}-${date.getMonth()}`;
-				label = date.toLocaleDateString(undefined, {
-					year: 'numeric',
-					month: 'long',
-				});
-			} else { // year
+			} else {
 				key = `${date.getFullYear()}`;
-				label = date.getFullYear().toString();
 			}
 
 			if (!groups.has(key)) {
@@ -116,31 +107,41 @@
 			groups.get(key)!.push(image);
 		}
 
-		return Array.from(groups.entries()).map(([key, images]) => ({
-			label: images.length > 0 
-				? (groupBy === 'day' 
-					? new Date(images[0].createdAt).toLocaleDateString(undefined, {
-							year: 'numeric',
-							month: 'long',
-							day: 'numeric',
-							weekday: 'long',
+		return Array.from(groups.entries()).map(([key, imgs]) => ({
+			label: imgs.length > 0
+				? (groupBy === 'day'
+					? new Date(imgs[0].createdAt).toLocaleDateString(undefined, {
+							year: 'numeric', month: 'long', day: 'numeric', weekday: 'long',
 						})
 					: groupBy === 'month'
-					? new Date(images[0].createdAt).toLocaleDateString(undefined, {
-							year: 'numeric',
-							month: 'long',
+					? new Date(imgs[0].createdAt).toLocaleDateString(undefined, {
+							year: 'numeric', month: 'long',
 						})
-					: new Date(images[0].createdAt).getFullYear().toString())
+					: new Date(imgs[0].createdAt).getFullYear().toString())
 				: key,
-			images,
+			images: imgs,
 		}));
 	});
 
 	onMount(async () => {
+		// Reset progress counters from any previous visit
+		resetThumbQueueProgress();
+
+		// Subscribe to thumb progress notifications so the hint bar updates reactively.
+		onThumbProgress(() => {
+			thumbProgress = { ...thumbQueueProgress };
+		});
+
 		if (!libraryId) {
 			loading = false;
 			return;
 		}
+
+		// Register callback so background scan batches stream into this page.
+		onScanBatch((batchLibraryId, newImages) => {
+			if (batchLibraryId !== libraryId) return;
+			images = [...images, ...newImages];
+		});
 
 		const [lib, imgs] = await Promise.all([
 			getLibrary(libraryId),
@@ -155,111 +156,72 @@
 			return;
 		}
 
-		// Get the directory path for this library
 		const path = await getLibraryPath(libraryId);
-		if (path) {
-			dirPath = path;
-		}
+		if (path) dirPath = path;
 
-		// Automatically rescan for new images
-		try {
-			const newCount = await rescanLibrary(libraryId);
-			if (newCount > 0) {
-				// Reload images if new ones were found
-				images = await getImages(libraryId);
-			}
-		} catch (err) {
-			console.error('Auto-rescan failed:', err);
-		}
-
+		// Render immediately — rescan deferred to idle time (Phase 5)
 		loading = false;
 
-		// Load all thumbnail URLs upfront and keep them in memory
-		// This allows instant rendering when navigating back to the grid
-		if (path) {
-			void loadAllThumbnails(path, images);
-		}
-
-		// Restore scroll position after content has loaded
+		// Restore scroll position
 		const saved = sessionStorage.getItem(SCROLL_KEY);
 		if (saved) {
 			const scrollPos = parseInt(saved, 10);
-			console.log('[Library onMount] Attempting to restore scroll to:', scrollPos);
-			
-			// Wait for next tick to ensure DOM is ready
 			setTimeout(() => {
-				const main = document.querySelector('main[data-scroll-container]') as HTMLElement | null;
-				if (main) {
-					main.scrollTop = scrollPos;
-					console.log('[Library onMount] Scroll set to:', main.scrollTop);
-					// Clear the saved position
+				// Try VirtualGrid scroller first (groupBy=none), then the main scroller
+				const scroller = virtualScrollEl ?? (document.querySelector('main[data-scroll-container]') as HTMLElement | null);
+				if (scroller) {
+					scroller.scrollTop = scrollPos;
 					sessionStorage.removeItem(SCROLL_KEY);
 				}
 			}, 100);
 		}
+
+		// Defer rescan to idle time so the grid renders first
+		const runRescan = async () => {
+			try {
+				const newCount = await rescanLibrary(libraryId);
+				if (newCount > 0) {
+					images = await getImages(libraryId);
+				}
+			} catch (err) {
+				console.error('Auto-rescan failed:', err);
+			}
+		};
+
+		if ('requestIdleCallback' in window) {
+			requestIdleCallback(() => void runRescan());
+		} else {
+			setTimeout(() => void runRescan(), 1000);
+		}
 	});
 
-	// Save scroll position when navigating away to an image
 	beforeNavigate((nav) => {
-		const main = document.querySelector('main[data-scroll-container]') as HTMLElement | null;
-		if (main && nav.to?.route.id?.includes('[imageId]')) {
-			const pos = main.scrollTop;
-			sessionStorage.setItem(SCROLL_KEY, pos.toString());
-			console.log('[Library beforeNavigate] Saved scroll position:', pos);
+		if (nav.to?.route.id?.includes('[imageId]')) {
+			// Save scroll position from whichever container is active
+			const scroller = groupBy === 'none' ? virtualScrollEl : scrollContainer;
+			if (scroller) {
+				sessionStorage.setItem(SCROLL_KEY, scroller.scrollTop.toString());
+			}
 		}
+	});
+
+	onDestroy(() => {
+		// Unregister callbacks so stale updates don't affect other pages.
+		onScanBatch(null);
+		onThumbProgress(null);
 	});
 
 	function formatDate(ms: number): string {
 		return new Date(ms).toLocaleDateString(undefined, {
-			year: "numeric",
-			month: "short",
-			day: "numeric",
+			year: "numeric", month: "short", day: "numeric",
 		});
-	}
-
-	/**
-	 * Loads all thumbnail URLs and keeps them in memory.
-	 * Tries cached OPFS first, falls back to generating from source file.
-	 */
-	async function loadAllThumbnails(dirPath: string, images: LibraryImage[]) {
-		// Process in batches to avoid overwhelming the system
-		const BATCH_SIZE = 20;
-		
-		for (let i = 0; i < images.length; i += BATCH_SIZE) {
-			const batch = images.slice(i, i + BATCH_SIZE);
-			
-			await Promise.all(
-				batch.map(async (image) => {
-					try {
-						// First try to load from OPFS cache
-						let url = await thumbURL(image.id);
-						
-						// If not cached, generate it
-						if (!url) {
-							const file = await getFile(dirPath, image.relativePath);
-							url = await getThumbURL(image.id, file);
-						}
-						
-						if (url) {
-							thumbUrls.set(image.id, url);
-						}
-					} catch (err) {
-						console.error(`Failed to load thumbnail for ${image.filename}:`, err);
-					}
-				})
-			);
-		}
-		
-		console.log(`[Library] Loaded ${thumbUrls.size}/${images.length} thumbnails`);
 	}
 
 	// ─── Keyboard shortcuts ───────────────────────────────────────────────────
 
 	async function handleKeydown(e: KeyboardEvent) {
-		// Don't intercept when typing in an input or textarea
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-
 		if (sortedImages.length === 0) return;
 
 		switch (e.key) {
@@ -274,13 +236,14 @@
 				selIdx = Math.min(sortedImages.length - 1, selIdx + 1);
 				break;
 			case "e":
-			case "Enter":
+			case "Enter": {
 				e.preventDefault();
 				const selected = sortedImages[selIdx];
 				if (selected) {
 					await goto(resolve(`/library/${libraryId}/${selected.id}`));
 				}
 				break;
+			}
 		}
 	}
 </script>
@@ -313,12 +276,7 @@
 		<div class="ml-auto flex items-center gap-base">
 			{#if !loading && library && images.length > 0}
 				<div class="flex items-center gap-xs">
-					<label
-						for="sort-select"
-						class="text-xs text-content-subtle"
-					>
-						Sort by:
-					</label>
+					<label for="sort-select" class="text-xs text-content-subtle">Sort by:</label>
 					<select
 						id="sort-select"
 						bind:value={sortBy}
@@ -331,12 +289,7 @@
 					</select>
 				</div>
 				<div class="flex items-center gap-xs">
-					<label
-						for="group-select"
-						class="text-xs text-content-subtle"
-					>
-						Group by:
-					</label>
+					<label for="group-select" class="text-xs text-content-subtle">Group by:</label>
 					<select
 						id="group-select"
 						bind:value={groupBy}
@@ -373,33 +326,48 @@
 		</div>
 	{:else}
 		<!-- Grid view -->
-		<main bind:this={scrollContainer} data-scroll-container class="flex-1 overflow-y-auto p-l">
-			{#each groupedImages as group (group.label)}
-				{#if groupBy !== 'none'}
+		{#if groupBy === 'none'}
+			<!-- Flat virtualised grid — no grouping header needed -->
+			<div class="flex-1 overflow-hidden">
+				<VirtualGrid items={sortedImages} gap={8} overscan={3} bind:scrollEl={virtualScrollEl}>
+					{#snippet item(image, i)}
+						<LibraryImageThumb
+							{image}
+							{libraryId}
+							dirPath={dirPath!}
+							selected={i === selIdx}
+						/>
+					{/snippet}
+				</VirtualGrid>
+			</div>
+		{:else}
+			<!-- Grouped grid — regular DOM render with scroll container -->
+			<main bind:this={scrollContainer} data-scroll-container class="flex-1 overflow-y-auto p-l">
+				{#each groupedImages as group (group.label)}
 					<h2 class="text-lg font-semibold text-content mb-base mt-l first:mt-0">
 						{group.label}
 						<span class="text-sm text-content-subtle font-normal ml-xs">
 							({group.images.length} image{group.images.length !== 1 ? 's' : ''})
 						</span>
 					</h2>
-				{/if}
-				<ul
-					class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm mb-xl"
-				>
-					{#each group.images as image, i (image.id)}
-						{@const globalIndex = sortedImages.findIndex(img => img.id === image.id)}
-						<li>
-							<LibraryImageThumb
-								{image}
-								{libraryId}
-								thumbUrl={thumbUrls.get(image.id)}
-								selected={globalIndex === selIdx}
-							/>
-						</li>
-					{/each}
-				</ul>
-			{/each}
-		</main>
+					<ul
+						class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm mb-xl"
+					>
+						{#each group.images as image (image.id)}
+							{@const globalIndex = sortedImages.findIndex(img => img.id === image.id)}
+							<li>
+								<LibraryImageThumb
+									{image}
+									{libraryId}
+									{dirPath}
+									selected={globalIndex === selIdx}
+								/>
+							</li>
+						{/each}
+					</ul>
+				{/each}
+			</main>
+		{/if}
 
 		<!-- Keyboard shortcut hint bar -->
 		<KeyboardHintBar
@@ -407,6 +375,7 @@
 				{ keys: ["←", "→"], label: "navigate" },
 				{ keys: ["e"], label: "view" },
 			]}
+			progress={thumbProgressLabel}
 		/>
 	{/if}
 </div>
