@@ -8,6 +8,7 @@
 	 */
 	import { onDestroy } from "svelte";
 	import { StarIcon } from "phosphor-svelte";
+	import { resolve } from "$app/paths";
 	import type { LibraryImage } from "$lib/types";
 	import { requestThumb } from "$lib/image/thumb-queue";
 	import { join } from "@tauri-apps/api/path";
@@ -21,8 +22,8 @@
 
 	let { image, libraryId, dirPath, selected = false }: Props = $props();
 
-	type ThumbStatus = "idle" | "loading" | "ready" | "error";
-	let status = $state<ThumbStatus>("idle");
+	type ThumbStatus = "loading" | "ready" | "error";
+	let status = $state<ThumbStatus>("loading");
 	let url = $state<string | null>(null);
 	let el = $state<HTMLAnchorElement | null>(null);
 
@@ -34,12 +35,12 @@
 
 		const obs = new IntersectionObserver(
 			(entries) => {
-				if (entries[0]?.isIntersecting && status === "idle") {
+				if (entries[0]?.isIntersecting) {
 					void loadThumb();
 					obs.disconnect();
 				}
 			},
-			{ rootMargin: "200px" },
+			{ rootMargin: "1400px" },
 		);
 		obs.observe(target);
 		observer = obs;
@@ -66,7 +67,7 @@
 
 <a
 	bind:this={el}
-	href="/library/{libraryId}/{image.id}"
+	href={resolve(`/library/${libraryId}/${image.id}`)}
 	class="relative flex flex-col overflow-hidden border transition-all w-full
 	       focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 focus:ring-offset-base
 	       {selected
@@ -75,22 +76,22 @@
 >
 	<!-- Thumbnail area — 3:2 aspect ratio -->
 	<div class="relative w-full bg-base-muted" style="aspect-ratio: 3/2;">
+		<!-- Skeleton shown until image is ready -->
+		{#if status !== "ready"}
+			<div class="absolute inset-0 bg-base-subtle animate-pulse"></div>
+		{/if}
 		{#if status === "ready" && url}
 			<img
 				src={url}
 				alt="Image {image.filename}"
-				class="absolute inset-0 w-full h-full object-cover"
+				class="absolute inset-0 w-full h-full object-cover animate-fadein"
 			/>
-		{:else if status === "loading"}
-			<div class="absolute inset-0 bg-base-subtle animate-pulse"></div>
 		{:else if status === "error"}
 			<div
 				class="absolute inset-0 flex items-center justify-center text-content-subtle text-xs"
 			>
 				error
 			</div>
-		{:else}
-			<div class="absolute inset-0 bg-base-muted"></div>
 		{/if}
 	</div>
 </a>

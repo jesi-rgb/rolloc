@@ -237,29 +237,28 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
 	for (const id of imageIds) _initialisedIds.add(id);
 	notifyProgress();
 
-	// Check cache + OPFS in batches to avoid too many concurrent OPFS reads.
-	const BATCH = CONCURRENCY * 2;
-	for (let i = 0; i < imageIds.length; i += BATCH) {
-		const batch = imageIds.slice(i, i + BATCH);
-		await Promise.all(
-			batch.map(async (id) => {
-				if (_countedAsCached.has(id)) return;
-				if (thumbCache.get(id)) {
-					_countedAsCached.add(id);
-					thumbQueueProgress.cached++;
-					notifyProgress();
-					return;
-				}
-				const url = await thumbURL(id);
-				if (url) {
-					thumbCache.set(id, url);
-					_countedAsCached.add(id);
-					thumbQueueProgress.cached++;
-					notifyProgress();
-				}
-			}),
-		);
-	}
+	// Check in-memory cache synchronously first, then fire all OPFS reads
+	// concurrently. OPFS supports parallel reads on separate files and this
+	// warms the cache as fast as possible so IntersectionObserver hits are
+	// served from memory rather than waiting on sequential IO.
+	await Promise.all(
+		imageIds.map(async (id) => {
+			if (_countedAsCached.has(id)) return;
+			if (thumbCache.get(id)) {
+				_countedAsCached.add(id);
+				thumbQueueProgress.cached++;
+				notifyProgress();
+				return;
+			}
+			const url = await thumbURL(id);
+			if (url) {
+				thumbCache.set(id, url);
+				_countedAsCached.add(id);
+				thumbQueueProgress.cached++;
+				notifyProgress();
+			}
+		}),
+	);
 }
 
 /**

@@ -299,3 +299,15 @@ body {
 	background-color: var(--base);
 	color: var(--content);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   CUSTOM ANIMATIONS
+───────────────────────────────────────────────────────────────────────────── */
+@keyframes fadein {
+	from { opacity: 0; }
+	to   { opacity: 1; }
+}
+
+@utility animate-fadein {
+	animation: fadein 0.2s ease-out both;
+}
