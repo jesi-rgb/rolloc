@@ -24,8 +24,8 @@
 		return `1/${Math.round(1 / time)}s`;
 	}
 
-	function formatAperture(f: number | undefined): string {
-		if (!f) return "—";
+	function formatAperture(f: number | undefined | null): string {
+		if (!f) return "Manual Aperture";
 		return `f/${f.toFixed(1)}`;
 	}
 
@@ -105,14 +105,12 @@
 				</div>
 			{/if}
 
-			{#if exif.fNumber}
-				<div>
-					<dt class="text-content-muted">Aperture</dt>
-					<dd class="text-content font-medium">
-						{formatAperture(exif.fNumber)}
-					</dd>
-				</div>
-			{/if}
+			<div>
+				<dt class="text-content-muted">Aperture</dt>
+				<dd class="text-content font-medium">
+					{formatAperture(exif.fNumber)}
+				</dd>
+			</div>
 
 			{#if exif.exposureTime}
 				<div>
