@@ -1,53 +1,213 @@
 /**
  * Thumbnail and preview generation.
  *
- * Generates JPEG blobs from image files using an OffscreenCanvas (or
- * regular canvas fallback) and caches results in OPFS.
+ * Generates JPEG blobs from image files and caches results in OPFS.
  *
  * Sizes:
  *   THUMB_SIZE   — 300px long edge  → filmstrip
  *   PREVIEW_SIZE — 1200px long edge → lightbox pre-render
+ *
+ * Generation paths (in order of preference):
+ *   1. Native Tauri command (`generate_thumb`) — reads, decodes, resizes, and
+ *      JPEG-encodes entirely in Rust using the `image` crate + Lanczos3.
+ *      Requires an absolute file path.  Only the small JPEG blob (~10–30 KB)
+ *      crosses the IPC boundary.  Tauri's thread pool handles parallelism.
+ *   2. Web Worker pool — used when a pre-loaded File/Blob is available but the
+ *      Tauri command is absent (browser context / tests).  Each worker uses
+ *      ImageDecoder (Chromium 94+) for a single decode pass, falling back to
+ *      createImageBitmap with resize hints.
+ *   3. Main-thread fallback — OffscreenCanvas or regular canvas.  Used only
+ *      when both Worker and OffscreenCanvas are unavailable.
  */
 
 import { writeThumb, writePreview, readThumb, readPreview } from '$lib/fs/opfs';
+import { invoke } from '@tauri-apps/api/core';
+import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 
-const THUMB_SIZE   = 300;
-const PREVIEW_SIZE = 1200;
-const JPEG_QUALITY = 0.88;
+export const THUMB_SIZE   = 300;
+export const PREVIEW_SIZE = 1200;
+export const JPEG_QUALITY = 0.88;
+
+// ─── Tauri detection ──────────────────────────────────────────────────────────
+
+/** True when running inside a Tauri WebView (not a plain browser). */
+function isTauri(): boolean {
+	return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+/**
+ * Call the native Rust `generate_thumb` command.
+ * Returns a Blob containing the JPEG bytes.
+ *
+ * The Rust side returns `tauri::ipc::Response` (raw bytes), so `invoke`
+ * resolves to an `ArrayBuffer` — no base64 round-trip.
+ */
+async function generateThumbNative(absolutePath: string, maxPx: number): Promise<Blob> {
+	const buf = await invoke<ArrayBuffer>('generate_thumb', {
+		path:    absolutePath,
+		maxPx,
+		quality: Math.round(JPEG_QUALITY * 100),
+	});
+	return new Blob([buf], { type: 'image/jpeg' });
+}
+
+// ─── Worker pool ──────────────────────────────────────────────────────────────
+
+const WORKER_COUNT = Math.max(2, Math.floor((navigator?.hardwareConcurrency ?? 4) / 2));
+
+interface PendingTask {
+	resolve: (blob: Blob) => void;
+	reject: (err: Error) => void;
+}
+
+interface WorkerSlot {
+	worker: Worker;
+	busy: boolean;
+	pendingId: string | null;
+}
+
+/** Lazily initialised pool — only created when first thumb is requested. */
+let pool: WorkerSlot[] | null = null;
+const taskQueue: Array<{ id: string; req: ThumbWorkerRequest; task: PendingTask }> = [];
+const pendingTasks = new Map<string, PendingTask>();
+
+function getPool(): WorkerSlot[] | null {
+	if (pool !== null) return pool;
+	if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') return null;
+
+	try {
+		pool = Array.from({ length: WORKER_COUNT }, () => {
+			const worker = new Worker(new URL('./thumb.worker.ts', import.meta.url), {
+				type: 'module',
+			});
+			const slot: WorkerSlot = { worker, busy: false, pendingId: null };
+
+			worker.onmessage = (e: MessageEvent<ThumbWorkerResponse>) => {
+				slot.busy = false;
+				slot.pendingId = null;
+
+				const { id } = e.data;
+				const task = pendingTasks.get(id);
+				if (task) {
+					pendingTasks.delete(id);
+					if ('result' in e.data) {
+						task.resolve(e.data.result);
+					} else {
+						task.reject(new Error(e.data.error));
+					}
+				}
+				drainQueue(slot);
+			};
+
+			worker.onerror = (e) => {
+				slot.busy = false;
+				if (slot.pendingId) {
+					const task = pendingTasks.get(slot.pendingId);
+					if (task) {
+						pendingTasks.delete(slot.pendingId);
+						task.reject(new Error(e.message ?? 'Worker error'));
+					}
+					slot.pendingId = null;
+				}
+				drainQueue(slot);
+			};
+
+			return slot;
+		});
+		return pool;
+	} catch {
+		pool = null;
+		return null;
+	}
+}
+
+function drainQueue(slot: WorkerSlot): void {
+	if (slot.busy || taskQueue.length === 0) return;
+	const next = taskQueue.shift();
+	if (!next) return;
+	slot.busy = true;
+	slot.pendingId = next.id;
+	pendingTasks.set(next.id, next.task);
+	slot.worker.postMessage(next.req);
+}
+
+function dispatchToPool(req: ThumbWorkerRequest): Promise<Blob> {
+	const workers = getPool();
+	if (!workers) return Promise.reject(new Error('no pool'));
+
+	return new Promise<Blob>((resolve, reject) => {
+		const task: PendingTask = { resolve, reject };
+		const free = workers.find((s) => !s.busy);
+		if (free) {
+			free.busy = true;
+			free.pendingId = req.id;
+			pendingTasks.set(req.id, task);
+			free.worker.postMessage(req);
+		} else {
+			taskQueue.push({ id: req.id, req, task });
+		}
+	});
+}
 
 // ─── Core decode + resize ─────────────────────────────────────────────────────
 
 /**
- * Decodes a File/Blob into an ImageBitmap and draws it scaled onto a
- * canvas, returning a JPEG blob.
+ * Decodes a File/Blob and resizes to maxPx on the long edge, returning a
+ * JPEG blob.  Uses the worker pool when available; falls back to
+ * in-main-thread OffscreenCanvas or regular canvas.
+ *
+ * Only used when an absolute path is NOT available (browser / test context).
  */
-async function generateResized(file: File | Blob, maxPx: number): Promise<Blob> {
-	const bitmap = await createImageBitmap(file);
-	const { width, height } = bitmap;
+async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promise<Blob> {
+	// ── Worker path ──
+	const workers = getPool();
+	if (workers) {
+		const req: ThumbWorkerRequest = {
+			id: crypto.randomUUID(),
+			blob: file,
+			maxPx,
+			quality: JPEG_QUALITY,
+		};
+		try {
+			return await dispatchToPool(req);
+		} catch {
+			// Fall through to main-thread path
+		}
+	}
+
+	// ── Main-thread path (fallback) ──
+	const probe = await createImageBitmap(file);
+	const { width, height } = probe;
+	probe.close();
 
 	const scale = Math.min(1, maxPx / Math.max(width, height));
-	const w = Math.round(width  * scale);
+	const w = Math.round(width * scale);
 	const h = Math.round(height * scale);
+
+	const bitmap = await createImageBitmap(file, {
+		resizeWidth: w,
+		resizeHeight: h,
+		resizeQuality: 'high',
+	});
 
 	let blob: Blob;
 
 	if (typeof OffscreenCanvas !== 'undefined') {
 		const canvas = new OffscreenCanvas(w, h);
 		const ctx = canvas.getContext('2d')!;
-		ctx.drawImage(bitmap, 0, 0, w, h);
+		ctx.drawImage(bitmap, 0, 0);
 		blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY });
 	} else {
-		// Fallback for browsers without OffscreenCanvas (rare)
 		const canvas = document.createElement('canvas');
-		canvas.width  = w;
+		canvas.width = w;
 		canvas.height = h;
 		const ctx = canvas.getContext('2d')!;
-		ctx.drawImage(bitmap, 0, 0, w, h);
+		ctx.drawImage(bitmap, 0, 0);
 		blob = await new Promise<Blob>((resolve, reject) => {
 			canvas.toBlob(
 				(b) => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))),
 				'image/jpeg',
-				JPEG_QUALITY
+				JPEG_QUALITY,
 			);
 		});
 	}
@@ -62,12 +222,26 @@ async function generateResized(file: File | Blob, maxPx: number): Promise<Blob> 
  * Generates and caches a thumbnail for a frame.
  * No-ops if a thumb is already cached.
  * Returns the cached-or-newly-generated blob.
+ *
+ * Prefers the native Tauri path (absolutePath) when available — no file bytes
+ * cross the IPC boundary.  Falls back to blob-based generation when a file
+ * is provided instead.
  */
-export async function ensureThumb(frameId: string, file: File): Promise<Blob> {
+export async function ensureThumb(
+	frameId: string,
+	source: { absolutePath: string } | { file: File },
+): Promise<Blob> {
 	const existing = await readThumb(frameId);
 	if (existing) return existing;
 
-	const blob = await generateResized(file, THUMB_SIZE);
+	let blob: Blob;
+	if ('absolutePath' in source && isTauri()) {
+		blob = await generateThumbNative(source.absolutePath, THUMB_SIZE);
+	} else {
+		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
+		blob = await generateResizedFromBlob(file, THUMB_SIZE);
+	}
+
 	await writeThumb(frameId, blob);
 	return blob;
 }
@@ -76,32 +250,48 @@ export async function ensureThumb(frameId: string, file: File): Promise<Blob> {
  * Generates and caches a full preview for a frame.
  * No-ops if a preview is already cached.
  */
-export async function ensurePreview(frameId: string, file: File): Promise<Blob> {
+export async function ensurePreview(
+	frameId: string,
+	source: { absolutePath: string } | { file: File },
+): Promise<Blob> {
 	const existing = await readPreview(frameId);
 	if (existing) return existing;
 
-	const blob = await generateResized(file, PREVIEW_SIZE);
+	let blob: Blob;
+	if ('absolutePath' in source && isTauri()) {
+		blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE);
+	} else {
+		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
+		blob = await generateResizedFromBlob(file, PREVIEW_SIZE);
+	}
+
 	await writePreview(frameId, blob);
 	return blob;
 }
 
 /**
  * Returns an object URL for the frame's thumbnail.
- * Generates the thumb if not yet cached (requires the source File).
+ * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
  */
-export async function getThumbURL(frameId: string, file: File): Promise<string> {
-	const blob = await ensureThumb(frameId, file);
+export async function getThumbURL(
+	frameId: string,
+	source: { absolutePath: string } | { file: File },
+): Promise<string> {
+	const blob = await ensureThumb(frameId, source);
 	return URL.createObjectURL(blob);
 }
 
 /**
  * Returns an object URL for the frame's full preview (1200px long edge).
- * Generates the preview if not yet cached (requires the source File).
+ * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
  */
-export async function getPreviewURL(frameId: string, file: File): Promise<string> {
-	const blob = await ensurePreview(frameId, file);
+export async function getPreviewURL(
+	frameId: string,
+	source: { absolutePath: string } | { file: File },
+): Promise<string> {
+	const blob = await ensurePreview(frameId, source);
 	return URL.createObjectURL(blob);
 }
 
@@ -109,27 +299,22 @@ export async function getPreviewURL(frameId: string, file: File): Promise<string
 
 /**
  * Pre-generates thumbnails for multiple images in batch.
- * Useful for library creation/rescans.
- * 
- * Processes images with limited concurrency to avoid memory spikes.
- * Skips images that already have cached thumbnails.
+ * Skips images that are already cached.
  * Continues on errors (logs but doesn't throw).
- * 
  * Returns the number of thumbnails successfully generated.
  */
 export async function generateThumbnails(
-	images: Array<{ id: string; file: File }>,
+	images: Array<{ id: string; absolutePath: string }>,
 	options?: {
 		concurrency?: number;
 		onProgress?: (current: number, total: number) => void;
-	}
+	},
 ): Promise<number> {
-	const concurrency = options?.concurrency ?? 4;
+	const concurrency = options?.concurrency ?? Math.max(4, WORKER_COUNT * 2);
 	const total = images.length;
 	let completed = 0;
 	let generated = 0;
 
-	// Process in batches with limited concurrency
 	const queue = [...images];
 	const workers = Array.from({ length: concurrency }, async () => {
 		while (queue.length > 0) {
@@ -137,17 +322,14 @@ export async function generateThumbnails(
 			if (!item) break;
 
 			try {
-				// Check if already cached
 				const existing = await readThumb(item.id);
 				if (existing) {
-					// Already cached, skip generation
 					completed++;
 					options?.onProgress?.(completed, total);
 					continue;
 				}
 
-				// Generate new thumbnail
-				await ensureThumb(item.id, item.file);
+				await ensureThumb(item.id, { absolutePath: item.absolutePath });
 				generated++;
 			} catch (err) {
 				console.error(`Failed to generate thumbnail for ${item.id}:`, err);
