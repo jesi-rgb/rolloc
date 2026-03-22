@@ -125,15 +125,36 @@
 
 	// React to imageId changes from navigation (arrow keys)
 	$effect(() => {
-		// When imageId changes and images are loaded, load the new image
+		// When imageId changes and images are loaded, load the new image and prefetch neighbors
 		if (images.length > 0 && imageId) {
 			// Find in original images array (not sorted) since loadImage uses that array
 			const idx = images.findIndex((img) => img.image.id === imageId);
 			if (idx !== -1) {
-				loadImage(idx);
+				loadImage(idx).then(() => prefetchNeighbors());
 			}
 		}
 	});
+
+	/**
+	 * Prefetch the 2 images before and 2 images after the current image in sorted order
+	 * so navigation feels instant with no flicker.
+	 */
+	function prefetchNeighbors(): void {
+		const sorted = sortedImages;
+		const ci = sorted.findIndex((img) => img.image.id === imageId);
+		if (ci === -1) return;
+
+		for (let offset = -2; offset <= 2; offset++) {
+			if (offset === 0) continue;
+			const neighbor = sorted[ci + offset];
+			if (!neighbor) continue;
+			const origIdx = images.findIndex((img) => img.image.id === neighbor.image.id);
+			if (origIdx !== -1) {
+				// Fire-and-forget; errors are handled inside loadImage
+				loadImage(origIdx);
+			}
+		}
+	}
 
 	async function loadImage(index: number) {
 		if (index < 0 || index >= images.length) return;
