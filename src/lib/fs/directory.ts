@@ -57,6 +57,8 @@ export async function pickDirectory(): Promise<string | null> {
 // ─── File enumeration ─────────────────────────────────────────────────────────
 
 function isSupported(filename: string): boolean {
+	// Skip macOS AppleDouble resource fork files (._filename)
+	if (filename.startsWith('._')) return false;
 	const ext = filename.split('.').pop()?.toLowerCase() ?? '';
 	return SUPPORTED_EXTENSIONS.has(ext);
 }
