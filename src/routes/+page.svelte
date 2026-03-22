@@ -8,11 +8,11 @@
 	import RollThumbStrip from "$lib/components/RollThumbStrip.svelte";
 	import type { Roll, Library } from "$lib/types";
 
-	type Tab = 'rolls' | 'libraries';
+	type Tab = "rolls" | "libraries";
 
 	let rolls = $state<Roll[]>([]);
 	let libraries = $state<Library[]>([]);
-	let activeTab = $state<Tab>('libraries');
+	let activeTab = $state<Tab>("libraries");
 	let loading = $state(true);
 	let showNewRoll = $state(false);
 	let showNewLibrary = $state(false);
@@ -29,7 +29,9 @@
 	}
 
 	function onLibraryCreated(library: Library) {
-		libraries = [library, ...libraries].sort((a, b) => b.createdAt - a.createdAt);
+		libraries = [library, ...libraries].sort(
+			(a, b) => b.createdAt - a.createdAt,
+		);
 		showNewLibrary = false;
 	}
 
@@ -43,7 +45,11 @@
 	}
 
 	async function confirmDeleteLibrary(library: Library) {
-		if (!confirm(`Delete library "${library.label}"? This cannot be undone.`))
+		if (
+			!confirm(
+				`Delete library "${library.label}"? This cannot be undone.`,
+			)
+		)
 			return;
 		deleting = library.id;
 		await deleteLibrary(library.id);
@@ -77,7 +83,7 @@
 		</div>
 		<div class="flex items-center gap-xs">
 			<ThemeSwitcher />
-			{#if activeTab === 'rolls'}
+			{#if activeTab === "rolls"}
 				<button
 					onclick={() => (showNewRoll = true)}
 					class="flex items-center gap-xs px-base py-sm rounded-lg bg-primary text-primary-content
@@ -101,23 +107,31 @@
 	<nav class="border-b border-base-subtle">
 		<div class="px-l flex gap-base">
 			<button
-				onclick={() => (activeTab = 'rolls')}
+				onclick={() => (activeTab = "rolls")}
 				class="relative px-sm py-base text-sm font-medium transition
-				       {activeTab === 'rolls' ? 'text-primary' : 'text-content-muted hover:text-content'}"
+				       {activeTab === 'rolls'
+					? 'text-primary'
+					: 'text-content-muted hover:text-content'}"
 			>
 				Rolls
-				{#if activeTab === 'rolls'}
-					<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></span>
+				{#if activeTab === "rolls"}
+					<span
+						class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"
+					></span>
 				{/if}
 			</button>
 			<button
-				onclick={() => (activeTab = 'libraries')}
+				onclick={() => (activeTab = "libraries")}
 				class="relative px-sm py-base text-sm font-medium transition
-				       {activeTab === 'libraries' ? 'text-primary' : 'text-content-muted hover:text-content'}"
+				       {activeTab === 'libraries'
+					? 'text-primary'
+					: 'text-content-muted hover:text-content'}"
 			>
 				Libraries
-				{#if activeTab === 'libraries'}
-					<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></span>
+				{#if activeTab === "libraries"}
+					<span
+						class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"
+					></span>
 				{/if}
 			</button>
 		</div>
@@ -126,7 +140,7 @@
 	<main class="px-l py-xl max-w-5xl mx-auto">
 		{#if loading}
 			<p class="text-content-muted">Loading…</p>
-		{:else if activeTab === 'rolls'}
+		{:else if activeTab === "rolls"}
 			<!-- Rolls tab -->
 			{#if rolls.length === 0}
 				<!-- Empty state -->
@@ -134,10 +148,12 @@
 					class="flex flex-col items-center justify-center py-24 gap-base text-center"
 				>
 					<div class="text-6xl opacity-30">🎞️</div>
-					<h2 class="text-xl font-semibold text-content">No rolls yet</h2>
+					<h2 class="text-xl font-semibold text-content">
+						No rolls yet
+					</h2>
 					<p class="text-content-muted max-w-sm text-sm">
-						Create your first roll by selecting a folder of film scans
-						(JPEG or TIFF).
+						Create your first roll by selecting a folder of film
+						scans (JPEG or TIFF).
 					</p>
 					<button
 						onclick={() => (showNewRoll = true)}
@@ -154,7 +170,9 @@
 					{rolls.length} Roll{rolls.length !== 1 ? "s" : ""}
 				</h1>
 
-				<ul class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base">
+				<ul
+					class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base"
+				>
 					{#each rolls as roll (roll.id)}
 						<li
 							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
@@ -175,7 +193,8 @@
 								href="/roll/{roll.id}"
 								class="flex flex-col flex-1 px-sm py-sm gap-xs"
 							>
-								<span class="font-semibold text-content truncate"
+								<span
+									class="font-semibold text-content truncate"
 									>{roll.label}</span
 								>
 								{#if roll.filmStock}
@@ -232,10 +251,12 @@
 					class="flex flex-col items-center justify-center py-24 gap-base text-center"
 				>
 					<div class="text-6xl opacity-30">📸</div>
-					<h2 class="text-xl font-semibold text-content">No libraries yet</h2>
-					<p class="text-content-muted max-w-sm text-sm">
-						Create your first library by selecting a folder of images
-						to browse and view EXIF metadata.
+					<h2 class="text-xl font-semibold text-content">
+						No libraries yet
+					</h2>
+					<p class="text-content-muted text-sm">
+						Create your first library by selecting a folder of
+						images
 					</p>
 					<button
 						onclick={() => (showNewLibrary = true)}
@@ -249,10 +270,14 @@
 				<h1
 					class="text-sm font-medium text-content-muted uppercase tracking-widest mb-l"
 				>
-					{libraries.length} Librar{libraries.length !== 1 ? "ies" : "y"}
+					{libraries.length} Librar{libraries.length !== 1
+						? "ies"
+						: "y"}
 				</h1>
 
-				<ul class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base">
+				<ul
+					class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base"
+				>
 					{#each libraries as library (library.id)}
 						<li
 							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
@@ -263,7 +288,8 @@
 								href="/library/{library.id}"
 								class="flex flex-col flex-1 gap-xs"
 							>
-								<span class="font-semibold text-content truncate"
+								<span
+									class="font-semibold text-content truncate"
 									>{library.label}</span
 								>
 								{#if library.notes}

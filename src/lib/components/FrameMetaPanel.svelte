@@ -10,7 +10,7 @@
 		ThumbsDownIcon,
 	} from "phosphor-svelte";
 	import { putFrame } from "$lib/db/idb";
-	import { getFile } from "$lib/fs/directory";
+	import { join } from "@tauri-apps/api/path";
 	import { getThumbURL, getPreviewURL } from "$lib/image/thumbgen";
 	import type { Frame, FrameFlag } from "$lib/types";
 
@@ -67,10 +67,10 @@
 
 		let cancelled = false;
 
-		getFile(path, name)
-			.then(async (file) => {
+		join(path, name)
+			.then(async (absolutePath) => {
 				// Phase 1: show thumb immediately (almost always cached)
-				const thumbUrl = await getThumbURL(id, file);
+				const thumbUrl = await getThumbURL(id, { absolutePath });
 				if (cancelled) {
 					URL.revokeObjectURL(thumbUrl);
 					return;
@@ -80,7 +80,7 @@
 				if (oldUrl) URL.revokeObjectURL(oldUrl);
 
 				// Phase 2: upgrade to full 1200px preview
-				const fullUrl = await getPreviewURL(id, file);
+				const fullUrl = await getPreviewURL(id, { absolutePath });
 				if (cancelled) {
 					URL.revokeObjectURL(fullUrl);
 					return;
@@ -90,7 +90,7 @@
 				if (prevThumbUrl)
 					URL.revokeObjectURL(prevThumbUrl);
 			})
-			.catch((err) => {
+			.catch((err: unknown) => {
 				console.error(
 					"FrameMetaPanel: failed to load preview",
 					err,

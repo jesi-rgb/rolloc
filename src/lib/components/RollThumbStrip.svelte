@@ -4,7 +4,7 @@
 	import { getRollPath } from '$lib/db/rolls';
 	import { thumbURL } from '$lib/fs/opfs';
 	import { getThumbURL } from '$lib/image/thumbgen';
-	import { getFile } from '$lib/fs/directory';
+	import { join } from '@tauri-apps/api/path';
 	import type { Frame } from '$lib/types';
 
 	interface Props {
@@ -43,8 +43,8 @@
 				if (!dirPath) dirPath = await getRollPath(rollId);
 				if (dirPath) {
 					try {
-						const file = await getFile(dirPath, frame.filename);
-						url = await getThumbURL(frame.id, file);
+						const absolutePath = await join(dirPath, frame.filename);
+						url = await getThumbURL(frame.id, { absolutePath });
 					} catch {
 						// leave null — thumbnail stays as skeleton
 					}

@@ -13,8 +13,7 @@ import {
 	getPath,
 	putPath,
 } from './idb';
-import { listImageFiles, getFile } from '$lib/fs/directory';
-import { generateThumbnails } from '$lib/image/thumbgen';
+import { listImageFiles } from '$lib/fs/directory';
 
 /**
  * Re-export IDB functions for convenience.
@@ -89,54 +88,13 @@ export async function createLibrary(label: string, dirPath: string): Promise<Lib
 				await new Promise<void>((r) => setTimeout(r, 0));
 			}
 
-			console.log(`[createLibrary] Scanned ${globalIdx} images for library "${label}"`);
-
-			// Pre-generate thumbnails in background (non-blocking).
-			void _generateThumbsForLibrary(id, dirPath, label);
+		console.log(`[createLibrary] Scanned ${globalIdx} images for library "${label}"`);
 		} catch (err) {
 			console.error('[createLibrary] Background scan failed:', err);
 		}
 	})();
 
 	return library;
-}
-
-/**
- * Generate thumbnails for all images in a library.
- * Runs entirely in the background — no return value needed by callers.
- */
-async function _generateThumbsForLibrary(
-	libraryId: string,
-	dirPath: string,
-	label: string,
-): Promise<void> {
-	try {
-		const images = await getImages(libraryId);
-		const filePromises = images.map(async (img) => {
-			try {
-				const file = await getFile(dirPath, img.relativePath);
-				return { id: img.id, file };
-			} catch (err) {
-				console.error(`Failed to load file for ${img.filename}:`, err);
-				return null;
-			}
-		});
-
-		const loadedFiles = (await Promise.all(filePromises)).filter(
-			(item): item is { id: string; file: File } => item !== null,
-		);
-
-		const count = await generateThumbnails(loadedFiles, {
-			concurrency: 4,
-			onProgress: (current, total) => {
-				console.log(`[createLibrary] Thumbnail generation: ${current}/${total}`);
-			},
-		});
-
-		console.log(`[createLibrary] Generated ${count} new thumbnails for library "${label}"`);
-	} catch (err) {
-		console.error('[createLibrary] Thumbnail generation failed:', err);
-	}
 }
 
 /**
@@ -156,24 +114,13 @@ export async function getLibraryPath(libraryId: string): Promise<string | null> 
 }
 
 /**
- * Get a file for an image in a library.
- */
-export async function getImageFile(libraryId: string, relativePath: string): Promise<File | null> {
-	const path = await getLibraryPath(libraryId);
-	if (!path) return null;
-
-	try {
-		return await getFile(path, relativePath);
-	} catch (err) {
-		console.error(`Failed to get file ${relativePath}:`, err);
-		return null;
-	}
-}
-
-/**
  * Re-scans a library directory for new images.
  * Adds only images that don't already exist in the database.
  * Returns the number of new images added.
+ *
+ * Thumbnail generation for new images is handled by the library page
+ * via prefetchThumbs — not here — so we avoid loading all file bytes
+ * in a single Promise.all burst.
  */
 export async function rescanLibrary(libraryId: string): Promise<number> {
 	const path = await getLibraryPath(libraryId);
@@ -207,44 +154,10 @@ export async function rescanLibrary(libraryId: string): Promise<number> {
 		index: maxIndex + 1 + idx,
 		rating: 0,
 		notes: '',
-		// Use actual file creation/modification timestamp
 		createdAt: file.createdAt,
 	}));
 
-	// Store new images
 	await putImages(newImages);
-
-	// Pre-generate thumbnails for new images in background (non-blocking)
-	void (async () => {
-		try {
-			const filePromises = newImages.map(async (img) => {
-				try {
-					const file = await getFile(path, img.relativePath);
-					return { id: img.id, file };
-				} catch (err) {
-					console.error(`Failed to load file for ${img.filename}:`, err);
-					return null;
-				}
-			});
-
-			const loadedFiles = (await Promise.all(filePromises)).filter(
-				(item): item is { id: string; file: File } => item !== null
-			);
-
-			if (loadedFiles.length > 0) {
-				const count = await generateThumbnails(loadedFiles, {
-					concurrency: 4,
-					onProgress: (current, total) => {
-						console.log(`[rescanLibrary] Thumbnail generation: ${current}/${total}`);
-					},
-				});
-
-				console.log(`[rescanLibrary] Generated ${count} new thumbnails`);
-			}
-		} catch (err) {
-			console.error('[rescanLibrary] Thumbnail generation failed:', err);
-		}
-	})();
 
 	return newImages.length;
 }

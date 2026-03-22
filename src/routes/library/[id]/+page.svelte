@@ -12,39 +12,67 @@
 	import { goto, beforeNavigate } from "$app/navigation";
 	import { page } from "$app/state";
 	import { resolve } from "$app/paths";
-	import { getLibrary, getImages, getLibraryPath, rescanLibrary, onScanBatch } from "$lib/db/libraries";
+	import {
+		getLibrary,
+		getImages,
+		getLibraryPath,
+		rescanLibrary,
+		onScanBatch,
+	} from "$lib/db/libraries";
 	import type { Library, LibraryImage } from "$lib/types";
 	import { SvelteMap } from "svelte/reactivity";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
-	import { resetThumbQueueProgress, thumbQueueProgress, onThumbProgress } from "$lib/image/thumb-queue";
+	import {
+		resetThumbQueueProgress,
+		thumbQueueProgress,
+		onThumbProgress,
+		initThumbQueueForLibrary,
+		prefetchThumbs,
+	} from "$lib/image/thumb-queue";
 
-	type SortKey = 'createdAt-desc' | 'createdAt-asc';
-	type GroupBy = 'none' | 'day' | 'month' | 'year';
+	type SortKey = "createdAt-desc" | "createdAt-asc";
+	type GroupBy = "none" | "day" | "month" | "year";
 
 	const libraryId = $derived(page.params.id ?? "");
 	const SCROLL_KEY = untrack(() => `library-scroll-${libraryId}`);
-	const SORT_KEY = 'library-sort-preference';
-	const GROUP_KEY = 'library-group-preference';
+	const SORT_KEY = "library-sort-preference";
+	const GROUP_KEY = "library-group-preference";
 
 	let library = $state<Library | null>(null);
 	let images = $state<LibraryImage[]>([]);
 	let dirPath = $state<string | null>(null);
 	let loading = $state(true);
 
-	const savedSort = typeof localStorage !== 'undefined' ? localStorage.getItem(SORT_KEY) : null;
-	const savedGroup = typeof localStorage !== 'undefined' ? localStorage.getItem(GROUP_KEY) : null;
+	const savedSort =
+		typeof localStorage !== "undefined"
+			? localStorage.getItem(SORT_KEY)
+			: null;
+	const savedGroup =
+		typeof localStorage !== "undefined"
+			? localStorage.getItem(GROUP_KEY)
+			: null;
 
-	let sortBy = $state<SortKey>((savedSort as SortKey) ?? 'createdAt-desc');
-	let groupBy = $state<GroupBy>((savedGroup as GroupBy) ?? 'none');
+	let sortBy = $state<SortKey>((savedSort as SortKey) ?? "createdAt-desc");
+	let groupBy = $state<GroupBy>((savedGroup as GroupBy) ?? "none");
 	let selIdx = $state(0);
 	let scrollContainer = $state<HTMLElement | null>(null);
 	let virtualScrollEl = $state<HTMLDivElement | null>(null);
 
 	// Reactive snapshot of thumb queue progress for KeyboardHintBar.
 	let thumbProgress = $state({ cached: 0, generating: 0, total: 0 });
+
+	/**
+	 * True once every image in the library has a cached thumbnail.
+	 * While false, the grid is inert (pointer events blocked) and a progress
+	 * overlay is shown so the user knows generation is running.
+	 */
+	const thumbsReady = $derived(
+		thumbProgress.total === 0 ||
+			thumbProgress.cached >= thumbProgress.total,
+	);
 
 	/** Derived progress label — shown only while generation is in progress. */
 	let thumbProgressLabel = $derived(
@@ -54,27 +82,33 @@
 	);
 
 	$effect(() => {
-		if (typeof localStorage !== 'undefined') {
+		if (typeof localStorage !== "undefined") {
 			localStorage.setItem(SORT_KEY, sortBy);
 		}
 	});
 
 	$effect(() => {
-		if (typeof localStorage !== 'undefined') {
+		if (typeof localStorage !== "undefined") {
 			localStorage.setItem(GROUP_KEY, groupBy);
 		}
 	});
 
 	let sortedImages = $derived(
-		sortBy === 'createdAt-desc' ? [...images].sort((a, b) => {
-			const dateDiff = b.createdAt - a.createdAt;
-			return dateDiff !== 0 ? dateDiff : a.filename.localeCompare(b.filename);
-		}) :
-		sortBy === 'createdAt-asc' ? [...images].sort((a, b) => {
-			const dateDiff = a.createdAt - b.createdAt;
-			return dateDiff !== 0 ? dateDiff : a.filename.localeCompare(b.filename);
-		}) :
-		[...images]
+		sortBy === "createdAt-desc"
+			? [...images].sort((a, b) => {
+					const dateDiff = b.createdAt - a.createdAt;
+					return dateDiff !== 0
+						? dateDiff
+						: a.filename.localeCompare(b.filename);
+				})
+			: sortBy === "createdAt-asc"
+				? [...images].sort((a, b) => {
+						const dateDiff = a.createdAt - b.createdAt;
+						return dateDiff !== 0
+							? dateDiff
+							: a.filename.localeCompare(b.filename);
+					})
+				: [...images],
 	);
 
 	interface ImageGroup {
@@ -83,8 +117,8 @@
 	}
 
 	let groupedImages = $derived.by(() => {
-		if (groupBy === 'none') {
-			return [{ label: '', images: sortedImages }];
+		if (groupBy === "none") {
+			return [{ label: "", images: sortedImages }];
 		}
 
 		const groups = new SvelteMap<string, LibraryImage[]>();
@@ -93,9 +127,9 @@
 			const date = new Date(image.createdAt);
 			let key: string;
 
-			if (groupBy === 'day') {
+			if (groupBy === "day") {
 				key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-			} else if (groupBy === 'month') {
+			} else if (groupBy === "month") {
 				key = `${date.getFullYear()}-${date.getMonth()}`;
 			} else {
 				key = `${date.getFullYear()}`;
@@ -108,17 +142,30 @@
 		}
 
 		return Array.from(groups.entries()).map(([key, imgs]) => ({
-			label: imgs.length > 0
-				? (groupBy === 'day'
-					? new Date(imgs[0].createdAt).toLocaleDateString(undefined, {
-							year: 'numeric', month: 'long', day: 'numeric', weekday: 'long',
-						})
-					: groupBy === 'month'
-					? new Date(imgs[0].createdAt).toLocaleDateString(undefined, {
-							year: 'numeric', month: 'long',
-						})
-					: new Date(imgs[0].createdAt).getFullYear().toString())
-				: key,
+			label:
+				imgs.length > 0
+					? groupBy === "day"
+						? new Date(imgs[0].createdAt).toLocaleDateString(
+								undefined,
+								{
+									year: "numeric",
+									month: "long",
+									day: "numeric",
+									weekday: "long",
+								},
+							)
+						: groupBy === "month"
+							? new Date(imgs[0].createdAt).toLocaleDateString(
+									undefined,
+									{
+										year: "numeric",
+										month: "long",
+									},
+								)
+							: new Date(imgs[0].createdAt)
+									.getFullYear()
+									.toString()
+					: key,
 			images: imgs,
 		}));
 	});
@@ -141,6 +188,13 @@
 		onScanBatch((batchLibraryId, newImages) => {
 			if (batchLibraryId !== libraryId) return;
 			images = [...images, ...newImages];
+			// Feed newly-discovered images into the thumb queue immediately.
+			if (dirPath) {
+				void prefetchThumbs(newImages, dirPath);
+				// Extend the progress total so the counter stays accurate.
+				thumbQueueProgress.total += newImages.length;
+				thumbProgress = { ...thumbQueueProgress };
+			}
 		});
 
 		const [lib, imgs] = await Promise.all([
@@ -162,13 +216,26 @@
 		// Render immediately — rescan deferred to idle time (Phase 5)
 		loading = false;
 
+		// Kick off OPFS pre-scan and background thumb generation for all images
+		// now that we have both the image list and dirPath.
+		// initThumbQueueForLibrary sets accurate progress totals before any
+		// IntersectionObserver fires; prefetchThumbs feeds files to the worker pool.
+		if (dirPath && imgs.length > 0) {
+			void initThumbQueueForLibrary(imgs.map((img) => img.id));
+			void prefetchThumbs(imgs, dirPath);
+		}
+
 		// Restore scroll position
 		const saved = sessionStorage.getItem(SCROLL_KEY);
 		if (saved) {
 			const scrollPos = parseInt(saved, 10);
 			setTimeout(() => {
 				// Try VirtualGrid scroller first (groupBy=none), then the main scroller
-				const scroller = virtualScrollEl ?? (document.querySelector('main[data-scroll-container]') as HTMLElement | null);
+				const scroller =
+					virtualScrollEl ??
+					(document.querySelector(
+						"main[data-scroll-container]",
+					) as HTMLElement | null);
 				if (scroller) {
 					scroller.scrollTop = scrollPos;
 					sessionStorage.removeItem(SCROLL_KEY);
@@ -184,11 +251,11 @@
 					images = await getImages(libraryId);
 				}
 			} catch (err) {
-				console.error('Auto-rescan failed:', err);
+				console.error("Auto-rescan failed:", err);
 			}
 		};
 
-		if ('requestIdleCallback' in window) {
+		if ("requestIdleCallback" in window) {
 			requestIdleCallback(() => void runRescan());
 		} else {
 			setTimeout(() => void runRescan(), 1000);
@@ -196,11 +263,15 @@
 	});
 
 	beforeNavigate((nav) => {
-		if (nav.to?.route.id?.includes('[imageId]')) {
+		if (nav.to?.route.id?.includes("[imageId]")) {
 			// Save scroll position from whichever container is active
-			const scroller = groupBy === 'none' ? virtualScrollEl : scrollContainer;
+			const scroller =
+				groupBy === "none" ? virtualScrollEl : scrollContainer;
 			if (scroller) {
-				sessionStorage.setItem(SCROLL_KEY, scroller.scrollTop.toString());
+				sessionStorage.setItem(
+					SCROLL_KEY,
+					scroller.scrollTop.toString(),
+				);
 			}
 		}
 	});
@@ -209,11 +280,14 @@
 		// Unregister callbacks so stale updates don't affect other pages.
 		onScanBatch(null);
 		onThumbProgress(null);
+		resetThumbQueueProgress();
 	});
 
 	function formatDate(ms: number): string {
 		return new Date(ms).toLocaleDateString(undefined, {
-			year: "numeric", month: "short", day: "numeric",
+			year: "numeric",
+			month: "short",
+			day: "numeric",
 		});
 	}
 
@@ -276,7 +350,9 @@
 		<div class="ml-auto flex items-center gap-base">
 			{#if !loading && library && images.length > 0}
 				<div class="flex items-center gap-xs">
-					<label for="sort-select" class="text-xs text-content-subtle">Sort by:</label>
+					<label for="sort-select" class="text-xs text-content-subtle"
+						>Sort by:</label
+					>
 					<select
 						id="sort-select"
 						bind:value={sortBy}
@@ -289,7 +365,10 @@
 					</select>
 				</div>
 				<div class="flex items-center gap-xs">
-					<label for="group-select" class="text-xs text-content-subtle">Group by:</label>
+					<label
+						for="group-select"
+						class="text-xs text-content-subtle">Group by:</label
+					>
 					<select
 						id="group-select"
 						bind:value={groupBy}
@@ -325,49 +404,80 @@
 			Loading directory path…
 		</div>
 	{:else}
-		<!-- Grid view -->
-		{#if groupBy === 'none'}
-			<!-- Flat virtualised grid — no grouping header needed -->
-			<div class="flex-1 overflow-hidden">
-				<VirtualGrid items={sortedImages} gap={8} overscan={3} bind:scrollEl={virtualScrollEl}>
-					{#snippet item(image, i)}
-						<LibraryImageThumb
-							{image}
-							{libraryId}
-							dirPath={dirPath!}
-							selected={i === selIdx}
-						/>
-					{/snippet}
-				</VirtualGrid>
-			</div>
-		{:else}
-			<!-- Grouped grid — regular DOM render with scroll container -->
-			<main bind:this={scrollContainer} data-scroll-container class="flex-1 overflow-y-auto p-l">
-				{#each groupedImages as group (group.label)}
-					<h2 class="text-lg font-semibold text-content mb-base mt-l first:mt-0">
-						{group.label}
-						<span class="text-sm text-content-subtle font-normal ml-xs">
-							({group.images.length} image{group.images.length !== 1 ? 's' : ''})
-						</span>
-					</h2>
-					<ul
-						class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-sm mb-xl"
-					>
-						{#each group.images as image (image.id)}
-							{@const globalIndex = sortedImages.findIndex(img => img.id === image.id)}
-							<li>
+		<!-- Grid view — wrapped in a relative container so the loading overlay
+		     can be positioned absolutely over the grid content -->
+		<div class="flex-1 overflow-hidden relative flex flex-col">
+			<!-- Loading overlay — blocks interaction until all thumbs are ready -->
+
+			<!-- Grid content — inert while loading so nothing is clickable/focusable -->
+			<div class="flex-1 overflow-hidden flex flex-col">
+				{#if groupBy === "none"}
+					<!-- Flat virtualised grid — no grouping header needed -->
+					<div class="flex-1 overflow-hidden">
+						<VirtualGrid
+							items={sortedImages}
+							gap={8}
+							overscan={3}
+							bind:scrollEl={virtualScrollEl}
+						>
+							{#snippet item(image, i)}
 								<LibraryImageThumb
 									{image}
 									{libraryId}
-									{dirPath}
-									selected={globalIndex === selIdx}
+									dirPath={dirPath!}
+									selected={i === selIdx}
 								/>
-							</li>
+							{/snippet}
+						</VirtualGrid>
+					</div>
+				{:else}
+					<!-- Grouped grid — regular DOM render with scroll container -->
+					<main
+						bind:this={scrollContainer}
+						data-scroll-container
+						class="flex-1 overflow-y-auto p-l"
+					>
+						{#each groupedImages as group (group.label)}
+							<h2
+								class="text-lg font-semibold text-content mb-base mt-l
+						first:mt-0 border-b border-primary"
+							>
+								{group.label}
+								<span
+									class="text-sm text-content-subtle font-normal ml-xs
+							"
+								>
+									({group.images.length} image{group.images
+										.length !== 1
+										? "s"
+										: ""})
+								</span>
+							</h2>
+							<ul
+								class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 mb-xl"
+							>
+								{#each group.images as image (image.id)}
+									{@const globalIndex =
+										sortedImages.findIndex(
+											(img) => img.id === image.id,
+										)}
+									<li>
+										<LibraryImageThumb
+											{image}
+											{libraryId}
+											{dirPath}
+											selected={globalIndex === selIdx}
+										/>
+									</li>
+								{/each}
+							</ul>
 						{/each}
-					</ul>
-				{/each}
-			</main>
-		{/if}
+					</main>
+				{/if}
+			</div>
+			<!-- /inert wrapper -->
+		</div>
+		<!-- /relative container -->
 
 		<!-- Keyboard shortcut hint bar -->
 		<KeyboardHintBar

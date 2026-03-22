@@ -12,7 +12,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { getRoll, getRollPath, updateRoll } from '$lib/db/rolls';
-	import { getFile } from '$lib/fs/directory';
+	import { join } from '@tauri-apps/api/path';
 	import { getFrame, getFrames, putFrame } from '$lib/db/idb';
 	import { readPreview, readThumb } from '$lib/fs/opfs';
 	import { ensurePreview } from '$lib/image/thumbgen';
@@ -108,8 +108,8 @@
 
 			if (dirPath) {
 				try {
-					const file = await getFile(dirPath, frame.filename);
-					blob = await ensurePreview(frame.id, file);
+					const absolutePath = await join(dirPath, frame.filename);
+					blob = await ensurePreview(frame.id, { absolutePath });
 				} catch {
 					// File missing — try OPFS cache.
 				}

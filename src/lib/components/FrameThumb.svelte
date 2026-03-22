@@ -3,12 +3,12 @@
 	 * Lazy-loading frame thumbnail.
 	 *
 	 * Uses IntersectionObserver to defer image generation until the thumb
-	 * scrolls near the viewport.
+	 * scrolls near the viewport.  Thumb generation is routed through the
+	 * shared thumb-queue so the worker pool and LRU cache are reused.
 	 */
-	import { onDestroy } from "svelte";
 	import { StarIcon } from "phosphor-svelte";
-	import { getThumbURL } from "$lib/image/thumbgen";
-	import { getFile } from "$lib/fs/directory";
+	import { requestThumb } from "$lib/image/thumb-queue";
+	import { join } from "@tauri-apps/api/path";
 	import type { Frame } from "$lib/types";
 
 	interface Props {
@@ -20,13 +20,11 @@
 
 	let { frame, dirPath, selected = false, onSelect }: Props = $props();
 
-	// Avoid shadowing the $state rune — use a distinct name
 	type ThumbStatus = "idle" | "loading" | "ready" | "error";
 	let status = $state<ThumbStatus>("idle");
 	let url = $state<string | null>(null);
 	let el = $state<HTMLButtonElement | null>(null);
 
-	let currentUrl: string | null = null;
 	let observer: IntersectionObserver | null = null;
 
 	// Attach IntersectionObserver once the element is mounted
@@ -49,18 +47,17 @@
 		return () => obs.disconnect();
 	});
 
-	onDestroy(() => {
-		observer?.disconnect();
-		if (currentUrl) URL.revokeObjectURL(currentUrl);
+	$effect(() => {
+		return () => observer?.disconnect();
 	});
 
 	async function loadThumb() {
 		status = "loading";
 		try {
-			const file = await getFile(dirPath, frame.filename);
-			const objUrl = await getThumbURL(frame.id, file);
-			if (currentUrl) URL.revokeObjectURL(currentUrl);
-			currentUrl = objUrl;
+			const absolutePath = await join(dirPath, frame.filename);
+			// requestThumb routes through the worker pool + LRU cache.
+			// The cache owns the object URL — do NOT revoke it here.
+			const objUrl = await requestThumb(frame.id, absolutePath, "high");
 			url = objUrl;
 			status = "ready";
 		} catch {

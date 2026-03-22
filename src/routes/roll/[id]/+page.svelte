@@ -8,7 +8,7 @@
 	 *   p                   — toggle pick flag
 	 *   x                   — toggle reject flag
 	 */
-	import { onMount } from "svelte";
+	import { onMount, onDestroy } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { getRoll, getRollPath } from "$lib/db/rolls";
@@ -20,6 +20,12 @@
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+	import {
+		prefetchThumbs,
+		resetThumbQueueProgress,
+		thumbQueueProgress,
+		onThumbProgress,
+	} from "$lib/image/thumb-queue";
 
 	// $page.params.id is typed string | undefined in SvelteKit; guard below
 	const rollId = $derived(page.params.id ?? "");
@@ -30,9 +36,29 @@
 	let selIdx = $state(0);
 	let loading = $state(true);
 
+	// Reactive snapshot of the shared thumb-queue progress counters.
+	let thumbProgress = $state({ cached: 0, generating: 0, total: 0 });
+
+	/**
+	 * True once all thumbnails for this roll are either cached or generated.
+	 * While false, the filmstrip grid is inert (no interaction) and a progress
+	 * overlay is shown so the user knows generation is in flight.
+	 */
+	const thumbsReady = $derived(
+		thumbProgress.total === 0 || thumbProgress.cached >= thumbProgress.total,
+	);
+
 	const selected = $derived(frames[selIdx] ?? null);
 
 	onMount(async () => {
+		// Reset any counters left by a previous page visit.
+		resetThumbQueueProgress();
+
+		// Keep our local reactive snapshot in sync with the queue.
+		onThumbProgress(() => {
+			thumbProgress = { ...thumbQueueProgress };
+		});
+
 		if (!rollId) {
 			loading = false;
 			return;
@@ -47,12 +73,25 @@
 			return;
 		}
 
-		// Get the directory path for this roll
 		const path = await getRollPath(rollId);
-		if (path) {
-			dirPath = path;
-		}
+		if (path) dirPath = path;
+
 		loading = false;
+
+		// Kick off background generation for all frames immediately.
+		// Uses the worker pool so it runs off the main thread; high-priority
+		// requests from IntersectionObserver (FrameThumb) will jump the queue.
+		if (dirPath && frames.length > 0) {
+			void prefetchThumbs(
+				frames.map((f) => ({ id: f.id, relativePath: f.filename })),
+				dirPath,
+			);
+		}
+	});
+
+	onDestroy(() => {
+		onThumbProgress(null);
+		resetThumbQueueProgress();
 	});
 
 	function selectFrame(f: Frame) {
@@ -168,18 +207,54 @@
 	{:else}
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
 		<PaneGroup direction="horizontal" class="flex-1 min-h-0">
-			<!-- Filmstrip grid pane -->
+			<!-- Filmstrip grid pane — inert while thumbnails are being generated -->
 			<Pane defaultSize={45} minSize={20} order={1}>
-				<VirtualGrid items={frames} gap={8} overscan={3}>
-					{#snippet item(frame, i)}
-						<FrameThumb
-							{frame}
-							dirPath={dirPath!}
-							selected={i === selIdx}
-							onSelect={selectFrame}
-						/>
-					{/snippet}
-				</VirtualGrid>
+				<div class="relative h-full">
+					<!-- Loading overlay — blocks interaction until all thumbs are ready -->
+					{#if !thumbsReady}
+						<div
+							class="absolute inset-0 z-10 flex flex-col items-center justify-center
+							       gap-3 bg-base/80 backdrop-blur-sm"
+						>
+							<p class="text-sm text-content-muted">
+								Generating thumbnails…
+							</p>
+							{#if thumbProgress.total > 0}
+								<div class="w-48 flex flex-col items-center gap-1.5">
+									<div
+										class="w-full h-1.5 rounded-full bg-base-subtle overflow-hidden"
+									>
+										<div
+											class="h-full bg-primary rounded-full transition-all duration-150"
+											style="width: {Math.round(
+												(thumbProgress.cached /
+													thumbProgress.total) *
+													100,
+											)}%"
+										></div>
+									</div>
+									<span class="text-xs text-content-subtle tabular-nums">
+										{thumbProgress.cached} / {thumbProgress.total}
+									</span>
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					<!-- Grid — pointer events blocked by inert while loading -->
+					<div inert={!thumbsReady || undefined} class="h-full">
+						<VirtualGrid items={frames} gap={8} overscan={3}>
+							{#snippet item(frame, i)}
+								<FrameThumb
+									{frame}
+									dirPath={dirPath!}
+									selected={i === selIdx}
+									onSelect={selectFrame}
+								/>
+							{/snippet}
+						</VirtualGrid>
+					</div>
+				</div>
 			</Pane>
 
 			<!-- Metadata panel pane -->
