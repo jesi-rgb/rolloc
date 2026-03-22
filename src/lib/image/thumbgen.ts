@@ -22,6 +22,11 @@
 
 import { writeThumb, writePreview, readThumb, readPreview } from '$lib/fs/opfs';
 import { invoke } from '@tauri-apps/api/core';
+import {
+	readExifOrientation,
+	applyOrientationTransform,
+	orientationSwapsDimensions,
+} from '$lib/image/exif-orientation';
 import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 
 export const THUMB_SIZE   = 300;
@@ -176,12 +181,18 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
 	}
 
 	// ── Main-thread path (fallback) ──
+	const orientation = await readExifOrientation(file);
+	const swapped = orientationSwapsDimensions(orientation);
+
 	const probe = await createImageBitmap(file);
 	const { width, height } = probe;
 	probe.close();
 
-	const scale = Math.min(1, maxPx / Math.max(width, height));
-	const w = Math.round(width * scale);
+	// Scale from logical (post-rotation) dimensions.
+	const logicalW = swapped ? height : width;
+	const logicalH = swapped ? width  : height;
+	const scale = Math.min(1, maxPx / Math.max(logicalW, logicalH));
+	const w = Math.round(width  * scale);
 	const h = Math.round(height * scale);
 
 	const bitmap = await createImageBitmap(file, {
@@ -190,18 +201,24 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
 		resizeQuality: 'high',
 	});
 
+	// Output canvas is sized to logical (post-rotation) dimensions.
+	const outW = swapped ? h : w;
+	const outH = swapped ? w : h;
+
 	let blob: Blob;
 
 	if (typeof OffscreenCanvas !== 'undefined') {
-		const canvas = new OffscreenCanvas(w, h);
+		const canvas = new OffscreenCanvas(outW, outH);
 		const ctx = canvas.getContext('2d')!;
+		applyOrientationTransform(ctx, orientation, w, h);
 		ctx.drawImage(bitmap, 0, 0);
 		blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY });
 	} else {
 		const canvas = document.createElement('canvas');
-		canvas.width = w;
-		canvas.height = h;
+		canvas.width  = outW;
+		canvas.height = outH;
 		const ctx = canvas.getContext('2d')!;
+		applyOrientationTransform(ctx, orientation, w, h);
 		ctx.drawImage(bitmap, 0, 0);
 		blob = await new Promise<Blob>((resolve, reject) => {
 			canvas.toBlob(

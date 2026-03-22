@@ -11,6 +11,9 @@
  *      decode + resize, but requires a dimension probe first (two decodes).
  *      Used as fallback when ImageDecoder is unavailable.
  *
+ * EXIF orientation is read from the source blob and applied as a canvas
+ * transform before drawing, so portrait shots stored sideways are corrected.
+ *
  * This worker is only used for the JS-side fallback path (when the Tauri
  * native `generate_thumb` command is unavailable, e.g. in a browser context).
  *
@@ -19,6 +22,13 @@
  *   OUT: { id: string; result: Blob }      — success
  *        { id: string; error: string }     — failure
  */
+
+import {
+	readExifOrientation,
+	applyOrientationTransform,
+	orientationSwapsDimensions,
+	type ExifOrientation,
+} from './exif-orientation';
 
 export interface ThumbWorkerRequest {
 	id: string;
@@ -50,10 +60,14 @@ const HAS_IMAGE_DECODER = typeof ImageDecoder !== 'undefined';
  * Single-pass decode + resize using ImageDecoder.
  * Gets image dimensions from compressed metadata (no pixel decode needed),
  * then decodes once with exact target dimensions.
+ *
+ * `orientation` is the EXIF orientation value already read from the blob.
+ * Dimensions are computed in *encoded* space; the caller handles the canvas.
  */
 async function resizeWithImageDecoder(
 	blob: Blob,
 	maxPx: number,
+	orientation: ExifOrientation,
 ): Promise<ImageBitmap> {
 	const decoder = new ImageDecoder({ data: blob.stream(), type: blob.type || 'image/jpeg' });
 	await decoder.tracks.ready;
@@ -74,7 +88,14 @@ async function resizeWithImageDecoder(
 		throw new Error('ImageDecoder: zero dimensions from track metadata');
 	}
 
-	const scale = Math.min(1, maxPx / Math.max(naturalWidth, naturalHeight));
+	// Compute scale from the *logical* long edge, accounting for rotation.
+	// For 90°/270° orientations the stored width/height are swapped vs display.
+	const swapped = orientationSwapsDimensions(orientation);
+	const logicalW = swapped ? naturalHeight : naturalWidth;
+	const logicalH = swapped ? naturalWidth  : naturalHeight;
+	const scale    = Math.min(1, maxPx / Math.max(logicalW, logicalH));
+
+	// Decode target dimensions are in *encoded* (pre-rotation) space.
 	const w = Math.round(naturalWidth  * scale);
 	const h = Math.round(naturalHeight * scale);
 
@@ -88,22 +109,52 @@ async function resizeWithImageDecoder(
 
 /**
  * Fallback: two-pass createImageBitmap (probe for dimensions, then resize).
+ *
+ * `orientation` is used to compute scale from the logical (post-rotation) size.
  */
 async function resizeWithCreateImageBitmap(
 	blob: Blob,
 	maxPx: number,
+	orientation: ExifOrientation,
 ): Promise<ImageBitmap> {
 	// Pass 1 — probe dimensions (decode headers only in most browsers).
 	const probe = await createImageBitmap(blob);
 	const { width, height } = probe;
 	probe.close();
 
-	const scale = Math.min(1, maxPx / Math.max(width, height));
+	// Compute scale from logical dimensions (swap for 90°/270° orientations).
+	const swapped = orientationSwapsDimensions(orientation);
+	const logicalW = swapped ? height : width;
+	const logicalH = swapped ? width  : height;
+	const scale    = Math.min(1, maxPx / Math.max(logicalW, logicalH));
+
 	const w = Math.round(width  * scale);
 	const h = Math.round(height * scale);
 
 	// Pass 2 — single-step hardware-accelerated decode + resize.
 	return createImageBitmap(blob, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
+}
+
+// ─── Draw bitmap with orientation correction ──────────────────────────────────
+
+/**
+ * Draw `bitmap` onto a new OffscreenCanvas, applying the EXIF orientation
+ * transform so the output is always correctly oriented.
+ */
+function drawOriented(bitmap: ImageBitmap, orientation: ExifOrientation): OffscreenCanvas {
+	const srcW = bitmap.width;
+	const srcH = bitmap.height;
+
+	// Output canvas dimensions swap for 90°/270° rotations.
+	const swapped = orientationSwapsDimensions(orientation);
+	const outW = swapped ? srcH : srcW;
+	const outH = swapped ? srcW : srcH;
+
+	const canvas = new OffscreenCanvas(outW, outH);
+	const ctx = canvas.getContext('2d')!;
+	applyOrientationTransform(ctx, orientation, srcW, srcH);
+	ctx.drawImage(bitmap, 0, 0);
+	return canvas;
 }
 
 // ─── Message handler ──────────────────────────────────────────────────────────
@@ -112,22 +163,23 @@ self.onmessage = async (e: MessageEvent<ThumbWorkerRequest>) => {
 	const { id, blob, maxPx, quality } = e.data;
 
 	try {
+		// Read EXIF orientation before decoding so dimension calculations are correct.
+		const orientation = await readExifOrientation(blob);
+
 		let bitmap: ImageBitmap;
 
 		if (HAS_IMAGE_DECODER) {
 			try {
-				bitmap = await resizeWithImageDecoder(blob, maxPx);
+				bitmap = await resizeWithImageDecoder(blob, maxPx, orientation);
 			} catch {
 				// ImageDecoder failed (e.g. unsupported format) — fall through.
-				bitmap = await resizeWithCreateImageBitmap(blob, maxPx);
+				bitmap = await resizeWithCreateImageBitmap(blob, maxPx, orientation);
 			}
 		} else {
-			bitmap = await resizeWithCreateImageBitmap(blob, maxPx);
+			bitmap = await resizeWithCreateImageBitmap(blob, maxPx, orientation);
 		}
 
-		const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-		const ctx = canvas.getContext('2d')!;
-		ctx.drawImage(bitmap, 0, 0);
+		const canvas = drawOriented(bitmap, orientation);
 		bitmap.close();
 
 		const result = await canvas.convertToBlob({ type: 'image/jpeg', quality });
