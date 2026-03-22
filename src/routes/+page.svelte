@@ -6,6 +6,7 @@
 	import NewLibraryDialog from "$lib/components/NewLibraryDialog.svelte";
 	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import RollThumbStrip from "$lib/components/RollThumbStrip.svelte";
+	import LibraryThumbStrip from "$lib/components/LibraryThumbStrip.svelte";
 	import type { Roll, Library } from "$lib/types";
 
 	type Tab = "rolls" | "libraries";
@@ -281,12 +282,22 @@
 					{#each libraries as library (library.id)}
 						<li
 							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
-					           hover:border-content-subtle transition overflow-hidden p-base gap-sm"
+					           hover:border-content-subtle transition overflow-hidden"
 						>
+							<!-- Thumbnail strip (first 5 images) -->
+							<a
+								href="/library/{library.id}"
+								class="block overflow-hidden"
+								tabindex="-1"
+								aria-hidden="true"
+							>
+								<LibraryThumbStrip libraryId={library.id} />
+							</a>
+
 							<!-- Metadata -->
 							<a
 								href="/library/{library.id}"
-								class="flex flex-col flex-1 gap-xs"
+								class="flex flex-col flex-1 px-sm py-sm gap-xs"
 							>
 								<span
 									class="font-semibold text-content truncate"
