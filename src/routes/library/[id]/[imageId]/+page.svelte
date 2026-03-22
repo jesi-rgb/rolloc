@@ -310,11 +310,11 @@
 			>
 			{#if library}
 				<h1 class="text-l font-semibold text-content">
-					{library.label}
+					{current.image.filename}
 				</h1>
 			{/if}
 		</div>
-		<div class="text-sm text-content-muted">
+		<div class="text-sm text-content-muted tabular-nums">
 			{#if currentIndex >= 0 && sortedImages.length > 0}
 				{currentIndex + 1} / {sortedImages.length}
 			{/if}
