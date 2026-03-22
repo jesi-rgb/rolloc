@@ -19,6 +19,9 @@
 	import type { ExifData } from "$lib/components/exif-types";
 	import ExifPanel from "$lib/components/ExifPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
+	import { PaneGroup, Pane, PaneResizer } from "paneforge";
+	import type { PaneAPI } from "paneforge";
+	import { Sidebar, SidebarIcon } from "phosphor-svelte";
 
 	interface ImageWithExif {
 		image: LibraryImage;
@@ -271,6 +274,21 @@
 			zoomLevel = 2;
 		}
 	});
+
+	// EXIF pane collapse/expand
+	let exifPane = $state<PaneAPI | null>(null);
+	let exifPaneOpen = $state(true);
+
+	function toggleExifPane(): void {
+		if (!exifPane) return;
+		if (exifPaneOpen) {
+			exifPane.collapse();
+			exifPaneOpen = false;
+		} else {
+			exifPane.expand();
+			exifPaneOpen = true;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -312,34 +330,60 @@
 			<p class="text-content-muted">Image not found</p>
 		</div>
 	{:else}
-		<div class="flex flex-1 min-h-0">
-			<!-- Main image viewer -->
-			<div
-				bind:this={imageContainer}
-				class="flex-1 flex items-center justify-center p-l overflow-hidden"
-				class:cursor-zoom-in={!zoomed && current.url}
-				class:cursor-zoom-out={zoomed}
-				onmousemove={handleMouseMove}
-				onwheel={handleWheel}
-			>
-				{#if current.error}
-					<p class="text-danger">{current.error}</p>
-				{:else if current.url}
-					<img
-						src={current.url}
-						alt={current.image.filename}
-						class="max-w-full max-h-full object-contain rounded-lg"
-						style={zoomed
-							? `transform: scale(${zoomLevel}) translate(${(0.5 - mouseX) * 100}%, ${(0.5 - mouseY) * 100}%); transform-origin: center;`
-							: ""}
-						onclick={handleImageClick}
-					/>
-				{/if}
-			</div>
+		<PaneGroup direction="horizontal" class="flex-1 min-h-0 relative">
+			{#if !exifPaneOpen}
+				<button
+					class="absolute top-10 right-10"
+					onclick={toggleExifPane}><SidebarIcon /></button
+				>
+			{/if}
+			<!-- Main image viewer pane -->
+			<Pane defaultSize={75} minSize={30} order={1}>
+				<div
+					bind:this={imageContainer}
+					class="h-full flex items-center justify-center p-l overflow-hidden"
+					class:cursor-zoom-in={!zoomed && current.url}
+					class:cursor-zoom-out={zoomed}
+					onmousemove={handleMouseMove}
+					onwheel={handleWheel}
+				>
+					{#if current.error}
+						<p class="text-danger">{current.error}</p>
+					{:else if current.url}
+						<img
+							src={current.url}
+							alt={current.image.filename}
+							class="max-w-full max-h-full object-contain rounded-lg"
+							style={zoomed
+								? `transform: scale(${zoomLevel}) translate(${(0.5 - mouseX) * 100}%, ${(0.5 - mouseY) * 100}%); transform-origin: center;`
+								: ""}
+							onclick={handleImageClick}
+						/>
+					{/if}
+				</div>
+			</Pane>
 
-			<!-- EXIF panel -->
-			<ExifPanel exif={current.exif} />
-		</div>
+			<!-- EXIF panel pane -->
+			<PaneResizer
+				class="bg-base-subtle hover:bg-primary transition-colors
+				cursor-col-resize shrink-0 {exifPaneOpen ? 'w-1.5' : 'w-0'}"
+			/>
+			<Pane
+				bind:this={exifPane}
+				defaultSize={20}
+				minSize={20}
+				maxSize={30}
+				collapsible={true}
+				collapsedSize={0}
+				order={2}
+			>
+				<ExifPanel
+					exif={current.exif}
+					open={exifPaneOpen}
+					onToggle={toggleExifPane}
+				/>
+			</Pane>
+		</PaneGroup>
 
 		<!-- Keyboard shortcut hint bar -->
 		<KeyboardHintBar
