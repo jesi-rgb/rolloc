@@ -247,7 +247,7 @@
 	{#if onToggle}
 		<button
 			onclick={onToggle}
-			class="bottom-sm absolute left-sm text-content-muted hover:text-content transition bg-transparent border-none cursor-pointer p-0 ml-auto"
+			class="bottom-sm absolute right-base text-content-muted hover:text-content transition bg-transparent border-none cursor-pointer p-0 ml-auto"
 			aria-label={open ? "Collapse EXIF panel" : "Expand EXIF panel"}
 			title={open ? "Collapse" : "Expand EXIF"}
 		>
