@@ -25,3 +25,10 @@ tauri = { version = "2.10.0", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+# Thumbnail generation: decode + resize entirely in Rust.
+# Only JPEG and TIFF codecs are enabled to keep compile time small.
+image = { version = "0.25", default-features = false, features = ["jpeg", "tiff"] }
+rayon = "1.10"
+# tokio is a transitive dep of tauri; we declare it explicitly to use
+# spawn_blocking for off-thread CPU work in async commands.
+tokio = { version = "1", features = ["rt"] }
