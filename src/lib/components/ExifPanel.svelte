@@ -13,18 +13,21 @@
 	import AnalogClock from "$lib/components/AnalogClock.svelte";
 	import ExposureCompensationScale from "$lib/components/ExposureCompensationScale.svelte";
 	import WhiteBalanceGrid from "$lib/components/WhiteBalanceGrid.svelte";
+	import RgbHistogram from "$lib/components/RgbHistogram.svelte";
 	import { getFilmSimIcon } from "$lib/image/film-sim-icons";
 	import type { ExifData } from "$lib/components/exif-types";
 
 	interface Props {
 		exif: ExifData | null;
+		/** Blob URL of the current image, used to render the RGB histogram. */
+		url?: string | null;
 		/** Whether the panel is currently expanded. Used to render the correct toggle icon. */
 		open?: boolean;
 		/** Called when the user clicks the collapse/expand button. */
 		onToggle?: () => void;
 	}
 
-	let { exif, open = true, onToggle }: Props = $props();
+	let { exif, url = null, open = true, onToggle }: Props = $props();
 
 	function formatExposureTime(time: number | undefined): string {
 		if (!time) return "—";
@@ -87,6 +90,8 @@
 					</dd>
 				</div>
 			{/if}
+
+			<RgbHistogram {url} />
 			<dl class="grid grid-cols-2 gap-base text-sm">
 				{#if exif.make || exif.model}
 					<div>

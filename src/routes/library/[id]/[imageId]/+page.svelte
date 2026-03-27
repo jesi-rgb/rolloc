@@ -400,6 +400,7 @@
 			>
 				<ExifPanel
 					exif={current.exif}
+					url={current.url}
 					open={exifPaneOpen}
 					onToggle={toggleExifPane}
 				/>
