@@ -24,7 +24,7 @@ export const FILM_SIM_ICONS: Record<string, FilmSimIcon> = {
 	"F0/Standard (Provia)": { char: "c", font: "fficn30" },
 	"F2/Fujichrome (Velvia)": { char: "d", font: "fficn30" },
 	"F4/Velvia": { char: "d", font: "fficn30" },
-	"F1b/Studio Portrait Smooth Skin Tone (Astia)": { char: "e", font: "fficn30" },
+	"Astia": { char: "e", font: "fficn30" },
 	"B&W Sepia": { char: "f", font: "fficn30" },
 	"None (B&W)": { char: "b", font: "fficn30" },
 

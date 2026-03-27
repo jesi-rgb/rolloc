@@ -76,7 +76,7 @@ const FILM_MODES: Record<number, string> = {
 	0x000: 'F0/Standard (Provia)',
 	0x100: 'F1/Studio Portrait',
 	0x110: 'F1a/Studio Portrait Enhanced Saturation',
-	0x120: 'F1b/Studio Portrait Smooth Skin Tone (Astia)',
+	0x120: 'Astia',
 	0x130: 'F1c/Studio Portrait Increased Sharpness',
 	0x200: 'F2/Fujichrome (Velvia)',
 	0x300: 'F3/Studio Portrait Ex',
