@@ -13,7 +13,7 @@
 
 	let rolls = $state<Roll[]>([]);
 	let libraries = $state<Library[]>([]);
-	let activeTab = $state<Tab>("libraries");
+	let activeTab = $state<Tab>("rolls");
 	let loading = $state(true);
 	let showNewRoll = $state(false);
 	let showNewLibrary = $state(false);
@@ -152,7 +152,7 @@
 					<h2 class="text-xl font-semibold text-content">
 						No rolls yet
 					</h2>
-					<p class="text-content-muted max-w-sm text-sm">
+					<p class="text-content-muted text-sm">
 						Create your first roll by selecting a folder of film
 						scans (JPEG or TIFF).
 					</p>
