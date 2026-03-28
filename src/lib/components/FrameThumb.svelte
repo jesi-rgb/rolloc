@@ -126,24 +126,4 @@
 			{frame.index}
 		</span>
 	</div>
-
-	<!-- Footer -->
-	<div class="px-2 py-1.5 bg-base/80 flex justify-between gap-xs min-w-0">
-		<span class="text-xs text-content-subtle truncate"
-			>{frame.filename}</span
-		>
-		{#if frame.rating > 0}
-			<span
-				class="flex items-center text-primary-muted whitespace-nowrap"
-				aria-label="{frame.rating} stars"
-			>
-				{#each [1, 2, 3, 4, 5] as star (star)}
-					<StarIcon
-						size={12}
-						weight={star <= frame.rating ? "fill" : "regular"}
-					/>
-				{/each}
-			</span>
-		{/if}
-	</div>
 </button>

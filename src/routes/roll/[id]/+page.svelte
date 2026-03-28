@@ -45,7 +45,8 @@
 	 * overlay is shown so the user knows generation is in flight.
 	 */
 	const thumbsReady = $derived(
-		thumbProgress.total === 0 || thumbProgress.cached >= thumbProgress.total,
+		thumbProgress.total === 0 ||
+			thumbProgress.cached >= thumbProgress.total,
 	);
 
 	const selected = $derived(frames[selIdx] ?? null);
@@ -206,71 +207,55 @@
 		</div>
 	{:else}
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
-		<PaneGroup direction="horizontal" class="flex-1 min-h-0">
-			<!-- Filmstrip grid pane — inert while thumbnails are being generated -->
-			<Pane defaultSize={45} minSize={20} order={1}>
-				<div class="relative h-full">
-					<!-- Loading overlay — blocks interaction until all thumbs are ready -->
-					{#if !thumbsReady}
-						<div
-							class="absolute inset-0 z-10 flex flex-col items-center justify-center
-							       gap-3 bg-base/80 backdrop-blur-sm"
-						>
-							<p class="text-sm text-content-muted">
-								Generating thumbnails…
-							</p>
-							{#if thumbProgress.total > 0}
-								<div class="w-48 flex flex-col items-center gap-1.5">
-									<div
-										class="w-full h-1.5 rounded-full bg-base-subtle overflow-hidden"
-									>
-										<div
-											class="h-full bg-primary rounded-full transition-all duration-150"
-											style="width: {Math.round(
-												(thumbProgress.cached /
-													thumbProgress.total) *
-													100,
-											)}%"
-										></div>
-									</div>
-									<span class="text-xs text-content-subtle tabular-nums">
-										{thumbProgress.cached} / {thumbProgress.total}
-									</span>
-								</div>
-							{/if}
+
+		<div class="relative h-full">
+			<!-- Loading overlay — blocks interaction until all thumbs are ready -->
+			{#if !thumbsReady}
+				<div
+					class="absolute inset-0 z-10 flex flex-col items-center justify-center
+					gap-3 bg-base/80 backdrop-blur-sm"
+				>
+					<p class="text-sm text-content-muted">
+						Generating thumbnails…
+					</p>
+					{#if thumbProgress.total > 0}
+						<div class="w-48 flex flex-col items-center gap-1.5">
+							<div
+								class="w-full h-1.5 rounded-full bg-base-subtle overflow-hidden"
+							>
+								<div
+									class="h-full bg-primary rounded-full transition-all duration-150"
+									style="width: {Math.round(
+										(thumbProgress.cached /
+											thumbProgress.total) *
+											100,
+									)}%"
+								></div>
+							</div>
+							<span
+								class="text-xs text-content-subtle tabular-nums"
+							>
+								{thumbProgress.cached} / {thumbProgress.total}
+							</span>
 						</div>
 					{/if}
-
-					<!-- Grid — pointer events blocked by inert while loading -->
-					<div inert={!thumbsReady || undefined} class="h-full">
-						<VirtualGrid items={frames} gap={8} overscan={3}>
-							{#snippet item(frame, i)}
-								<FrameThumb
-									{frame}
-									dirPath={dirPath!}
-									selected={i === selIdx}
-									onSelect={selectFrame}
-								/>
-							{/snippet}
-						</VirtualGrid>
-					</div>
 				</div>
-			</Pane>
-
-			<!-- Metadata panel pane -->
-			{#if selected}
-				<PaneResizer
-					class="w-1.5 bg-base-subtle hover:bg-primary transition-colors cursor-col-resize shrink-0"
-				/>
-				<Pane defaultSize={55} minSize={20} order={2}>
-					<FrameMetaPanel
-						frame={selected}
-						dirPath={dirPath}
-						onUpdate={onFrameUpdated}
-					/>
-				</Pane>
 			{/if}
-		</PaneGroup>
+
+			<!-- Grid — pointer events blocked by inert while loading -->
+			<div inert={!thumbsReady || undefined} class="h-full">
+				<VirtualGrid items={frames} gap={8} overscan={3}>
+					{#snippet item(frame, i)}
+						<FrameThumb
+							{frame}
+							dirPath={dirPath!}
+							selected={i === selIdx}
+							onSelect={selectFrame}
+						/>
+					{/snippet}
+				</VirtualGrid>
+			</div>
+		</div>
 
 		<!-- Keyboard shortcut hint bar -->
 		<KeyboardHintBar
