@@ -230,7 +230,7 @@ const identityMatrix: Matrix3x3 = [
 ];
 
 export const DEFAULT_INVERSION_PARAMS: InversionParams = {
-	density:          0.5,
+	density:          1.0,
 	grade:            2.0,
 	cmyCyan:          0.0,
 	cmyMagenta:       0.0,
@@ -258,7 +258,7 @@ export const DEFAULT_ROLL_EDIT: RollEditParams = {
 	lightSourceTemp: 5500,
 	baseToneCurve: identityCurve,
 	baseRGBCurves: [identityCurve, identityCurve, identityCurve],
-	invert: false,
+	invert: true,
 	inversionParams: DEFAULT_INVERSION_PARAMS,
 };
 

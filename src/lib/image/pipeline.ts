@@ -36,7 +36,9 @@ import type { EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
 
 /** Maximum log-density shift per CMY slider unit (matches negpy EXPOSURE_CONSTANTS). */
 const CMY_MAX_DENSITY = 0.2;
-/** Maps the grade slider to the sigmoid slope (negpy grade_multiplier). */
+/** Maps the density slider to an exposure shift: shift = 0.1 + density * DENSITY_MULTIPLIER (negpy density_multiplier). */
+const DENSITY_MULTIPLIER = 0.2;
+/** Maps the grade slider to the sigmoid slope: slope = 1.0 + grade * GRADE_MULTIPLIER (negpy grade_multiplier). */
 const GRADE_MULTIPLIER = 2.0;
 /** Maximum print density (D_max) — deepest black photographic paper can produce. */
 const D_MAX = 4.0;
@@ -402,9 +404,16 @@ function makeHDCurveUniforms(
 	device: GPUDevice,
 	inv: InversionParams,
 ): GPUBuffer {
-	// All three channels share the same pivot (density) and slope (grade * GRADE_MULTIPLIER).
-	const pivot = inv.density;
-	const slope = inv.grade * GRADE_MULTIPLIER;
+	// Pivot and slope match NegPy's PhotometricProcessor formula:
+	//   exposure_shift = 0.1 + (density * DENSITY_MULTIPLIER)
+	//   pivot          = 1.0 - exposure_shift
+	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
+	// At defaults (density=1.0, grade=2.0): pivot=0.7, slope=5.0.
+	// Using density directly as pivot (old behaviour) placed the midpoint at 0.5,
+	// which maps mid-tones to D = D_MAX * sigmoid(0) = D_MAX/2 = 2.0 →
+	// transmittance = 10^(-2) = 0.01 → nearly black output.
+	const pivot = 1.0 - (0.1 + inv.density * DENSITY_MULTIPLIER);
+	const slope = 1.0 + inv.grade * GRADE_MULTIPLIER;
 
 	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
 	// NegPy convention: Cyan shifts Red channel, Magenta shifts Green, Yellow shifts Blue.

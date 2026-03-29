@@ -330,15 +330,18 @@
 		const half = Math.floor(sampleSize / 2);
 		const x0 = Math.max(0, px - half);
 		const y0 = Math.max(0, py - half);
-		const w = Math.min(sampleSize, canvasEl.width  - x0);
+		const w = Math.min(sampleSize, canvasEl.width - x0);
 		const h = Math.min(sampleSize, canvasEl.height - y0);
 
-		pipeline.readPixels(x0, y0, w, h)
+		pipeline
+			.readPixels(x0, y0, w, h)
 			.then((pixels) => {
 				if (!pixels) return;
 				const n = w * h;
 
-				let sumR = 0, sumG = 0, sumB = 0;
+				let sumR = 0,
+					sumG = 0,
+					sumB = 0;
 				for (let i = 0; i < n; i++) {
 					sumR += pixels[i * 4];
 					sumG += pixels[i * 4 + 1];
@@ -352,7 +355,10 @@
 				// Ignore near-black samples — not useful as a white reference.
 				if (r < 1e-4 && g < 1e-4 && b < 1e-4) return;
 
-				const current = resolveEdit(currentRoll, currentFrame).inversionParams;
+				const current = resolveEdit(
+					currentRoll,
+					currentFrame,
+				).inversionParams;
 
 				// Negpy algorithm (calculate_wb_shifts / _handle_wb_pick):
 				//   Red is the anchor channel — cyan is always reset to 0.
@@ -360,22 +366,25 @@
 				//   Yellow  delta = log10(b/r) / CMY_MAX_DENSITY
 				//   A damping factor of 0.4 prevents overcorrection on the first click.
 				const DAMPING = 0.4;
-				const deltaMagenta = (Math.log10(g / r) / CMY_MAX_DENSITY) * DAMPING;
-				const deltaYellow  = (Math.log10(b / r) / CMY_MAX_DENSITY) * DAMPING;
+				const deltaMagenta =
+					(Math.log10(g / r) / CMY_MAX_DENSITY) * DAMPING;
+				const deltaYellow =
+					(Math.log10(b / r) / CMY_MAX_DENSITY) * DAMPING;
 
-				const clamp = (v: number): number => Math.max(-1, Math.min(1, v));
+				const clamp = (v: number): number =>
+					Math.max(-1, Math.min(1, v));
 
 				saveEdit({
 					inversionParams: {
 						...current,
-						cmyCyan:    0,
+						cmyCyan: 0,
 						cmyMagenta: clamp(current.cmyMagenta + deltaMagenta),
-						cmyYellow:  clamp(current.cmyYellow  + deltaYellow),
+						cmyYellow: clamp(current.cmyYellow + deltaYellow),
 					},
 				});
 			})
 			.catch((err: unknown) => {
-				console.error('[wb-picker] readPixels failed:', err);
+				console.error("[wb-picker] readPixels failed:", err);
 			});
 	}
 
@@ -465,8 +474,11 @@
 			const edit = resolveEdit(currentRoll, currentFrame);
 
 			// ── Suggest a default filename ─────────────────────────────────
-			const stem = (await basename(currentFrame.filename).catch(() => currentFrame.filename))
-				.replace(/\.[^.]+$/, "");
+			const stem = (
+				await basename(currentFrame.filename).catch(
+					() => currentFrame.filename,
+				)
+			).replace(/\.[^.]+$/, "");
 			const defaultFileName = `${stem}_export.jpg`;
 
 			// ── Open native Save As dialog ─────────────────────────────────
@@ -501,37 +513,57 @@
 					maxPx: gpuLimit,
 				});
 
-				const { width: w, height: h } = parseRawDecodeBuffer(fullResBuffer);
-				exportWidth  = w;
+				const { width: w, height: h } =
+					parseRawDecodeBuffer(fullResBuffer);
+				exportWidth = w;
 				exportHeight = h;
 
 				// Render at full resolution into the pipeline, reusing the
 				// log percentiles from the preview render so the colour
 				// normalization is identical to what the user sees.
-				await pipeline.renderRaw(edit, fullResBuffer, pipeline.lastLogPerc ?? undefined);
+				await pipeline.renderRaw(
+					edit,
+					fullResBuffer,
+					pipeline.lastLogPerc ?? undefined,
+				);
 			} else {
 				// ── JPEG/TIFF path: re-render existing bitmap ──────────────
 				if (!currentBitmap) {
 					throw new Error("No image loaded for this frame.");
 				}
-				exportWidth  = currentBitmap.width;
+				exportWidth = currentBitmap.width;
 				exportHeight = currentBitmap.height;
-				console.debug('[export] JPEG path, rendering bitmap', exportWidth, 'x', exportHeight, 'edit:', edit);
+				console.debug(
+					"[export] JPEG path, rendering bitmap",
+					exportWidth,
+					"x",
+					exportHeight,
+					"edit:",
+					edit,
+				);
 				await pipeline.render(edit, currentBitmap);
-				console.debug('[export] render complete');
+				console.debug("[export] render complete");
 			}
 
 			// ── Readback rendered pixels ───────────────────────────────────
-			const pixels = await pipeline.readPixels(0, 0, exportWidth, exportHeight);
+			const pixels = await pipeline.readPixels(
+				0,
+				0,
+				exportWidth,
+				exportHeight,
+			);
 			if (!pixels) {
-				throw new Error("Failed to read back rendered pixels from GPU.");
+				throw new Error(
+					"Failed to read back rendered pixels from GPU.",
+				);
 			}
 
 			// ── Encode + write via Rust ────────────────────────────────────
 			// Ensure .jpg extension on the path (dialog may or may not append it).
-			const finalPath = savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
-				? savePath
-				: `${savePath}.jpg`;
+			const finalPath =
+				savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
+					? savePath
+					: `${savePath}.jpg`;
 
 			await invoke("export_jpeg", {
 				pixels: Array.from(pixels),
@@ -543,7 +575,9 @@
 
 			exportSuccess = true;
 			// Auto-clear the success message after 3 seconds.
-			setTimeout(() => { exportSuccess = false; }, 3000);
+			setTimeout(() => {
+				exportSuccess = false;
+			}, 3000);
 
 			// Re-render at the current (preview) resolution so the canvas shows
 			// the editing preview again.
@@ -654,16 +688,16 @@
 		{/if}
 
 		{#if frame}
-			<span class="text-content font-semibold">{frameLabel}</span>
+			<span class="text-content font-semibold">{frame.filename}</span>
+		{/if}
+
+		<!-- Frame navigation arrows -->
+		<div class="ml-auto flex items-center gap-xs">
 			{#if frames.length > 0}
 				<span class="text-xs text-content-subtle">
 					{frameIndex + 1} / {frames.length}
 				</span>
 			{/if}
-		{/if}
-
-		<!-- Frame navigation arrows -->
-		<div class="ml-auto flex items-center gap-xs">
 			<button
 				onclick={() => navigateTo(frameIndex - 1)}
 				disabled={!hasPrev}
@@ -695,7 +729,9 @@
 				bind:this={canvasEl}
 				onclick={handleWbPickerClick}
 				class="max-w-full max-h-full object-contain rounded shadow-lg"
-				style="display: block; cursor: {wbPickerActive ? 'crosshair' : 'default'};"
+				style="display: block; cursor: {wbPickerActive
+					? 'crosshair'
+					: 'default'};"
 			></canvas>
 
 			<!-- WB picker hint overlay -->
@@ -708,8 +744,8 @@
 					<button
 						class="pointer-events-auto text-content-muted hover:text-content transition ml-xs"
 						onclick={cancelWbPicker}
-						aria-label="Cancel WB picker"
-					>Cancel</button>
+						aria-label="Cancel WB picker">Cancel</button
+					>
 				</div>
 			{/if}
 
@@ -800,7 +836,9 @@
 					<!-- NegPy inversion controls (only when invert = true) -->
 					{#if roll.rollEdit.invert}
 						<section>
-							<div class="flex items-center justify-between mb-sm">
+							<div
+								class="flex items-center justify-between mb-sm"
+							>
 								<h3
 									class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
 								>
@@ -811,8 +849,8 @@
 									title="Pick a neutral white or gray pixel on the image to auto-set color balance"
 									class="flex items-center gap-xs text-xs px-sm py-xs rounded border transition
 									       {wbPickerActive
-									         ? 'border-primary bg-primary/10 text-primary'
-									         : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+										? 'border-primary bg-primary/10 text-primary'
+										: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
 								>
 									<svg
 										xmlns="http://www.w3.org/2000/svg"
@@ -826,10 +864,20 @@
 										stroke-linejoin="round"
 										aria-hidden="true"
 									>
-										<path d="M2 13.5V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.5"/>
-										<path d="M22 10.5V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5"/>
-										<line x1="12" y1="2" x2="12" y2="22"/>
-										<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>
+										<path
+											d="M2 13.5V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.5"
+										/>
+										<path
+											d="M22 10.5V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5"
+										/>
+										<line x1="12" y1="2" x2="12" y2="22" />
+										<circle
+											cx="12"
+											cy="12"
+											r="2"
+											fill="currentColor"
+											stroke="none"
+										/>
 									</svg>
 									WB Picker
 								</button>
