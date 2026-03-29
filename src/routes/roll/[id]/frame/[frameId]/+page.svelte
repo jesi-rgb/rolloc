@@ -12,8 +12,9 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { getRoll, getRollPath, updateRoll } from "$lib/db/rolls";
-	import { join } from "@tauri-apps/api/path";
+	import { join, basename } from "@tauri-apps/api/path";
 	import { invoke } from "@tauri-apps/api/core";
+	import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 	import { getFrame, getFrames, putFrame } from "$lib/db/idb";
 	import { readPreview, readThumb } from "$lib/fs/opfs";
 	import { ensurePreview } from "$lib/image/thumbgen";
@@ -242,7 +243,8 @@
 			(currentBitmap || currentRawBuffer) &&
 			roll &&
 			frame &&
-			!loading
+			!loading &&
+			!exporting
 		) {
 			renderFrame();
 		}
@@ -278,6 +280,103 @@
 				"[frame] renderFrame called but no image data available",
 			);
 		}
+	}
+
+	// ─── WB picker ────────────────────────────────────────────────────────────
+
+	/** When true the canvas cursor changes to crosshair and the next click samples a pixel. */
+	let wbPickerActive = $state(false);
+
+	/**
+	 * CMY_MAX_DENSITY from pipeline.ts — the scale factor for CMY slider units to
+	 * log-density. Must stay in sync with the constant in pipeline.ts.
+	 */
+	const CMY_MAX_DENSITY = 0.2;
+
+	function toggleWbPicker(): void {
+		wbPickerActive = !wbPickerActive;
+	}
+
+	function cancelWbPicker(): void {
+		wbPickerActive = false;
+	}
+
+	/**
+	 * Sample a pixel from the last rendered output via GPU readback, treat it as
+	 * the white/neutral point, and adjust the global CMY sliders accordingly.
+	 *
+	 * Uses pipeline.readPixels() which copies from the rgba8unorm output texture —
+	 * the only reliable readback path for WebGPU canvases in Tauri.
+	 */
+	function handleWbPickerClick(e: MouseEvent): void {
+		if (!wbPickerActive || !canvasEl || !pipeline) return;
+
+		// Map pointer coords (CSS px) to canvas pixel coords.
+		const rect = canvasEl.getBoundingClientRect();
+		const scaleX = canvasEl.width / rect.width;
+		const scaleY = canvasEl.height / rect.height;
+		const px = Math.round((e.clientX - rect.left) * scaleX);
+		const py = Math.round((e.clientY - rect.top) * scaleY);
+
+		wbPickerActive = false;
+
+		// Capture frame/roll refs before entering async context.
+		if (!frame || !roll) return;
+		const currentFrame = frame;
+		const currentRoll = roll;
+
+		// Sample a 3×3 neighbourhood centred on the click to reduce noise.
+		const sampleSize = 3;
+		const half = Math.floor(sampleSize / 2);
+		const x0 = Math.max(0, px - half);
+		const y0 = Math.max(0, py - half);
+		const w = Math.min(sampleSize, canvasEl.width  - x0);
+		const h = Math.min(sampleSize, canvasEl.height - y0);
+
+		pipeline.readPixels(x0, y0, w, h)
+			.then((pixels) => {
+				if (!pixels) return;
+				const n = w * h;
+
+				let sumR = 0, sumG = 0, sumB = 0;
+				for (let i = 0; i < n; i++) {
+					sumR += pixels[i * 4];
+					sumG += pixels[i * 4 + 1];
+					sumB += pixels[i * 4 + 2];
+				}
+
+				const r = Math.max(sumR / n / 255, 1e-6);
+				const g = Math.max(sumG / n / 255, 1e-6);
+				const b = Math.max(sumB / n / 255, 1e-6);
+
+				// Ignore near-black samples — not useful as a white reference.
+				if (r < 1e-4 && g < 1e-4 && b < 1e-4) return;
+
+				const current = resolveEdit(currentRoll, currentFrame).inversionParams;
+
+				// Negpy algorithm (calculate_wb_shifts / _handle_wb_pick):
+				//   Red is the anchor channel — cyan is always reset to 0.
+				//   Magenta delta = log10(g/r) / CMY_MAX_DENSITY
+				//   Yellow  delta = log10(b/r) / CMY_MAX_DENSITY
+				//   A damping factor of 0.4 prevents overcorrection on the first click.
+				const DAMPING = 0.4;
+				const deltaMagenta = (Math.log10(g / r) / CMY_MAX_DENSITY) * DAMPING;
+				const deltaYellow  = (Math.log10(b / r) / CMY_MAX_DENSITY) * DAMPING;
+
+				const clamp = (v: number): number => Math.max(-1, Math.min(1, v));
+
+				saveEdit({
+					inversionParams: {
+						...current,
+						cmyCyan:    0,
+						cmyMagenta: clamp(current.cmyMagenta + deltaMagenta),
+						cmyYellow:  clamp(current.cmyYellow  + deltaYellow),
+					},
+				});
+			})
+			.catch((err: unknown) => {
+				console.error('[wb-picker] readPixels failed:', err);
+			});
 	}
 
 	// ─── Edit helpers ──────────────────────────────────────────────────────────
@@ -337,6 +436,125 @@
 		}
 	}
 
+	// ─── Export ────────────────────────────────────────────────────────────────
+
+	let exporting = $state(false);
+	let exportError = $state<string | null>(null);
+	let exportSuccess = $state(false);
+
+	/**
+	 * Export the current frame as a full-quality JPEG.
+	 *
+	 * RAW frames: re-decode at full resolution (no maxPx cap), render through
+	 * the GPU pipeline with the current edit, readback pixels, save via
+	 * native dialog.
+	 *
+	 * JPEG/TIFF frames: re-render the existing bitmap (already full-res
+	 * preview), readback pixels, save via native dialog.
+	 */
+	async function exportFrame(): Promise<void> {
+		if (!pipeline || !frame || !roll || exporting) return;
+
+		exporting = true;
+		exportError = null;
+		exportSuccess = false;
+
+		try {
+			const currentFrame = frame;
+			const currentRoll = roll;
+			const edit = resolveEdit(currentRoll, currentFrame);
+
+			// ── Suggest a default filename ─────────────────────────────────
+			const stem = (await basename(currentFrame.filename).catch(() => currentFrame.filename))
+				.replace(/\.[^.]+$/, "");
+			const defaultFileName = `${stem}_export.jpg`;
+
+			// ── Open native Save As dialog ─────────────────────────────────
+			const savePath = await saveDialog({
+				title: "Export JPEG",
+				defaultPath: defaultFileName,
+				filters: [{ name: "JPEG Image", extensions: ["jpg", "jpeg"] }],
+			});
+
+			if (!savePath) {
+				// User cancelled.
+				return;
+			}
+
+			// ── Determine export dimensions ────────────────────────────────
+			let exportWidth: number;
+			let exportHeight: number;
+
+			if (isRawExtension(currentFrame.filename)) {
+				// ── RAW path: full-res decode ──────────────────────────────
+				const dirPath = await getRollPath(rollId);
+				if (!dirPath) {
+					throw new Error("Roll source directory not found.");
+				}
+				const absolutePath = await join(dirPath, currentFrame.filename);
+
+				// Decode at full resolution (no maxPx cap), but still respect
+				// the GPU texture size limit.
+				const gpuLimit = pipeline.maxTextureDimension;
+				const fullResBuffer = await invoke<ArrayBuffer>("raw_decode", {
+					path: absolutePath,
+					maxPx: gpuLimit,
+				});
+
+				const { width: w, height: h } = parseRawDecodeBuffer(fullResBuffer);
+				exportWidth  = w;
+				exportHeight = h;
+
+				// Render at full resolution into the pipeline, reusing the
+				// log percentiles from the preview render so the colour
+				// normalization is identical to what the user sees.
+				await pipeline.renderRaw(edit, fullResBuffer, pipeline.lastLogPerc ?? undefined);
+			} else {
+				// ── JPEG/TIFF path: re-render existing bitmap ──────────────
+				if (!currentBitmap) {
+					throw new Error("No image loaded for this frame.");
+				}
+				exportWidth  = currentBitmap.width;
+				exportHeight = currentBitmap.height;
+				console.debug('[export] JPEG path, rendering bitmap', exportWidth, 'x', exportHeight, 'edit:', edit);
+				await pipeline.render(edit, currentBitmap);
+				console.debug('[export] render complete');
+			}
+
+			// ── Readback rendered pixels ───────────────────────────────────
+			const pixels = await pipeline.readPixels(0, 0, exportWidth, exportHeight);
+			if (!pixels) {
+				throw new Error("Failed to read back rendered pixels from GPU.");
+			}
+
+			// ── Encode + write via Rust ────────────────────────────────────
+			// Ensure .jpg extension on the path (dialog may or may not append it).
+			const finalPath = savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
+				? savePath
+				: `${savePath}.jpg`;
+
+			await invoke("export_jpeg", {
+				pixels: Array.from(pixels),
+				width: exportWidth,
+				height: exportHeight,
+				path: finalPath,
+				quality: 95,
+			});
+
+			exportSuccess = true;
+			// Auto-clear the success message after 3 seconds.
+			setTimeout(() => { exportSuccess = false; }, 3000);
+
+			// Re-render at the current (preview) resolution so the canvas shows
+			// the editing preview again.
+			renderFrame();
+		} catch (err: unknown) {
+			exportError = err instanceof Error ? err.message : String(err);
+		} finally {
+			exporting = false;
+		}
+	}
+
 	// ─── Navigation ────────────────────────────────────────────────────────────
 
 	function navigateTo(idx: number): void {
@@ -362,7 +580,11 @@
 				break;
 			case "Escape":
 				e.preventDefault();
-				goto(`/roll/${rollId}`);
+				if (wbPickerActive) {
+					cancelWbPicker();
+				} else {
+					goto(`/roll/${rollId}`);
+				}
 				break;
 		}
 	}
@@ -471,9 +693,25 @@
 		>
 			<canvas
 				bind:this={canvasEl}
+				onclick={handleWbPickerClick}
 				class="max-w-full max-h-full object-contain rounded shadow-lg"
-				style="display: block;"
+				style="display: block; cursor: {wbPickerActive ? 'crosshair' : 'default'};"
 			></canvas>
+
+			<!-- WB picker hint overlay -->
+			{#if wbPickerActive}
+				<div
+					class="absolute bottom-base left-1/2 -translate-x-1/2 flex items-center gap-sm
+					       bg-base/90 border border-primary text-content text-xs px-sm py-xs rounded shadow-lg pointer-events-none"
+				>
+					Click a neutral white or gray area to set color balance
+					<button
+						class="pointer-events-auto text-content-muted hover:text-content transition ml-xs"
+						onclick={cancelWbPicker}
+						aria-label="Cancel WB picker"
+					>Cancel</button>
+				</div>
+			{/if}
 
 			<!-- Loading overlay -->
 			{#if loading}
@@ -562,11 +800,40 @@
 					<!-- NegPy inversion controls (only when invert = true) -->
 					{#if roll.rollEdit.invert}
 						<section>
-							<h3
-								class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-							>
-								Inversion
-							</h3>
+							<div class="flex items-center justify-between mb-sm">
+								<h3
+									class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
+								>
+									Inversion
+								</h3>
+								<button
+									onclick={toggleWbPicker}
+									title="Pick a neutral white or gray pixel on the image to auto-set color balance"
+									class="flex items-center gap-xs text-xs px-sm py-xs rounded border transition
+									       {wbPickerActive
+									         ? 'border-primary bg-primary/10 text-primary'
+									         : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+								>
+									<svg
+										xmlns="http://www.w3.org/2000/svg"
+										width="12"
+										height="12"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										aria-hidden="true"
+									>
+										<path d="M2 13.5V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.5"/>
+										<path d="M22 10.5V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5"/>
+										<line x1="12" y1="2" x2="12" y2="22"/>
+										<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/>
+									</svg>
+									WB Picker
+								</button>
+							</div>
 							<InversionControls
 								value={effectiveInversionParams}
 								onChange={onInversionChange}
@@ -602,6 +869,43 @@
 						>
 							{frame.filename}
 						</p>
+					</section>
+
+					<!-- Export -->
+					<section class="border-t border-base-subtle pt-l">
+						<h3
+							class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+						>
+							Export
+						</h3>
+
+						<button
+							onclick={exportFrame}
+							disabled={exporting || loading || !pipeline}
+							class="w-full flex items-center justify-center gap-sm
+							       px-sm py-xs rounded border text-sm transition
+							       border-primary text-primary
+							       hover:bg-primary/10
+							       disabled:opacity-40 disabled:cursor-not-allowed"
+						>
+							{#if exporting}
+								Exporting…
+							{:else}
+								Export JPEG
+							{/if}
+						</button>
+
+						{#if exportSuccess}
+							<p class="mt-sm text-xs text-content-muted">
+								Saved successfully.
+							</p>
+						{/if}
+
+						{#if exportError}
+							<p class="mt-sm text-xs text-red-500 break-all">
+								{exportError}
+							</p>
+						{/if}
 					</section>
 				{/if}
 			</div>

@@ -28,6 +28,7 @@ import toneCurveWGSL      from './shaders/tonecurve.wgsl?raw';
 import ingestRawWGSL      from './shaders/ingest_raw.wgsl?raw';
 import normalizationWGSL  from './shaders/normalization.wgsl?raw';
 import hdCurveWGSL        from './shaders/hd_curve.wgsl?raw';
+import blitWGSL           from './shaders/blit.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import type { EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
 
@@ -156,10 +157,12 @@ function computeLogPercentilesFromU16(
 	pixels: Uint16Array,
 	stride: number = 8,
 ): LogPercentiles {
-	// Reuse the float path after normalising.
-	const maxPx = Math.min(pixels.length / 4, 256 * 256); // cap sample count
-	const f32 = new Float32Array(Math.min(pixels.length, maxPx * 4));
-	for (let i = 0; i < f32.length; i++) {
+	// Normalise u16 → [0,1] float and reuse the float percentile path.
+	// Do NOT truncate to the first N pixels — that produces a biased sample
+	// from only the top rows of the image at high resolutions.  Instead let
+	// the stride parameter do the downsampling so the entire image is covered.
+	const f32 = new Float32Array(pixels.length);
+	for (let i = 0; i < pixels.length; i++) {
 		f32[i] = pixels[i] / 65535.0;
 	}
 	return computeLogPercentilesFromF32(f32, stride);
@@ -246,8 +249,17 @@ export interface GpuPipeline {
 	/**
 	 * Re-render the canvas from a RAW linear source.
 	 * `rawBuffer` is the ArrayBuffer returned by the `raw_decode` Tauri command.
+	 * `logPercOverride` — when provided, skips recomputing percentiles from the
+	 * buffer and uses these values instead.  Pass `lastLogPerc` on export so the
+	 * full-res render uses the same normalization as the preview.
 	 */
-	renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void>;
+	renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer, logPercOverride?: LogPercentiles): Promise<void>;
+	/**
+	 * Read back a rectangle of sRGB pixels from the last rendered output.
+	 * Returns `null` if no render has completed yet or if the region is out of bounds.
+	 * The returned array has length `w * h * 4` (RGBA, 0–255).
+	 */
+	readPixels(x: number, y: number, w: number, h: number): Promise<Uint8ClampedArray | null>;
 	/** Release all GPU resources. Call when the editor unmounts. */
 	destroy(): void;
 	/**
@@ -257,6 +269,8 @@ export interface GpuPipeline {
 	 * sending data over IPC.
 	 */
 	maxTextureDimension: number;
+	/** The log percentiles from the last RAW preview render, or null if not yet rendered. */
+	lastLogPerc: LogPercentiles | null;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -463,6 +477,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const hdCurveModule       = device.createShaderModule({ code: hdCurveWGSL });
 	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
 	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
+	const blitModule          = device.createShaderModule({ code: blitWGSL });
 
 	// ── Build render pipelines ──────────────────────────────────────────────
 
@@ -480,7 +495,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const normalizationPipeline = makeRenderPipeline(normalizationModule,  'rgba16float');
 	const hdCurvePipeline       = makeRenderPipeline(hdCurveModule,        'rgba16float');
 	const colorMatrixPipeline   = makeRenderPipeline(colorMatrixModule,    'rgba16float');
-	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      presentationFormat);
+	/**
+	 * Tone curve renders to `rgba8unorm` (the readback output texture) rather than
+	 * directly to the swap chain.  A blit pass then copies it to the canvas.
+	 */
+	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      'rgba8unorm');
+	const blitPipeline          = makeRenderPipeline(blitModule,           presentationFormat);
 
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
@@ -490,6 +510,17 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let intermediateB: GPUTexture | null = null;
 	/** Third intermediate needed for the 5-pass NegPy invert path. */
 	let intermediateC: GPUTexture | null = null;
+	/**
+	 * Persistent rgba8unorm output texture (COPY_SRC | RENDER_ATTACHMENT | TEXTURE_BINDING).
+	 * The tone curve pass renders here; a blit pass copies it to the swap chain.
+	 * readPixels() reads back from this texture via copyTextureToBuffer.
+	 */
+	let outputTexture: GPUTexture | null = null;
+	/**
+	 * Log percentiles cached from the last RAW preview render.
+	 * Reused on export so full-res and preview-res produce identical normalization.
+	 */
+	let lastLogPerc: LogPercentiles | null = null;
 
 	// ─── Shared main-pass render logic ─────────────────────────────────────────
 
@@ -628,7 +659,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// For the legacy path it also writes to intermediateB.
 		drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBG, intermediateB!.createView());
 
-		// ── Tone curve pass ─────────────────────────────────────────────────
+		// ── Tone curve pass → output texture (rgba8unorm, COPY_SRC) ────────────
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
 			entries: [
@@ -642,7 +673,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			],
 		});
 
-		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, context.getCurrentTexture().createView());
+		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, outputTexture!.createView());
+
+		// ── Blit output texture → canvas swap chain ──────────────────────────
+		const blitBG = device.createBindGroup({
+			layout: blitPipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: sampler },
+				{ binding: 1, resource: outputTexture!.createView() },
+			],
+		});
+
+		drawFullscreenTriangle(encoder, blitPipeline, blitBG, context.getCurrentTexture().createView());
 
 		device.queue.submit([encoder.finish()]);
 		await device.queue.onSubmittedWorkDone();
@@ -666,6 +708,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			intermediateC?.destroy();
 			intermediateC = createRGBA16Texture(device, w, h);
 		}
+		// Rebuild the output texture at the new size.
+		outputTexture?.destroy();
+		outputTexture = device.createTexture({
+			size: [w, h],
+			format: 'rgba8unorm',
+			usage:
+				GPUTextureUsage.RENDER_ATTACHMENT |
+				GPUTextureUsage.TEXTURE_BINDING |
+				GPUTextureUsage.COPY_SRC,
+		});
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -708,8 +760,25 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	// ─── RAW render path ──────────────────────────────────────────────────────
 
-	async function renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void> {
+	async function renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer, logPercOverride?: LogPercentiles): Promise<void> {
 		const { width: w, height: h, pixels } = parseRawDecodeBuffer(rawBuffer);
+
+		// Compute log percentiles for the NegPy normalization pass.
+		// Always recompute when invert is on; cache the result so the export
+		// render (which uses a higher-res buffer with different pixel statistics)
+		// can reuse the percentiles from the preview render, keeping colours
+		// consistent between what the user sees and the exported file.
+		let logPerc: LogPercentiles | null = null;
+		if (edit.invert) {
+			if (logPercOverride) {
+				logPerc = logPercOverride;
+			} else {
+				logPerc = computeLogPercentilesFromU16(pixels);
+				lastLogPerc = logPerc;
+			}
+		} else {
+			lastLogPerc = null;
+		}
 
 		// Resize canvas
 		canvas.width  = w;
@@ -778,12 +847,6 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// Invalidate lastBitmap so next JPEG render re-uploads.
 		lastBitmap = null;
 
-		// Compute log percentiles for the NegPy normalization pass.
-		let logPerc: LogPercentiles | null = null;
-		if (edit.invert) {
-			logPerc = computeLogPercentilesFromU16(pixels);
-		}
-
 		await runMainPasses(edit, w, h, true, logPerc);
 
 		rawTexture.destroy();
@@ -803,8 +866,51 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateA?.destroy();
 		intermediateB?.destroy();
 		intermediateC?.destroy();
+		outputTexture?.destroy();
 		device.destroy();
 	}
 
-	return { render, renderRaw, destroy, maxTextureDimension };
+	/**
+	 * Copy a rectangle of pixels from the last rendered output texture back to CPU.
+	 * Returns null if no render has completed yet or the region is invalid.
+	 */
+	async function readPixels(x: number, y: number, w: number, h: number): Promise<Uint8ClampedArray | null> {
+		if (!outputTexture || w <= 0 || h <= 0) return null;
+
+		// rgba8unorm: 4 bytes per pixel.
+		// GPU buffer bytesPerRow must be aligned to 256.
+		const bytesPerPixel = 4;
+		const unpaddedBytesPerRow = w * bytesPerPixel;
+		const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / 256) * 256;
+		const bufferSize = paddedBytesPerRow * h;
+
+		const readbackBuf = device.createBuffer({
+			size: bufferSize,
+			usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+		});
+
+		const encoder = device.createCommandEncoder();
+		encoder.copyTextureToBuffer(
+			{ texture: outputTexture, origin: { x, y, z: 0 } },
+			{ buffer: readbackBuf, bytesPerRow: paddedBytesPerRow, rowsPerImage: h },
+			{ width: w, height: h, depthOrArrayLayers: 1 },
+		);
+		device.queue.submit([encoder.finish()]);
+		await readbackBuf.mapAsync(GPUMapMode.READ);
+
+		const mapped = readbackBuf.getMappedRange();
+		const result = new Uint8ClampedArray(w * h * bytesPerPixel);
+
+		// Strip row padding when copying out.
+		for (let row = 0; row < h; row++) {
+			const src = new Uint8ClampedArray(mapped, row * paddedBytesPerRow, unpaddedBytesPerRow);
+			result.set(src, row * unpaddedBytesPerRow);
+		}
+
+		readbackBuf.unmap();
+		readbackBuf.destroy();
+		return result;
+	}
+
+	return { render, renderRaw, readPixels, destroy, maxTextureDimension, get lastLogPerc() { return lastLogPerc; } };
 }

@@ -1,5 +1,6 @@
-mod thumb;
+mod export;
 mod raw;
+mod thumb;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +11,7 @@ pub fn run() {
       thumb::generate_thumb,
       raw::raw_thumb,
       raw::raw_decode,
+      export::export_jpeg,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

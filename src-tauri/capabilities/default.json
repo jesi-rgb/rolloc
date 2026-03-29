@@ -9,6 +9,7 @@
     "core:default",
     "core:path:allow-join",
     "dialog:allow-open",
+    "dialog:allow-save",
     {
       "identifier": "fs:allow-read-dir",
       "allow": [
@@ -23,6 +24,18 @@
     },
     {
       "identifier": "fs:allow-stat",
+      "allow": [
+        { "path": "**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        { "path": "**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
       "allow": [
         { "path": "**" }
       ]
