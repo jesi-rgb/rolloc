@@ -12,15 +12,31 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { readDir, readFile, stat } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
-/** File extensions we'll accept as image input (phase 1: JPEG/TIFF). */
+/** File extensions we'll accept as image input. */
 const SUPPORTED_EXTENSIONS = new Set([
+	// Standard
 	'jpg',
 	'jpeg',
 	'tif',
 	'tiff',
-	// Phase 5: RAW formats (added when libraw WASM is integrated)
-	// 'arw', 'cr2', 'cr3', 'nef', 'raf', 'dng', 'orf', 'rw2',
+	// Camera RAW formats (decoded natively in Rust via rawler)
+	'dng',
+	'arw',           // Sony
+	'cr2', 'cr3',    // Canon
+	'nef', 'nrw',    // Nikon
+	'raf',           // Fujifilm
+	'orf',           // Olympus
+	'rw2',           // Panasonic / Leica
+	'pef',           // Pentax
+	'srw',           // Samsung
+	'erf',           // Epson
 ]);
+
+/** True if the given extension is a camera RAW format (not JPEG/TIFF). */
+export function isRawExtension(filename: string): boolean {
+	const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+	return !['jpg', 'jpeg', 'tif', 'tiff'].includes(ext) && SUPPORTED_EXTENSIONS.has(ext);
+}
 
 export interface DirectoryFile {
 	filename: string;
@@ -137,6 +153,8 @@ function inferMimeType(filename: string): string {
 	const ext = filename.split('.').pop()?.toLowerCase();
 	if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
 	if (ext === 'tif' || ext === 'tiff') return 'image/tiff';
+	if (ext === 'dng') return 'image/x-adobe-dng';
+	// All other RAW formats — no standard MIME type; use octet-stream.
 	return 'application/octet-stream';
 }
 

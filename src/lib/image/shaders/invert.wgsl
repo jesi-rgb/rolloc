@@ -1,10 +1,11 @@
 /**
  * Pass 1 — Normalize + Invert
  *
- * Reads the source texture (film negative, sRGB-encoded JPEG/TIFF).
+ * Reads the source texture (film negative, sRGB-encoded JPEG/TIFF or
+ * linear camera-native RAW after the ingest pass).
  * Steps:
  *   1. Sample the source texel.
- *   2. Linearise sRGB → linear light.
+ *   2. Linearise sRGB → linear light  (skipped when isLinear = 1.0).
  *   3. Clamp to the rebate-derived [blackPoint, whitePoint] range per channel.
  *   4. Normalise to [0, 1].
  *   5. Invert (1 - x).
@@ -22,6 +23,10 @@ struct Uniforms {
 	exposureEV : f32,
 	/// 1.0 = invert (negative film); 0.0 = pass-through (positive/already-scanned).
 	invert     : f32,
+	/// 1.0 = input is already linear (RAW path); 0.0 = sRGB-encoded (JPEG/TIFF path).
+	isLinear   : f32,
+	/// Padding to reach the next 16-byte boundary.
+	_pad       : f32,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -61,12 +66,17 @@ fn srgb_to_linear(c : f32) -> f32 {
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let srgb = textureSample(uTexture, uSampler, in.uv).rgb;
 
-	// 1. sRGB → linear light
-	let lin = vec3<f32>(
-		srgb_to_linear(srgb.r),
-		srgb_to_linear(srgb.g),
-		srgb_to_linear(srgb.b),
-	);
+	// 1. sRGB → linear light (skip when input is already linear, e.g. RAW path)
+	var lin : vec3<f32>;
+	if (u.isLinear >= 0.5) {
+		lin = srgb; // already linear
+	} else {
+		lin = vec3<f32>(
+			srgb_to_linear(srgb.r),
+			srgb_to_linear(srgb.g),
+			srgb_to_linear(srgb.b),
+		);
+	}
 
 	// 2. Normalise: remap [black, white] → [0, 1]
 	let range = max(u.whitePoint - u.blackPoint, vec3<f32>(1e-6));

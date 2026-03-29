@@ -1,22 +1,46 @@
 /**
  * WebGPU render pipeline for film negative inversion.
  *
- * Three-pass pipeline:
- *   Pass 1 (invert)       — normalize + invert + exposure (camera native linear)
+ * Positive (invert = false) — 3-pass pipeline:
+ *   Pass 0 (ingest_raw)   — rgba16uint linear → rgba16float  [RAW path only]
+ *   Pass 1 (invert)       — normalize + pass-through + exposure (camera native linear)
  *   Pass 2 (colormatrix)  — 3×3 camera-to-sRGB colour matrix
  *   Pass 3 (tonecurve)    — white balance + RGB curves + global tone curve + γ encode
  *
+ * Negative (invert = true) — 5-pass NegPy pipeline:
+ *   Pass 0 (ingest_raw)     — rgba16uint linear → rgba16float  [RAW path only]
+ *   Pass 1 (normalization)  — log10 conversion + per-channel percentile stretch
+ *                             (removes orange mask, inverts negative)
+ *   Pass 2 (hd_curve)       — H&D sigmoid: CMY timing + toe/shoulder + paper response
+ *   Pass 3 (colormatrix)    — 3×3 camera-to-sRGB colour matrix
+ *   Pass 4 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
+ *
  * Usage:
  *   const gpu = await createPipeline(canvas);
- *   await gpu.render(effectiveEdit, imageBitmap);
+ *   await gpu.render(effectiveEdit, imageBitmap);      // JPEG/TIFF source
+ *   await gpu.renderRaw(effectiveEdit, rawBuffer);     // RAW source (from raw_decode)
  *   gpu.destroy();          // free GPU resources
  */
 
-import invertWGSL      from './shaders/invert.wgsl?raw';
-import colorMatrixWGSL from './shaders/colormatrix.wgsl?raw';
-import toneCurveWGSL   from './shaders/tonecurve.wgsl?raw';
+import invertWGSL         from './shaders/invert.wgsl?raw';
+import colorMatrixWGSL    from './shaders/colormatrix.wgsl?raw';
+import toneCurveWGSL      from './shaders/tonecurve.wgsl?raw';
+import ingestRawWGSL      from './shaders/ingest_raw.wgsl?raw';
+import normalizationWGSL  from './shaders/normalization.wgsl?raw';
+import hdCurveWGSL        from './shaders/hd_curve.wgsl?raw';
 import { buildCurveLUTs } from './curves';
-import type { EffectiveEdit } from '$lib/types';
+import type { EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
+
+// ─── NegPy constants ───────────────────────────────────────────────────────────
+
+/** Maximum log-density shift per CMY slider unit (matches negpy EXPOSURE_CONSTANTS). */
+const CMY_MAX_DENSITY = 0.2;
+/** Maps the grade slider to the sigmoid slope (negpy grade_multiplier). */
+const GRADE_MULTIPLIER = 2.0;
+/** Maximum print density (D_max) — deepest black photographic paper can produce. */
+const D_MAX = 4.0;
+/** Display gamma for the final output. */
+const DISPLAY_GAMMA = 2.2;
 
 // ─── White balance helpers ─────────────────────────────────────────────────────
 
@@ -62,13 +86,177 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 	];
 }
 
+// ─── Log-space percentile computation (NegPy normalization) ──────────────────
+
+/**
+ * Per-channel log-density floor/ceil for the normalization shader.
+ * The normalization pass does: normalized = (log10(pixel) - floor) / (ceil - floor)
+ * For C-41 negatives: floor ≈ 0.5th percentile, ceil ≈ 99.5th percentile.
+ * Since log10 of values < 1 is negative, floor < ceil < 0 for typical film.
+ */
+export interface LogPercentiles {
+	floors: [number, number, number];
+	ceils:  [number, number, number];
+}
+
+/**
+ * Compute per-channel 0.5th / 99.5th log10 percentiles from a Float32Array of
+ * linear RGBA pixels (length = w * h * 4, R at [0], G at [1], B at [2]).
+ *
+ * Downsamples by `stride` to keep it fast for large images (default: every 8th pixel).
+ */
+function computeLogPercentilesFromF32(
+	pixels: Float32Array,
+	stride: number = 8,
+): LogPercentiles {
+	const LOG10_E = 0.43429448190325183;
+	const eps = 1e-6;
+
+	// Reservoir sample — collect ~2000 values per channel
+	const rLog: number[] = [];
+	const gLog: number[] = [];
+	const bLog: number[] = [];
+
+	for (let i = 0; i < pixels.length; i += 4 * stride) {
+		const r = pixels[i];
+		const g = pixels[i + 1];
+		const b = pixels[i + 2];
+		if (r > eps) rLog.push(Math.log(r) * LOG10_E);
+		if (g > eps) gLog.push(Math.log(g) * LOG10_E);
+		if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+	}
+
+	function percentile(arr: number[], p: number): number {
+		if (arr.length === 0) return -1.0;
+		const sorted = arr.slice().sort((a, b) => a - b);
+		const idx = Math.floor((p / 100) * (sorted.length - 1));
+		return sorted[idx];
+	}
+
+	return {
+		floors: [
+			percentile(rLog, 0.5),
+			percentile(gLog, 0.5),
+			percentile(bLog, 0.5),
+		],
+		ceils: [
+			percentile(rLog, 99.5),
+			percentile(gLog, 99.5),
+			percentile(bLog, 99.5),
+		],
+	};
+}
+
+/**
+ * Compute log percentiles from a Uint16Array of linear u16 RGBA pixels
+ * (as returned by `raw_decode`).  Values are divided by 65535 to normalise
+ * to [0, 1] before the log transform.
+ */
+function computeLogPercentilesFromU16(
+	pixels: Uint16Array,
+	stride: number = 8,
+): LogPercentiles {
+	// Reuse the float path after normalising.
+	const maxPx = Math.min(pixels.length / 4, 256 * 256); // cap sample count
+	const f32 = new Float32Array(Math.min(pixels.length, maxPx * 4));
+	for (let i = 0; i < f32.length; i++) {
+		f32[i] = pixels[i] / 65535.0;
+	}
+	return computeLogPercentilesFromF32(f32, stride);
+}
+
+/**
+ * Read the pixels of an `ImageBitmap` to a Float32Array via OffscreenCanvas.
+ * The result is sRGB-encoded [0,1] f32 values; callers should gamma-expand
+ * before computing log percentiles if strictly necessary.  For the percentile
+ * computation (which only needs relative ordering), sRGB values are adequate.
+ */
+async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
+	const oc = new OffscreenCanvas(bitmap.width, bitmap.height);
+	const ctx = oc.getContext('2d');
+	if (!ctx) throw new Error('Could not create OffscreenCanvas 2D context');
+	ctx.drawImage(bitmap, 0, 0);
+	const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+	// Convert Uint8ClampedArray [0,255] sRGB to float [0,1].
+	const f32 = new Float32Array(data.data.length);
+	for (let i = 0; i < data.data.length; i++) {
+		f32[i] = data.data[i] / 255.0;
+	}
+	return f32;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/** Parsed metadata from the `raw_decode` binary payload. */
+export interface RawDecodeMetadata {
+	width: number;
+	height: number;
+	make: string;
+	model: string;
+	wbCoeffs: [number, number, number, number];
+	colorMatrix: [
+		number, number, number,
+		number, number, number,
+		number, number, number,
+	];
+	illuminantTemp: number;
+	bps: number;
+}
+
+/** Parsed result from a `raw_decode` ArrayBuffer response. */
+export interface RawDecodeResult {
+	width: number;
+	height: number;
+	/** Uint16Array view of the RGBA pixel data (length = width * height * 4). */
+	pixels: Uint16Array;
+	meta: RawDecodeMetadata;
+}
+
+/**
+ * Parse the binary payload returned by the `raw_decode` Tauri command.
+ *
+ * Layout:
+ *   [0..4]   width  : u32 LE
+ *   [4..8]   height : u32 LE
+ *   [8 .. 8+w*h*8]  RGBA u16 LE  (4 channels × 2 bytes)
+ *   [8+pixels .. +4]  meta JSON byte length u32 LE
+ *   [.. ]             meta JSON UTF-8
+ */
+export function parseRawDecodeBuffer(buffer: ArrayBuffer): RawDecodeResult {
+	const view = new DataView(buffer);
+	const width  = view.getUint32(0, true);
+	const height = view.getUint32(4, true);
+	const pixelByteLen = width * height * 4 * 2; // u16 × 4 channels × 2 bytes/u16
+	const pixelsOffset = 8;
+	const pixels = new Uint16Array(buffer, pixelsOffset, width * height * 4);
+
+	const metaLenOffset = pixelsOffset + pixelByteLen;
+	const metaLen = view.getUint32(metaLenOffset, true);
+	const metaBytes = new Uint8Array(buffer, metaLenOffset + 4, metaLen);
+	const meta = JSON.parse(new TextDecoder().decode(metaBytes)) as RawDecodeMetadata;
+
+	return { width, height, pixels, meta };
+}
+
 export interface GpuPipeline {
-	/** Re-render the canvas with a new edit and/or image bitmap. */
+	/**
+	 * Re-render the canvas from a JPEG/TIFF source (ImageBitmap, sRGB-encoded).
+	 */
 	render(edit: EffectiveEdit, bitmap: ImageBitmap): Promise<void>;
+	/**
+	 * Re-render the canvas from a RAW linear source.
+	 * `rawBuffer` is the ArrayBuffer returned by the `raw_decode` Tauri command.
+	 */
+	renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void>;
 	/** Release all GPU resources. Call when the editor unmounts. */
 	destroy(): void;
+	/**
+	 * The device's `maxTextureDimension2D` limit.
+	 * Pass this as `maxPx` to the `raw_decode` Tauri command so Rust can
+	 * downsample images that would exceed the GPU texture size limit before
+	 * sending data over IPC.
+	 */
+	maxTextureDimension: number;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -143,6 +331,103 @@ function makeUniformBuffer(device: GPUDevice, data: Float32Array): GPUBuffer {
 	return buf;
 }
 
+// ─── NegPy uniform builders ───────────────────────────────────────────────────
+
+/**
+ * Build the normalization pass uniform buffer.
+ *
+ * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 48 bytes):
+ *   floors         : vec4<f32>  @ 0   (rgb + pad)
+ *   ceils          : vec4<f32>  @ 16  (rgb + pad)
+ *   shadowCast     : vec4<f32>  @ 32  (rgb + pad)
+ *   shadowStrength : f32        @ 48
+ *   wpOffset       : f32        @ 52
+ *   bpOffset       : f32        @ 56
+ *   _pad           : f32        @ 60
+ *   struct size = 64 bytes
+ */
+function makeNormalizationUniforms(
+	device: GPUDevice,
+	perc: LogPercentiles,
+): GPUBuffer {
+	const data = new Float32Array([
+		perc.floors[0], perc.floors[1], perc.floors[2], 0,  // floors + pad
+		perc.ceils[0],  perc.ceils[1],  perc.ceils[2],  0,  // ceils + pad
+		0, 0, 0, 0,  // shadowCast + pad (no shadow cast correction for now)
+		0.0,         // shadowStrength
+		0.0,         // wpOffset
+		0.0,         // bpOffset
+		0.0,         // _pad
+	]);
+	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Build the H&D curve pass uniform buffer from InversionParams.
+ *
+ * HDCurveUniforms layout (total 128 bytes):
+ *   pivots           : vec4<f32>  @ 0
+ *   slopes           : vec4<f32>  @ 16
+ *   cmyOffsets       : vec4<f32>  @ 32   (r=cyan, g=magenta, b=yellow in log-density)
+ *   shadowCmy        : vec4<f32>  @ 48
+ *   highlightCmy     : vec4<f32>  @ 64
+ *   toe              : f32        @ 80
+ *   toeWidth         : f32        @ 84
+ *   toeHardness      : f32        @ 88
+ *   shoulder         : f32        @ 92
+ *   shoulderWidth    : f32        @ 96
+ *   shoulderHardness : f32        @ 100
+ *   shadows          : f32        @ 104
+ *   highlights       : f32        @ 108
+ *   dMax             : f32        @ 112
+ *   gamma            : f32        @ 116
+ *   _pad0            : f32        @ 120
+ *   _pad1            : f32        @ 124
+ */
+function makeHDCurveUniforms(
+	device: GPUDevice,
+	inv: InversionParams,
+): GPUBuffer {
+	// All three channels share the same pivot (density) and slope (grade * GRADE_MULTIPLIER).
+	const pivot = inv.density;
+	const slope = inv.grade * GRADE_MULTIPLIER;
+
+	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
+	// NegPy convention: Cyan shifts Red channel, Magenta shifts Green, Yellow shifts Blue.
+	const cmyR = inv.cmyCyan    * CMY_MAX_DENSITY;
+	const cmyG = inv.cmyMagenta * CMY_MAX_DENSITY;
+	const cmyB = inv.cmyYellow  * CMY_MAX_DENSITY;
+
+	const sCmyR = inv.shadowCyan    * CMY_MAX_DENSITY;
+	const sCmyG = inv.shadowMagenta * CMY_MAX_DENSITY;
+	const sCmyB = inv.shadowYellow  * CMY_MAX_DENSITY;
+
+	const hCmyR = inv.highlightCyan    * CMY_MAX_DENSITY;
+	const hCmyG = inv.highlightMagenta * CMY_MAX_DENSITY;
+	const hCmyB = inv.highlightYellow  * CMY_MAX_DENSITY;
+
+	const data = new Float32Array([
+		pivot, pivot, pivot, 0,           // pivots rgb + pad
+		slope, slope, slope, 0,           // slopes rgb + pad
+		cmyR,  cmyG,  cmyB,  0,           // cmyOffsets rgb + pad
+		sCmyR, sCmyG, sCmyB, 0,           // shadowCmy rgb + pad
+		hCmyR, hCmyG, hCmyB, 0,           // highlightCmy rgb + pad
+		inv.toe,              // toe
+		inv.toeWidth,         // toeWidth
+		inv.toeHardness,      // toeHardness
+		inv.shoulder,         // shoulder
+		inv.shoulderWidth,    // shoulderWidth
+		inv.shoulderHardness, // shoulderHardness
+		inv.shadows,          // shadows
+		inv.highlights,       // highlights
+		D_MAX,                // dMax
+		DISPLAY_GAMMA,        // gamma
+		0.0,                  // _pad0
+		0.0,                  // _pad1
+	]);
+	return makeUniformBuffer(device, data);
+}
+
 // ─── Pipeline creation ────────────────────────────────────────────────────────
 
 /**
@@ -158,6 +443,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	if (!adapter) throw new Error('No WebGPU adapter available.');
 
 	const device = await adapter.requestDevice();
+	const maxTextureDimension = device.limits.maxTextureDimension2D;
 
 	const contextOrNull = canvas.getContext('webgpu');
 	if (!contextOrNull) throw new Error('Could not get WebGPU canvas context.');
@@ -171,9 +457,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	// ── Compile shader modules ──────────────────────────────────────────────
 
-	const invertModule      = device.createShaderModule({ code: invertWGSL });
-	const colorMatrixModule = device.createShaderModule({ code: colorMatrixWGSL });
-	const toneCurveModule   = device.createShaderModule({ code: toneCurveWGSL });
+	const ingestRawModule     = device.createShaderModule({ code: ingestRawWGSL });
+	const invertModule        = device.createShaderModule({ code: invertWGSL });
+	const normalizationModule = device.createShaderModule({ code: normalizationWGSL });
+	const hdCurveModule       = device.createShaderModule({ code: hdCurveWGSL });
+	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
+	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
 
 	// ── Build render pipelines ──────────────────────────────────────────────
 
@@ -186,9 +475,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		});
 	}
 
-	const invertPipeline      = makeRenderPipeline(invertModule,      'rgba16float');
-	const colorMatrixPipeline = makeRenderPipeline(colorMatrixModule, 'rgba16float');
-	const toneCurvePipeline   = makeRenderPipeline(toneCurveModule,   presentationFormat);
+	const ingestRawPipeline     = makeRenderPipeline(ingestRawModule,     'rgba16float');
+	const invertPipeline        = makeRenderPipeline(invertModule,         'rgba16float');
+	const normalizationPipeline = makeRenderPipeline(normalizationModule,  'rgba16float');
+	const hdCurvePipeline       = makeRenderPipeline(hdCurveModule,        'rgba16float');
+	const colorMatrixPipeline   = makeRenderPipeline(colorMatrixModule,    'rgba16float');
+	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      presentationFormat);
 
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
@@ -196,6 +488,185 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let sourceTexture: GPUTexture | null = null;
 	let intermediateA: GPUTexture | null = null;
 	let intermediateB: GPUTexture | null = null;
+	/** Third intermediate needed for the 5-pass NegPy invert path. */
+	let intermediateC: GPUTexture | null = null;
+
+	// ─── Shared main-pass render logic ─────────────────────────────────────────
+
+	/**
+	 * Runs the main passes on `sourceTexture` depending on whether inversion
+	 * is enabled.
+	 *
+	 * Positive path (invert = false): invert(passthrough) → colormatrix → tonecurve
+	 * Negative path (invert = true):  normalization → hd_curve → colormatrix → tonecurve
+	 *
+	 * @param isLinear  true for the RAW path (input is linear light);
+	 *                  false for JPEG/TIFF (sRGB-encoded, needs gamma expand in invert pass).
+	 * @param logPerc   Per-channel log percentiles required for the normalization pass.
+	 *                  Must be provided when edit.invert = true.
+	 */
+	async function runMainPasses(
+		edit: EffectiveEdit,
+		w: number,
+		h: number,
+		isLinear: boolean,
+		logPerc: LogPercentiles | null,
+	): Promise<void> {
+		// ── Build LUT textures ──────────────────────────────────────────────
+
+		const [toneLut, redLut, greenLut, blueLut] = buildCurveLUTs(
+			edit.toneCurve,
+			edit.rgbCurves,
+		);
+
+		const toneLutTex  = createLutTexture(device, toneLut);
+		const redLutTex   = createLutTexture(device, redLut);
+		const greenLutTex = createLutTexture(device, greenLut);
+		const blueLutTex  = createLutTexture(device, blueLut);
+
+		// ── Build colour matrix uniforms ────────────────────────────────────
+		// Source matrix m is row-major [m00,m01,m02, m10,m11,m12, m20,m21,m22].
+		// WGSL mat3x3 col0 = [m00,m10,m20], col1 = [m01,m11,m21], col2 = [m02,m12,m22].
+		const m: Matrix3x3 = edit.cameraColorMatrix;
+		const colorMatrixUniforms = new Float32Array([
+			m[0], m[3], m[6], 0,   // col0: [m00, m10, m20, pad]
+			m[1], m[4], m[7], 0,   // col1: [m01, m11, m21, pad]
+			m[2], m[5], m[8], 0,   // col2: [m02, m12, m22, pad]
+			0,    0,    0,    0,   // _pad vec4
+		]);
+		const colorMatrixUniformBuf = makeUniformBuffer(device, colorMatrixUniforms);
+
+		// ── Build tone curve (WB + LUT) uniforms ────────────────────────────
+		const [tcWbR, tcWbG, tcWbB] = temperatureToMultipliers(
+			edit.whiteBalance.temperature,
+			edit.whiteBalance.tint,
+		);
+		const toneCurveUniforms = new Float32Array([tcWbR, tcWbG, tcWbB, 1.0]);
+		const toneCurveUniformBuf = makeUniformBuffer(device, toneCurveUniforms);
+
+		const lutSampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+		const encoder = device.createCommandEncoder();
+
+		let afterFirstPass: GPUTextureView;  // output of pass-1 → input of colormatrix
+		const toClean: GPUBuffer[] = [colorMatrixUniformBuf, toneCurveUniformBuf];
+
+		if (edit.invert && logPerc) {
+			// ── NegPy inversion path ──────────────────────────────────────────
+			// Pass 1: normalization — sourceTexture → intermediateA
+			// Pass 2: hd_curve     — intermediateA → intermediateC
+			// Pass 3: colormatrix  — intermediateC → intermediateB
+			// Pass 4: tonecurve    — intermediateB → canvas
+
+			const normBuf = makeNormalizationUniforms(device, logPerc);
+			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
+			toClean.push(normBuf, hdBuf);
+
+			const normBG = device.createBindGroup({
+				layout: normalizationPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: sourceTexture!.createView() },
+					{ binding: 2, resource: { buffer: normBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, normalizationPipeline, normBG, intermediateA!.createView());
+
+			const hdBG = device.createBindGroup({
+				layout: hdCurvePipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: intermediateA!.createView() },
+					{ binding: 2, resource: { buffer: hdBuf } },
+				],
+			});
+
+			// Re-use intermediateC as the output of the hd_curve pass.
+			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateC!.createView());
+
+			afterFirstPass = intermediateC!.createView();
+		} else {
+			// ── Legacy pass-through invert path (positive or non-invert mode) ──
+			// Pass 1: invert — sourceTexture → intermediateA
+			// (invert = 0.0 means pass-through; preserves exposureCompensation)
+			const invertUniforms = new Float32Array([
+				0, 0, 0, 0,                       // blackPoint rgb + pad
+				1, 1, 1, 0,                       // whitePoint rgb + pad
+				edit.exposureCompensation,        // exposureEV
+				0.0,                              // invert flag = off (NegPy handles the inversion)
+				isLinear ? 1.0 : 0.0,            // isLinear flag
+				0,                                // _pad
+			]);
+			const invertUniformBuf = makeUniformBuffer(device, invertUniforms);
+			toClean.push(invertUniformBuf);
+
+			const invertBG = device.createBindGroup({
+				layout: invertPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: sourceTexture!.createView() },
+					{ binding: 2, resource: { buffer: invertUniformBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, invertPipeline, invertBG, intermediateA!.createView());
+			afterFirstPass = intermediateA!.createView();
+		}
+
+		// ── Color matrix pass ───────────────────────────────────────────────
+		const colorMatrixBG = device.createBindGroup({
+			layout: colorMatrixPipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: sampler },
+				{ binding: 1, resource: afterFirstPass },
+				{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
+			],
+		});
+
+		// For the NegPy path colormatrix writes to intermediateB (same as before).
+		// For the legacy path it also writes to intermediateB.
+		drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBG, intermediateB!.createView());
+
+		// ── Tone curve pass ─────────────────────────────────────────────────
+		const toneCurveBG = device.createBindGroup({
+			layout: toneCurvePipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: lutSampler },
+				{ binding: 1, resource: intermediateB!.createView() },
+				{ binding: 2, resource: { buffer: toneCurveUniformBuf } },
+				{ binding: 3, resource: toneLutTex.createView({ dimension: '1d' }) },
+				{ binding: 4, resource: redLutTex.createView({ dimension: '1d' }) },
+				{ binding: 5, resource: greenLutTex.createView({ dimension: '1d' }) },
+				{ binding: 6, resource: blueLutTex.createView({ dimension: '1d' }) },
+			],
+		});
+
+		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, context.getCurrentTexture().createView());
+
+		device.queue.submit([encoder.finish()]);
+		await device.queue.onSubmittedWorkDone();
+
+		// Clean up per-frame GPU resources
+		toneLutTex.destroy();
+		redLutTex.destroy();
+		greenLutTex.destroy();
+		blueLutTex.destroy();
+		for (const buf of toClean) buf.destroy();
+	}
+
+	// ─── Helper: ensure intermediate textures exist + intermediateC for NegPy ──
+
+	function ensureIntermediates(w: number, h: number, needC: boolean): void {
+		intermediateA?.destroy();
+		intermediateB?.destroy();
+		intermediateA = createRGBA16Texture(device, w, h);
+		intermediateB = createRGBA16Texture(device, w, h);
+		if (needC) {
+			intermediateC?.destroy();
+			intermediateC = createRGBA16Texture(device, w, h);
+		}
+	}
 
 	// ─────────────────────────────────────────────────────────────────────────
 
@@ -222,126 +693,118 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				[w, h],
 			);
 			lastBitmap = bitmap;
-
-			intermediateA?.destroy();
-			intermediateB?.destroy();
-			intermediateA = createRGBA16Texture(device, w, h);
-			intermediateB = createRGBA16Texture(device, w, h);
+			ensureIntermediates(w, h, true);
 		}
 
-		// ── Build LUT textures ──────────────────────────────────────────────
+		// Compute log percentiles for the NegPy normalization pass.
+		let logPerc: LogPercentiles | null = null;
+		if (edit.invert) {
+			const f32 = await bitmapToF32Pixels(bitmap);
+			logPerc = computeLogPercentilesFromF32(f32);
+		}
 
-		const [toneLut, redLut, greenLut, blueLut] = buildCurveLUTs(
-			edit.toneCurve,
-			edit.rgbCurves,
+		await runMainPasses(edit, w, h, false, logPerc);
+	}
+
+	// ─── RAW render path ──────────────────────────────────────────────────────
+
+	async function renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void> {
+		const { width: w, height: h, pixels } = parseRawDecodeBuffer(rawBuffer);
+
+		// Resize canvas
+		canvas.width  = w;
+		canvas.height = h;
+		context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
+
+		// Push error scopes to surface any WebGPU validation/OOM errors.
+		device.pushErrorScope('validation');
+		device.pushErrorScope('out-of-memory');
+
+		// Upload u16 pixel data as rgba16uint texture.
+		const rawTexture = device.createTexture({
+			size: [w, h],
+			format: 'rgba16uint',
+			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+		});
+		// Each pixel is 4 × u16 = 8 bytes; bytesPerRow must be aligned to 256.
+		const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
+		let uploadData: Uint8Array<ArrayBuffer>;
+		if (bytesPerRow === w * 8) {
+			const buf = new ArrayBuffer(pixels.byteLength);
+			new Uint8Array(buf).set(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
+			uploadData = new Uint8Array(buf);
+		} else {
+			const buf = new ArrayBuffer(bytesPerRow * h);
+			uploadData = new Uint8Array(buf);
+			const srcRow = w * 8;
+			for (let row = 0; row < h; row++) {
+				uploadData.set(
+					new Uint8Array(pixels.buffer, pixels.byteOffset + row * srcRow, srcRow),
+					row * bytesPerRow,
+				);
+			}
+		}
+
+		device.queue.writeTexture(
+			{ texture: rawTexture },
+			uploadData,
+			{ bytesPerRow, rowsPerImage: h },
+			[w, h],
 		);
 
-		const toneLutTex  = createLutTexture(device, toneLut);
-		const redLutTex   = createLutTexture(device, redLut);
-		const greenLutTex = createLutTexture(device, greenLut);
-		const blueLutTex  = createLutTexture(device, blueLut);
+		// ── Ingest pass: rgba16uint → rgba16float ────────────────────────────
+		const ingestedTexture = device.createTexture({
+			size: [w, h],
+			format: 'rgba16float',
+			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+		});
 
-		// ── Build uniforms ──────────────────────────────────────────────────
-
-		// Pass 1 — invert uniforms: blackPoint(3), pad, whitePoint(3), exposureEV, invert
-		// For now derive black/white from the rebate region values (identity: 0/1).
-		// Phase 5 will sample the actual rebate region pixels.
-		// WGSL struct layout (align 16):
-		//   blackPoint: vec3<f32> @ 0   → 12 bytes + 4 pad = 16
-		//   whitePoint: vec3<f32> @ 16  → 12 bytes + 4 pad = 16
-		//   exposureEV: f32       @ 32  → 4 bytes
-		//   invert:     f32       @ 36  → 4 bytes
-		//   struct size rounds to 48
-		const invertUniforms = new Float32Array([
-			0, 0, 0, 0,                       // blackPoint rgb + pad
-			1, 1, 1, 0,                       // whitePoint rgb + pad
-			edit.exposureCompensation,        // exposureEV
-			edit.invert ? 1.0 : 0.0,         // invert flag
-			0, 0,                             // tail pad to 48 bytes
-		]);
-		const invertUniformBuf = makeUniformBuffer(device, invertUniforms);
-
-		// Pass 2 — colour matrix (mat3x3<f32> = 12 floats in std140, padded)
-		// WGSL mat3x3<f32> is stored column-major with vec3 padding → 4 floats/col = 48 bytes
-		const m = edit.cameraColorMatrix;
-		// WGSL mat3x3<f32> layout: 3 columns, each vec3<f32> padded to 16 bytes = 48 bytes.
-		// Then _pad: f32 = 4 bytes. Struct size rounds to align 16 → 64 bytes (16 floats).
-		// col0=[m[0],m[3],m[6]], col1=[m[1],m[4],m[7]], col2=[m[2],m[5],m[8]] (column-major)
-		const colorMatrixUniforms = new Float32Array([
-			m[0], m[3], m[6], 0,   // col 0 + pad
-			m[1], m[4], m[7], 0,   // col 1 + pad
-			m[2], m[5], m[8], 0,   // col 2 + pad
-			0, 0, 0, 0,            // _pad + 3 tail floats to reach 64 bytes
-		]);
-		const colorMatrixUniformBuf = makeUniformBuffer(device, colorMatrixUniforms);
-
-		// Pass 3 — white balance multipliers
-		// WB is disabled for now (identity = no colour shift).
-		const toneCurveUniforms = new Float32Array([1.0, 1.0, 1.0, 1.0]);
-		const toneCurveUniformBuf = makeUniformBuffer(device, toneCurveUniforms);
-
-		// ── Bind groups ─────────────────────────────────────────────────────
-
-		const invertBG = device.createBindGroup({
-			layout: invertPipeline.getBindGroupLayout(0),
+		const ingestBG = device.createBindGroup({
+			layout: ingestRawPipeline.getBindGroupLayout(0),
 			entries: [
-				{ binding: 0, resource: sampler },
-				{ binding: 1, resource: sourceTexture!.createView() },
-				{ binding: 2, resource: { buffer: invertUniformBuf } },
+				{ binding: 0, resource: rawTexture.createView() },
 			],
 		});
 
-		const colorMatrixBG = device.createBindGroup({
-			layout: colorMatrixPipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: sampler },
-				{ binding: 1, resource: intermediateA!.createView() },
-				{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
-			],
-		});
+		const ingestEncoder = device.createCommandEncoder();
+		drawFullscreenTriangle(ingestEncoder, ingestRawPipeline, ingestBG, ingestedTexture.createView());
+		device.queue.submit([ingestEncoder.finish()]);
 
-		const lutSampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+		// ── Swap sourceTexture + intermediates for the main passes ────────────
+		sourceTexture?.destroy();
+		sourceTexture = ingestedTexture;
+		ensureIntermediates(w, h, true);
 
-		const toneCurveBG = device.createBindGroup({
-			layout: toneCurvePipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: lutSampler },
-				{ binding: 1, resource: intermediateB!.createView() },
-				{ binding: 2, resource: { buffer: toneCurveUniformBuf } },
-				{ binding: 3, resource: toneLutTex.createView({ dimension: '1d' }) },
-				{ binding: 4, resource: redLutTex.createView({ dimension: '1d' }) },
-				{ binding: 5, resource: greenLutTex.createView({ dimension: '1d' }) },
-				{ binding: 6, resource: blueLutTex.createView({ dimension: '1d' }) },
-			],
-		});
+		// Invalidate lastBitmap so next JPEG render re-uploads.
+		lastBitmap = null;
 
-		// ── Encode & submit ─────────────────────────────────────────────────
+		// Compute log percentiles for the NegPy normalization pass.
+		let logPerc: LogPercentiles | null = null;
+		if (edit.invert) {
+			logPerc = computeLogPercentilesFromU16(pixels);
+		}
 
-		const encoder = device.createCommandEncoder();
+		await runMainPasses(edit, w, h, true, logPerc);
 
-		drawFullscreenTriangle(encoder, invertPipeline,      invertBG,      intermediateA!.createView());
-		drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBG, intermediateB!.createView());
-		drawFullscreenTriangle(encoder, toneCurvePipeline,   toneCurveBG,   context.getCurrentTexture().createView());
+		rawTexture.destroy();
 
-		device.queue.submit([encoder.finish()]);
-		await device.queue.onSubmittedWorkDone();
-
-		// Clean up per-frame GPU resources
-		toneLutTex.destroy();
-		redLutTex.destroy();
-		greenLutTex.destroy();
-		blueLutTex.destroy();
-		invertUniformBuf.destroy();
-		colorMatrixUniformBuf.destroy();
-		toneCurveUniformBuf.destroy();
+		// Surface any GPU errors captured during this render.
+		const oomErr = await device.popErrorScope();
+		const valErr = await device.popErrorScope();
+		if (oomErr) console.error('[raw] WebGPU OOM error:', oomErr.message);
+		if (valErr) console.error('[raw] WebGPU validation error:', valErr.message);
+		if (oomErr || valErr) {
+			throw new Error(`WebGPU error: ${(valErr ?? oomErr)!.message}`);
+		}
 	}
 
 	function destroy(): void {
 		sourceTexture?.destroy();
 		intermediateA?.destroy();
 		intermediateB?.destroy();
+		intermediateC?.destroy();
 		device.destroy();
 	}
 
-	return { render, destroy };
+	return { render, renderRaw, destroy, maxTextureDimension };
 }

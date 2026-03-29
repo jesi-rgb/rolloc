@@ -29,7 +29,7 @@ const DIR_THUMBS   = 'thumbs';
  * On next app load, ensureCacheVersion() will delete all cached files and
  * write the new version before any read or write is allowed.
  */
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 let _cacheReady: Promise<void> | null = null;
 

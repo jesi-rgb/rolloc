@@ -35,6 +35,60 @@ export interface WhiteBalance {
 	tint: number;
 }
 
+// ─── NegPy inversion parameters ──────────────────────────────────────────────
+
+/**
+ * Parameters for the NegPy film-negative inversion pipeline.
+ * Models the darkroom physics of projecting a negative through an enlarger.
+ *
+ * Stage 1 — Log normalization:
+ *   Converts linear transmittance to log-density and per-channel stretches
+ *   to [0,1], simultaneously inverting and removing the orange mask.
+ *
+ * Stage 2 — H&D sigmoid (paper response):
+ *   Applies a logistic characteristic curve that simulates photographic paper.
+ */
+export interface InversionParams {
+	/** Pivot point (0–1) — controls "exposure" / density shift. Default 0.5. */
+	density: number;
+	/** Sigmoid contrast slope — equivalent to paper "grade". Default 2.0. */
+	grade: number;
+
+	// ── Global CMY color timing (log-space offsets) ──────────────────────────
+	/** Global Cyan/Red shift (-1 to +1). */
+	cmyCyan: number;
+	/** Global Magenta/Green shift (-1 to +1). */
+	cmyMagenta: number;
+	/** Global Yellow/Blue shift (-1 to +1). */
+	cmyYellow: number;
+
+	// ── Shadow-targeted CMY shifts ───────────────────────────────────────────
+	shadowCyan: number;
+	shadowMagenta: number;
+	shadowYellow: number;
+
+	// ── Highlight-targeted CMY shifts ────────────────────────────────────────
+	highlightCyan: number;
+	highlightMagenta: number;
+	highlightYellow: number;
+
+	// ── Tonal density adjustments ─────────────────────────────────────────────
+	/** Overall shadow density lift/pull. */
+	shadows: number;
+	/** Overall highlight density lift/pull. */
+	highlights: number;
+
+	// ── Toe (shadow rolloff) ──────────────────────────────────────────────────
+	toe: number;
+	toeWidth: number;
+	toeHardness: number;
+
+	// ── Shoulder (highlight rolloff) ──────────────────────────────────────────
+	shoulder: number;
+	shoulderWidth: number;
+	shoulderHardness: number;
+}
+
 // ─── Edit parameters ──────────────────────────────────────────────────────────
 
 /**
@@ -49,6 +103,12 @@ export interface RollEditParams {
 	 * Sourced from libraw / DNG metadata. Fixed per camera body + light source.
 	 */
 	cameraColorMatrix: Matrix3x3;
+	/**
+	 * As-shot white balance coefficients [R, G, B] from the RAW file metadata.
+	 * Normalised so G = 1.0. Applied as per-channel multipliers before the
+	 * colour matrix pass. Only relevant for RAW files; defaults to [1, 1, 1].
+	 */
+	ashotWBCoeffs: [number, number, number];
 	/** Light source colour temperature used to interpolate the colour matrix. */
 	lightSourceTemp: number;
 	/** Default tone curve applied to all frames (global, post-inversion). */
@@ -57,6 +117,8 @@ export interface RollEditParams {
 	baseRGBCurves: [CurvePoints, CurvePoints, CurvePoints];
 	/** Whether to invert the image (true = film negative; false = positive/already-scanned). */
 	invert: boolean;
+	/** Roll-level default NegPy inversion parameters — used when a frame has no override. */
+	inversionParams: InversionParams;
 }
 
 /**
@@ -73,6 +135,8 @@ export interface FrameEditOverrides {
 	rgbCurves: [CurvePoints, CurvePoints, CurvePoints] | null;
 	/** Override rebate region for this specific frame. */
 	rebateRegion: Rect | null;
+	/** Per-frame NegPy inversion parameters. Null = inherit roll default. */
+	inversionParams: InversionParams | null;
 }
 
 /**
@@ -82,15 +146,21 @@ export interface FrameEditOverrides {
 export interface EffectiveEdit {
 	rebateRegion: Rect;
 	cameraColorMatrix: Matrix3x3;
+	/**
+	 * As-shot white balance coefficients [R, G, B] from the RAW file.
+	 * Applied as channel multipliers before the colour matrix. [1, 1, 1] for
+	 * non-RAW sources.
+	 */
+	ashotWBCoeffs: [number, number, number];
 	lightSourceTemp: number;
 	exposureCompensation: number;
 	whiteBalance: WhiteBalance;
 	toneCurve: CurvePoints;
 	rgbCurves: [CurvePoints, CurvePoints, CurvePoints];
 	invert: boolean;
+	/** NegPy inversion pipeline parameters (only used when invert = true). */
+	inversionParams: InversionParams;
 }
-
-// ─── Domain entities ──────────────────────────────────────────────────────────
 
 export type FrameFlag = 'pick' | 'reject' | 'edited';
 
@@ -159,13 +229,37 @@ const identityMatrix: Matrix3x3 = [
 	0, 0, 1,
 ];
 
+export const DEFAULT_INVERSION_PARAMS: InversionParams = {
+	density:          0.5,
+	grade:            2.0,
+	cmyCyan:          0.0,
+	cmyMagenta:       0.0,
+	cmyYellow:        0.0,
+	shadowCyan:       0.0,
+	shadowMagenta:    0.0,
+	shadowYellow:     0.0,
+	highlightCyan:    0.0,
+	highlightMagenta: 0.0,
+	highlightYellow:  0.0,
+	shadows:          0.0,
+	highlights:       0.0,
+	toe:              0.0,
+	toeWidth:         3.0,
+	toeHardness:      1.0,
+	shoulder:         0.0,
+	shoulderWidth:    3.0,
+	shoulderHardness: 1.0,
+};
+
 export const DEFAULT_ROLL_EDIT: RollEditParams = {
 	rebateRegion: { x: 0, y: 0, w: 0.05, h: 1 },
 	cameraColorMatrix: identityMatrix,
+	ashotWBCoeffs: [1, 1, 1],
 	lightSourceTemp: 5500,
 	baseToneCurve: identityCurve,
 	baseRGBCurves: [identityCurve, identityCurve, identityCurve],
 	invert: false,
+	inversionParams: DEFAULT_INVERSION_PARAMS,
 };
 
 export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
@@ -174,6 +268,7 @@ export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
 	toneCurve: null,
 	rgbCurves: null,
 	rebateRegion: null,
+	inversionParams: null,
 };
 
 export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
@@ -186,14 +281,42 @@ export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
 export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 	const r = roll.rollEdit;
 	const f = frame.frameEdit;
+	// Guard against rolls where cameraColorMatrix is missing, all-zero, or contains
+	// null/NaN (e.g. rawler returned null for missing DNG matrix entries, or the field
+	// didn't exist in an older DB record).  Fall back to identity so the GPU shader
+	// always receives a valid non-zero matrix.
+	const rawM = r.cameraColorMatrix as unknown;
+	const colorMatrix: Matrix3x3 =
+		Array.isArray(rawM) &&
+		rawM.length === 9 &&
+		(rawM as number[]).every((v) => typeof v === 'number' && isFinite(v)) &&
+		(rawM as number[]).some((v) => v !== 0)
+			? (rawM as Matrix3x3)
+			: identityMatrix;
+
+	// Guard against missing/invalid ashotWBCoeffs (older DB records won't have it).
+	const rawWB = r.ashotWBCoeffs as unknown;
+	const ashotWBCoeffs: [number, number, number] =
+		Array.isArray(rawWB) &&
+		rawWB.length === 3 &&
+		(rawWB as number[]).every((v) => typeof v === 'number' && isFinite(v) && v > 0)
+			? (rawWB as [number, number, number])
+			: [1, 1, 1];
+
 	return {
 		rebateRegion:         f.rebateRegion         ?? r.rebateRegion,
-		cameraColorMatrix:    r.cameraColorMatrix,
+		cameraColorMatrix:    colorMatrix,
+		ashotWBCoeffs,
 		lightSourceTemp:      r.lightSourceTemp,
 		exposureCompensation: f.exposureCompensation ?? 0,
 		whiteBalance:         f.whiteBalance         ?? DEFAULT_WHITE_BALANCE,
 		toneCurve:            f.toneCurve            ?? r.baseToneCurve,
 		rgbCurves:            f.rgbCurves            ?? r.baseRGBCurves,
 		invert:               r.invert,
+		// Per-frame override wins; fall back to roll default; guard against old DB records.
+		inversionParams:
+			(f as { inversionParams?: InversionParams | null }).inversionParams
+			?? (r as { inversionParams?: InversionParams }).inversionParams
+			?? DEFAULT_INVERSION_PARAMS,
 	};
 }

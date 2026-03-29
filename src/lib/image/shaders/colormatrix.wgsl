@@ -9,9 +9,12 @@
  */
 
 struct Uniforms {
-	/// Row-major 3×3: [m00 m01 m02  m10 m11 m12  m20 m21 m22]
-	matrix : mat3x3<f32>,
-	_pad   : f32,
+	/// Column-major mat3x3 packed as 3×vec4 (each col is vec3 + 1 pad float).
+	/// col0: [m00, m10, m20, pad], col1: [m01, m11, m21, pad], col2: [m02, m12, m22, pad]
+	col0 : vec4<f32>,
+	col1 : vec4<f32>,
+	col2 : vec4<f32>,
+	_pad : vec4<f32>,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -41,8 +44,11 @@ fn vs_main(in : VertIn) -> VertOut {
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let col = textureSample(uTexture, uSampler, in.uv).rgb;
 
-	// Apply the 3×3 colour matrix (column vector on the right)
-	let out = u.matrix * col;
+	// Reconstruct mat3x3 from explicit vec4 columns (avoids mat3x3 uniform layout issues).
+	let c0 = u.col0.xyz;
+	let c1 = u.col1.xyz;
+	let c2 = u.col2.xyz;
+	let out = mat3x3<f32>(c0, c1, c2) * col;
 
 	return vec4<f32>(clamp(out, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

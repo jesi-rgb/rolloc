@@ -27,6 +27,7 @@ import {
 	applyOrientationTransform,
 	orientationSwapsDimensions,
 } from '$lib/image/exif-orientation';
+import { isRawExtension } from '$lib/fs/directory';
 import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 
 export const THUMB_SIZE   = 300;
@@ -49,6 +50,20 @@ function isTauri(): boolean {
  */
 async function generateThumbNative(absolutePath: string, maxPx: number): Promise<Blob> {
 	const buf = await invoke<ArrayBuffer>('generate_thumb', {
+		path:    absolutePath,
+		maxPx,
+		quality: Math.round(JPEG_QUALITY * 100),
+	});
+	return new Blob([buf], { type: 'image/jpeg' });
+}
+
+/**
+ * Call the native Rust `raw_thumb` command for RAW files.
+ * Returns a Blob containing the JPEG bytes from the embedded preview
+ * (or a demosaiced fallback if no embedded preview exists).
+ */
+async function generateRawThumbNative(absolutePath: string, maxPx: number): Promise<Blob> {
+	const buf = await invoke<ArrayBuffer>('raw_thumb', {
 		path:    absolutePath,
 		maxPx,
 		quality: Math.round(JPEG_QUALITY * 100),
@@ -253,7 +268,12 @@ export async function ensureThumb(
 
 	let blob: Blob;
 	if ('absolutePath' in source && isTauri()) {
-		blob = await generateThumbNative(source.absolutePath, THUMB_SIZE);
+		// Route RAW files through the dedicated raw_thumb command.
+		if (isRawExtension(source.absolutePath)) {
+			blob = await generateRawThumbNative(source.absolutePath, THUMB_SIZE);
+		} else {
+			blob = await generateThumbNative(source.absolutePath, THUMB_SIZE);
+		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
 		blob = await generateResizedFromBlob(file, THUMB_SIZE);
@@ -276,7 +296,12 @@ export async function ensurePreview(
 
 	let blob: Blob;
 	if ('absolutePath' in source && isTauri()) {
-		blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE);
+		// Route RAW files through the dedicated raw_thumb command.
+		if (isRawExtension(source.absolutePath)) {
+			blob = await generateRawThumbNative(source.absolutePath, PREVIEW_SIZE);
+		} else {
+			blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE);
+		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
 		blob = await generateResizedFromBlob(file, PREVIEW_SIZE);

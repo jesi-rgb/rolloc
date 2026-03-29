@@ -33,6 +33,10 @@ rayon = "1.10"
 # tokio is a transitive dep of tauri; we declare it explicitly to use
 # spawn_blocking for off-thread CPU work in async commands.
 tokio = { version = "1", features = ["rt"] }
+# Pure-Rust camera RAW decoder (DNG, CR2/CR3, NEF, ARW, RAF, ORF, RW2, …).
+# Used for: (a) extracting embedded JPEG previews for fast thumbs, and
+# (b) full linear 16-bit demosaic for the editor pipeline.
+rawler = { version = "0.7", default-features = false }
 
 # Compile image-processing crates at full optimisation even in debug builds.
 # This brings dev-mode thumbnail performance to parity with release without
@@ -42,4 +46,6 @@ opt-level = 3
 [profile.dev.package.zune-jpeg]
 opt-level = 3
 [profile.dev.package.tiff]
+opt-level = 3
+[profile.dev.package.rawler]
 opt-level = 3
