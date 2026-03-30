@@ -140,7 +140,7 @@
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-[10px] font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
 		>
 			Color timing
 		</h4>
@@ -152,6 +152,7 @@
 				max={1}
 				step={0.01}
 				value={cmyCyan}
+				defaultValue={DEFAULT_INVERSION_PARAMS.cmyCyan}
 				onchange={(v) => {
 					cmyCyan = v;
 					emit();
@@ -166,6 +167,7 @@
 				max={1}
 				step={0.01}
 				value={cmyMagenta}
+				defaultValue={DEFAULT_INVERSION_PARAMS.cmyMagenta}
 				onchange={(v) => {
 					cmyMagenta = v;
 					emit();
@@ -180,6 +182,7 @@
 				max={1}
 				step={0.01}
 				value={cmyYellow}
+				defaultValue={DEFAULT_INVERSION_PARAMS.cmyYellow}
 				onchange={(v) => {
 					cmyYellow = v;
 					emit();
@@ -193,7 +196,7 @@
 	<!-- ── Density + Grade ─────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-[10px] font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
 		>
 			Print
 		</h4>
@@ -202,9 +205,10 @@
 				id="inv-density"
 				label="Density"
 				min={0}
-				max={2}
+				max={10}
 				step={0.01}
 				value={density}
+				defaultValue={DEFAULT_INVERSION_PARAMS.density}
 				onchange={(v) => {
 					density = v;
 					emit();
@@ -214,9 +218,10 @@
 				id="inv-grade"
 				label="Grade"
 				min={0}
-				max={5}
+				max={10}
 				step={0.1}
 				value={grade}
+				defaultValue={DEFAULT_INVERSION_PARAMS.grade}
 				onchange={(v) => {
 					grade = v;
 					emit();
@@ -228,7 +233,7 @@
 	<!-- ── Shadows ─────────────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-[10px] font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
 		>
 			Shadows
 		</h4>
@@ -240,6 +245,7 @@
 				max={1}
 				step={0.01}
 				value={shadows}
+				defaultValue={DEFAULT_INVERSION_PARAMS.shadows}
 				onchange={(v) => {
 					shadows = v;
 					emit();
@@ -253,6 +259,7 @@
 				max={1}
 				step={0.01}
 				value={toe}
+				defaultValue={DEFAULT_INVERSION_PARAMS.toe}
 				onchange={(v) => {
 					toe = v;
 					emit();
@@ -269,6 +276,7 @@
 					max={8}
 					step={0.1}
 					value={toeWidth}
+					defaultValue={DEFAULT_INVERSION_PARAMS.toeWidth}
 					onchange={(v) => {
 						toeWidth = v;
 						emit();
@@ -282,6 +290,7 @@
 					max={4}
 					step={0.1}
 					value={toeHardness}
+					defaultValue={DEFAULT_INVERSION_PARAMS.toeHardness}
 					onchange={(v) => {
 						toeHardness = v;
 						emit();
@@ -292,8 +301,7 @@
 
 			<!-- Shadow CMY -->
 			<div class="flex flex-col gap-xs">
-				<span class="text-[10px] text-content-subtle">Shadow color</span
-				>
+				<span class="text-xs text-content-subtle">Shadow color</span>
 				<div
 					class="flex flex-col gap-xs pl-xs border-l border-base-subtle"
 				>
@@ -305,6 +313,7 @@
 						max={1}
 						step={0.01}
 						value={shadowCyan}
+						defaultValue={DEFAULT_INVERSION_PARAMS.shadowCyan}
 						onchange={(v) => {
 							shadowCyan = v;
 							emit();
@@ -320,6 +329,7 @@
 						max={1}
 						step={0.01}
 						value={shadowMagenta}
+						defaultValue={DEFAULT_INVERSION_PARAMS.shadowMagenta}
 						onchange={(v) => {
 							shadowMagenta = v;
 							emit();
@@ -335,6 +345,7 @@
 						max={1}
 						step={0.01}
 						value={shadowYellow}
+						defaultValue={DEFAULT_INVERSION_PARAMS.shadowYellow}
 						onchange={(v) => {
 							shadowYellow = v;
 							emit();
@@ -350,7 +361,7 @@
 	<!-- ── Highlights ──────────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-[10px] font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
 		>
 			Highlights
 		</h4>
@@ -362,6 +373,7 @@
 				max={1}
 				step={0.01}
 				value={highlights}
+				defaultValue={DEFAULT_INVERSION_PARAMS.highlights}
 				onchange={(v) => {
 					highlights = v;
 					emit();
@@ -375,6 +387,7 @@
 				max={1}
 				step={0.01}
 				value={shoulder}
+				defaultValue={DEFAULT_INVERSION_PARAMS.shoulder}
 				onchange={(v) => {
 					shoulder = v;
 					emit();
@@ -391,6 +404,7 @@
 					max={8}
 					step={0.1}
 					value={shoulderWidth}
+					defaultValue={DEFAULT_INVERSION_PARAMS.shoulderWidth}
 					onchange={(v) => {
 						shoulderWidth = v;
 						emit();
@@ -404,6 +418,7 @@
 					max={4}
 					step={0.1}
 					value={shoulderHardness}
+					defaultValue={DEFAULT_INVERSION_PARAMS.shoulderHardness}
 					onchange={(v) => {
 						shoulderHardness = v;
 						emit();
@@ -414,9 +429,7 @@
 
 			<!-- Highlight CMY -->
 			<div class="flex flex-col gap-xs">
-				<span class="text-[10px] text-content-subtle"
-					>Highlight color</span
-				>
+				<span class="text-xs text-content-subtle">Highlight color</span>
 				<div
 					class="flex flex-col gap-xs pl-xs border-l border-base-subtle"
 				>
@@ -428,6 +441,7 @@
 						max={1}
 						step={0.01}
 						value={highlightCyan}
+						defaultValue={DEFAULT_INVERSION_PARAMS.highlightCyan}
 						onchange={(v) => {
 							highlightCyan = v;
 							emit();
@@ -443,6 +457,7 @@
 						max={1}
 						step={0.01}
 						value={highlightMagenta}
+						defaultValue={DEFAULT_INVERSION_PARAMS.highlightMagenta}
 						onchange={(v) => {
 							highlightMagenta = v;
 							emit();
@@ -458,6 +473,7 @@
 						max={1}
 						step={0.01}
 						value={highlightYellow}
+						defaultValue={DEFAULT_INVERSION_PARAMS.highlightYellow}
 						onchange={(v) => {
 							highlightYellow = v;
 							emit();

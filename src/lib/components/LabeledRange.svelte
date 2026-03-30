@@ -16,6 +16,8 @@
 		signed?: boolean;
 		/** Smaller text size — for sub-controls like Width/Hardness. */
 		small?: boolean;
+		/** Double-clicking the thumb resets to this value. */
+		defaultValue?: number;
 	}
 
 	let {
@@ -30,6 +32,7 @@
 		labelClass = "text-content-muted",
 		signed = false,
 		small = false,
+		defaultValue,
 	}: Props = $props();
 
 	function fmt(v: number): string {
@@ -37,6 +40,12 @@
 	}
 
 	const textSize = $derived(small ? "text-[10px]" : "text-xs");
+
+	function handleDblClick(): void {
+		if (defaultValue !== undefined) {
+			onchange(defaultValue);
+		}
+	}
 </script>
 
 {#snippet rangeInput(extraClass: string)}
@@ -49,6 +58,7 @@
 		{value}
 		oninput={(e) =>
 			onchange(parseFloat((e.currentTarget as HTMLInputElement).value))}
+		ondblclick={handleDblClick}
 		class="range-track {extraClass}"
 	/>
 {/snippet}
