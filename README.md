@@ -1,43 +1,51 @@
-# Roloc
+# Rolloc
 
-A local-first web app for inverting and managing film negative scans.
-All data stays on your filesystem — no backend, no login, no cloud.
+A local-first desktop app for managing and inverting film negative scans.
+Built with Tauri + SvelteKit. All data stays on your machine — no backend, no login, no cloud.
 
 ## What it does
 
-- Point the app at a directory of JPEG/TIFF scans; it creates a **Roll** and generates thumbnails
-- Browse frames in a filmstrip grid, add ratings (0–5), pick/reject flags, and notes
-- Edit frames with a real-time **WebGPU** render pipeline:
-  - Pass 1 — normalise + invert negative (per-channel exposure compensation)
-  - Pass 2 — 3×3 camera-to-sRGB colour matrix
-  - Pass 3 — tone curve + per-channel RGB curves + gamma encode
-- Roll-level edit defaults with per-frame overrides (non-destructive, originals never touched)
-- Curves edited via a drag-to-edit SVG control-point editor with monotone cubic spline interpolation
+- Point the app at a directory of scans; it builds a **Roll** with auto-generated thumbnails (via a native Rust/Tauri worker pool)
+- Browse frames in a filmstrip grid with virtual scrolling; prefetches neighbours to eliminate flicker
+- Inspect EXIF metadata (aperture, shutter, ISO, film simulation, etc.) in a collapsible panel
+- RGB histogram per frame
+- **Inversion** (NegPy-backed pipeline): normalise → invert → colour matrix → tone/RGB curves → gamma encode
+  - Real-time curves editor (drag control points, monotone cubic spline interpolation)
+  - White balance controls
+  - Per-channel exposure compensation
+  - Roll-level defaults with per-frame overrides; originals never written
+  - Undo / redo
+  - Keyboard shortcuts for common controls
+- Export developed frames
+- Light / dark theme
 
 ## Stack
 
-- **SvelteKit 2** + **Svelte 5** (runes mode) + **TypeScript** (`strict: true`)
-- **Tailwind CSS v4** with semantic `@theme` design tokens (automatic light/dark)
-- **WebGPU** shader pipeline (WGSL)
+- **Tauri 2** (Rust backend) + **SvelteKit 2** + **Svelte 5** (runes mode) + **TypeScript** (`strict: true`)
+- **Tailwind CSS v4** with semantic `@theme` design tokens
 - **IndexedDB** for roll/frame metadata + edit parameters
 - **OPFS** for cached thumbnails and previews
-- **File System Access API** for read-only access to your scan directory
-- No server-side routes — entirely client-side SPA
+- **File System Access API** for read-only access to scan directories
+- Native Rust thumbnail generation (image crate, opt-level 3 in debug)
 
 ## Development
 
 ```sh
 bun install
-bun run dev          # dev server on :5173
+bun run dev          # Vite dev server on :5173 (browser-only mode)
 ```
 
-Requires a browser with WebGPU support (Chrome 113+, Edge 113+, Safari 18+).
+For the full Tauri desktop app, install the [Tauri prerequisites](https://tauri.app/start/prerequisites/) then:
+
+```sh
+bunx tauri dev
+```
 
 ## Commands
 
 ```sh
 bun run dev          # Vite dev server
-bun run build        # production build
+bun run build        # production web build
 bun run preview      # preview production build
 
 bun run check        # svelte-check + tsc (authoritative — 0 errors required)
@@ -66,40 +74,39 @@ bunx vitest run --project client
 ## Project structure
 
 ```
+src-tauri/          # Rust/Tauri backend (thumbnail generation, file I/O)
 src/
   lib/
-    types.ts                  # all domain types + resolveEdit()
+    types.ts        # domain types + resolveEdit()
     db/
-      idb.ts                  # low-level IndexedDB wrapper
-      rolls.ts                # high-level roll operations
+      idb.ts        # low-level IndexedDB wrapper
+      rolls.ts      # high-level roll operations
     fs/
-      directory.ts            # File System Access API
-      opfs.ts                 # OPFS thumb/preview cache
+      directory.ts  # File System Access API
+      opfs.ts       # OPFS thumb/preview cache
     image/
-      pipeline.ts             # WebGPU 3-pass render pipeline
-      thumbgen.ts             # OffscreenCanvas → JPEG → OPFS
-      curves.ts               # monotone cubic spline → 256-entry LUT
-      shaders/
-        invert.wgsl
-        colormatrix.wgsl
-        tonecurve.wgsl
+      pipeline.ts   # inversion render pipeline
+      thumbgen.ts   # OffscreenCanvas → JPEG → OPFS
+      thumb-queue.ts / thumb.worker.ts  # worker pool
+      curves.ts     # monotone cubic spline → 256-entry LUT
     components/
       CurvesEditor.svelte
-      FrameMetaPanel.svelte
-      FrameThumb.svelte
+      RgbHistogram.svelte
+      ExifPanel.svelte
+      InversionControls.svelte
       WhiteBalanceControls.svelte
+      FrameThumb.svelte / FrameMetaPanel.svelte
+      VirtualGrid.svelte
       ...
   routes/
-    +page.svelte              # / — roll library
+    +page.svelte            # / — roll library
+    library/                # library view
     roll/[id]/
-      +page.svelte            # filmstrip grid + metadata panel
-      frame/[frameId]/
-        +page.svelte          # WebGPU editor
+      +page.svelte          # filmstrip grid + metadata panel
+    raw/                    # raw/inversion editor
 ```
-
-See `PLAN.md` for the full phased build plan and current implementation status.
 
 ## Type checking note
 
-The in-editor LSP reports stale false-positive errors (known cache artefact).
+The in-editor LSP may report stale false-positive errors (known cache artefact).
 Always use `bun run check` as the ground truth — if it reports 0 errors the code is correct.
