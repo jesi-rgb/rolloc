@@ -34,6 +34,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyQzQ3RUM0ODlERDNCMkYKUldRdk85Mkp4SDdFUW1mUHVvYjlvTnUwYVNKVHNFMUgwVzJIcVVDS1o3ckVUeVliNlVQbWQxcm0K",
+      "endpoints": [
+        "https://github.com/jesi-rgb/rolloc/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
