@@ -11,9 +11,11 @@
  *   3. Compute Gaussian shadow/highlight masks for localized CMY and density shifts
  *   4. Compute toe / shoulder sigmoid damping → k_mod
  *   5. density = D_max × sigmoid(slope × diff_adj × k_mod)
- *   6. transmittance = 10^(-density)   ← output is linear-light
+ *   6. transmittance = 10^(-density)
+ *   7. output = transmittance^(1/2.2)  ← gamma-encoded (matches negpy)
  *
- * Display gamma / sRGB encode is handled downstream by the tonecurve pass.
+ * The 1/2.2 gamma is part of negpy's paper simulation (not display sRGB).
+ * The tonecurve pass skips its sRGB encode when receiving this output.
  * The "invert" is already baked in by the normalization pass (log stretch).
  * This pass is purely the paper-print simulation.
  *
@@ -91,7 +93,7 @@ fn fast_sigmoid(x : f32) -> f32 {
 }
 
 /// Apply the full H&D pipeline to one channel.
-/// Returns linear-light transmittance in [0, 1].
+/// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
 fn hd_channel(
 	pixel       : f32,
 	pivot       : f32,
@@ -150,8 +152,10 @@ fn hd_channel(
 	// 6. H&D sigmoid → print density
 	let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
 
-	// 7. Density → linear-light transmittance (gamma applied in tonecurve pass)
-	return clamp(pow(10.0, -density), 0.0, 1.0);
+	// 7. Density → transmittance → perceptual (gamma 1/2.2)
+	// Matches negpy: transmittance ** (1.0 / gamma) where gamma = 2.2
+	let transmittance = clamp(pow(10.0, -density), 0.0, 1.0);
+	return pow(transmittance, 1.0 / 2.2);
 }
 
 @fragment

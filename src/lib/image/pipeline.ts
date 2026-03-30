@@ -92,6 +92,13 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 // ─── Log-space percentile computation (NegPy normalization) ──────────────────
 
 /**
+ * Default analysis buffer ratio — matches negpy's ProcessConfig.analysis_buffer.
+ * Crops this fraction of each edge before computing percentiles, excluding the
+ * film rebate border from the analysis.
+ */
+const ANALYSIS_BUFFER = 0.07;
+
+/**
  * Per-channel log-density floor/ceil for the normalization shader.
  * The normalization pass does: normalized = (log10(pixel) - floor) / (ceil - floor)
  * For C-41 negatives: floor ≈ 0.5th percentile, ceil ≈ 99.5th percentile.
@@ -106,27 +113,59 @@ export interface LogPercentiles {
  * Compute per-channel 0.5th / 99.5th log10 percentiles from a Float32Array of
  * linear RGBA pixels (length = w * h * 4, R at [0], G at [1], B at [2]).
  *
+ * When `width` and `height` are provided, an analysis buffer crop is applied
+ * (matching negpy's `analysis_buffer=0.07`) to exclude the film rebate border.
+ *
  * Downsamples by `stride` to keep it fast for large images (default: every 8th pixel).
  */
 function computeLogPercentilesFromF32(
 	pixels: Float32Array,
+	width: number = 0,
+	height: number = 0,
 	stride: number = 8,
 ): LogPercentiles {
 	const LOG10_E = 0.43429448190325183;
 	const eps = 1e-6;
 
-	// Reservoir sample — collect ~2000 values per channel
+	// Reservoir sample — collect log10 values per channel
 	const rLog: number[] = [];
 	const gLog: number[] = [];
 	const bLog: number[] = [];
 
-	for (let i = 0; i < pixels.length; i += 4 * stride) {
-		const r = pixels[i];
-		const g = pixels[i + 1];
-		const b = pixels[i + 2];
-		if (r > eps) rLog.push(Math.log(r) * LOG10_E);
-		if (g > eps) gLog.push(Math.log(g) * LOG10_E);
-		if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+	// Apply analysis buffer crop when dimensions are known.
+	// This excludes the film rebate border from percentile computation,
+	// matching negpy's default analysis_buffer=0.07.
+	const hasDims = width > 0 && height > 0;
+	const cutY = hasDims ? Math.floor(height * ANALYSIS_BUFFER) : 0;
+	const cutX = hasDims ? Math.floor(width * ANALYSIS_BUFFER) : 0;
+	const startY = cutY;
+	const endY   = hasDims ? height - cutY : 0;
+	const startX = cutX;
+	const endX   = hasDims ? width - cutX : 0;
+
+	if (hasDims) {
+		// Iterate in 2D to respect the crop region.
+		for (let y = startY; y < endY; y += stride) {
+			for (let x = startX; x < endX; x += stride) {
+				const i = (y * width + x) * 4;
+				const r = pixels[i];
+				const g = pixels[i + 1];
+				const b = pixels[i + 2];
+				if (r > eps) rLog.push(Math.log(r) * LOG10_E);
+				if (g > eps) gLog.push(Math.log(g) * LOG10_E);
+				if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+			}
+		}
+	} else {
+		// Fallback: no crop, flat iteration (JPEG/TIFF path without known dims).
+		for (let i = 0; i < pixels.length; i += 4 * stride) {
+			const r = pixels[i];
+			const g = pixels[i + 1];
+			const b = pixels[i + 2];
+			if (r > eps) rLog.push(Math.log(r) * LOG10_E);
+			if (g > eps) gLog.push(Math.log(g) * LOG10_E);
+			if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+		}
 	}
 
 	function percentile(arr: number[], p: number): number {
@@ -154,9 +193,13 @@ function computeLogPercentilesFromF32(
  * Compute log percentiles from a Uint16Array of linear u16 RGBA pixels
  * (as returned by `raw_decode`).  Values are divided by 65535 to normalise
  * to [0, 1] before the log transform.
+ *
+ * `width` and `height` are used to apply the analysis buffer crop.
  */
 function computeLogPercentilesFromU16(
 	pixels: Uint16Array,
+	width: number,
+	height: number,
 	stride: number = 8,
 ): LogPercentiles {
 	// Normalise u16 → [0,1] float and reuse the float percentile path.
@@ -167,7 +210,7 @@ function computeLogPercentilesFromU16(
 	for (let i = 0; i < pixels.length; i++) {
 		f32[i] = pixels[i] / 65535.0;
 	}
-	return computeLogPercentilesFromF32(f32, stride);
+	return computeLogPercentilesFromF32(f32, width, height, stride);
 }
 
 /**
@@ -400,8 +443,8 @@ function makeNormalizationUniforms(
  *   _pad1            : f32        @ 120
  *   _pad2            : f32        @ 124
  *
- * Note: gamma is NOT in this struct — hd_curve outputs linear-light transmittance
- * and the tonecurve pass handles sRGB gamma encoding.
+ * Note: gamma is applied here as pow(transmittance, 1/2.2) matching negpy.
+ * The tonecurve pass skips sRGB encode on the negpy path (skipSrgb flag).
  */
 function makeHDCurveUniforms(
 	device: GPUDevice,
@@ -581,7 +624,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			edit.whiteBalance.temperature,
 			edit.whiteBalance.tint,
 		);
-		const toneCurveUniforms = new Float32Array([tcWbR, tcWbG, tcWbB, 1.0]);
+		const toneCurveUniforms = new Float32Array([
+			tcWbR, tcWbG, tcWbB, 1.0,              // wbMultipliers
+			edit.invert ? 1.0 : 0.0, 0.0, 0.0, 0.0, // flags: [skipSrgb, pad, pad, pad]
+		]);
 		const toneCurveUniformBuf = makeUniformBuffer(device, toneCurveUniforms);
 
 		const lutSampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
@@ -766,7 +812,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			const f32 = await bitmapToF32Pixels(bitmap);
-			logPerc = computeLogPercentilesFromF32(f32);
+			logPerc = computeLogPercentilesFromF32(f32, w, h);
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -787,7 +833,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(pixels);
+				logPerc = computeLogPercentilesFromU16(pixels, w, h);
 				lastLogPerc = logPerc;
 			}
 		} else {

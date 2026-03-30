@@ -332,7 +332,7 @@ pub struct RawDecodeMetadata {
 /// If `max_px` is Some(n), the output is downsampled so that neither dimension
 /// exceeds `n` pixels.  Pass the device's `maxTextureDimension2D` limit here.
 #[tauri::command]
-pub async fn raw_decode(path: String, max_px: Option<u32>) -> Result<Response, String> {
+pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>) -> Result<Response, String> {
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         // ── Decode ──────────────────────────────────────────────────────────
         let raw = rawler::decode_file(&path)
@@ -348,18 +348,20 @@ pub async fn raw_decode(path: String, max_px: Option<u32>) -> Result<Response, S
         let whites = raw.whitelevel.as_bayer_array();
 
         // ── As-shot white balance in sensor/CFA space ────────────────────────
-        // Apply WB multipliers to raw pixel values before black/white level
-        // normalisation.  This is the correct place — equivalent to how libraw
-        // applies cam_mul internally before demosaic.  Applying WB after the
-        // colour matrix (post-demosaic in GPU shader) is incorrect because the
-        // matrix is calibrated for unit WB-balanced sensor data.
+        // When skip_wb is true (film inversion pipeline), apply no WB — the
+        // per-channel log-percentile normalization handles orange mask removal
+        // from the raw unbalanced sensor data (matching negpy's approach:
+        // use_camera_wb=False, user_wb=[1,1,1,1]).
         //
-        // wb_coeffs[0]=R, [1]=G1, [2]=B, [3]=G2 (or infrared; NaN on most cameras).
-        // Normalise to G so the G channel is unchanged (factor 1.0).
+        // When skip_wb is false (positive/slide pipeline), apply WB multipliers
+        // to raw pixel values before black/white level normalisation.  This is
+        // the correct place — equivalent to how libraw applies cam_mul internally
+        // before demosaic.
+        let do_skip_wb = skip_wb.unwrap_or(false);
         let wb_raw = raw.wb_coeffs;
         let wb_g = if wb_raw[1].is_finite() && wb_raw[1] > 0.001 { wb_raw[1] } else { 1.0_f32 };
-        let wb_r = if wb_raw[0].is_finite() && wb_raw[0] > 0.001 { wb_raw[0] / wb_g } else { 1.0_f32 };
-        let wb_b = if wb_raw[2].is_finite() && wb_raw[2] > 0.001 { wb_raw[2] / wb_g } else { 1.0_f32 };
+        let wb_r = if do_skip_wb { 1.0_f32 } else if wb_raw[0].is_finite() && wb_raw[0] > 0.001 { wb_raw[0] / wb_g } else { 1.0_f32 };
+        let wb_b = if do_skip_wb { 1.0_f32 } else if wb_raw[2].is_finite() && wb_raw[2] > 0.001 { wb_raw[2] / wb_g } else { 1.0_f32 };
         // channel index → WB multiplier: 0=R, 1/3=G (=1.0), 2=B
         let wb_for_ch = |ch: usize| -> f32 {
             match ch {

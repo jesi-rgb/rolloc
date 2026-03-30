@@ -238,6 +238,7 @@
 					rawBuffer = await invoke<ArrayBuffer>("raw_decode", {
 						path: absolutePath,
 						maxPx,
+						skipWb: roll.rollEdit.invert,
 					});
 				} catch (err) {
 					renderError = `Failed to decode RAW file: ${err instanceof Error ? err.message : String(err)}`;
@@ -685,6 +686,7 @@
 				const fullResBuffer = await invoke<ArrayBuffer>("raw_decode", {
 					path: absolutePath,
 					maxPx: gpuLimit,
+					skipWb: currentRoll.rollEdit.invert,
 				});
 
 				const { width: w, height: h } =

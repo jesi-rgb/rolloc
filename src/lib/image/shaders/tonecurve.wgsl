@@ -18,6 +18,10 @@ const LUT_SIZE : f32 = 256.0;
 struct Uniforms {
 	/// Pre-computed white balance channel multipliers [r, g, b, 1.0]
 	wbMultipliers : vec4<f32>,
+	/// When > 0.5, skip sRGB gamma encode (input is already gamma-encoded
+	/// by the H&D curve pass in the negpy inversion pipeline).
+	/// [skipSrgb, _pad, _pad, _pad]
+	flags : vec4<f32>,
 }
 
 @group(0) @binding(0) var uSampler     : sampler;
@@ -83,12 +87,15 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		lutLookup(uToneLUT, col.b),
 	);
 
-	// 4. sRGB gamma encode for display
-	let srgb = vec3<f32>(
-		linear_to_srgb(col.r),
-		linear_to_srgb(col.g),
-		linear_to_srgb(col.b),
-	);
+	// 4. sRGB gamma encode for display (skip when H&D curve already applied 1/2.2 gamma)
+	var out = col;
+	if (u.flags.x < 0.5) {
+		out = vec3<f32>(
+			linear_to_srgb(col.r),
+			linear_to_srgb(col.g),
+			linear_to_srgb(col.b),
+		);
+	}
 
-	return vec4<f32>(clamp(srgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+	return vec4<f32>(clamp(out, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
