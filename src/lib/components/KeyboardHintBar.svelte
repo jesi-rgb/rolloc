@@ -1,6 +1,10 @@
 <script lang="ts">
+	import type { Component } from "svelte";
+
+	type Key = string | Component;
+
 	interface Hint {
-		keys: string[];
+		keys: Key[];
 		label: string;
 	}
 
@@ -25,8 +29,15 @@
 					       px-xs py-xs min-w-sm
 					       rounded border border-base-subtle bg-base
 					       shadow-[0_2px_0_0_var(--color-base-subtle)]
-					       text-content-muted leading-none">{key}</kbd
+					       text-content-muted leading-none"
 				>
+					{#if typeof key === "string"}
+						{key}
+					{:else}
+						{@const IconComponent = key}
+						<IconComponent size={12} />
+					{/if}
+				</kbd>
 			{/each}
 			{hint.label}
 		</span>

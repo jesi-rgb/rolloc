@@ -7,6 +7,12 @@
 		step: number;
 		value: number;
 		onchange: (v: number) => void;
+		/**
+		 * Called when the user releases the slider (pointer-up / native change
+		 * event). Use this to trigger expensive side-effects like IDB writes
+		 * that should not fire on every drag tick.
+		 */
+		oncommit?: (v: number) => void;
 		/** 'stacked' = label+value above, input below (default).
 		 *  'inline'  = label | input | value in one row. */
 		layout?: "stacked" | "inline";
@@ -28,6 +34,7 @@
 		step,
 		value,
 		onchange,
+		oncommit,
 		layout = "stacked",
 		labelClass = "text-content-muted",
 		signed = false,
@@ -44,6 +51,7 @@
 	function handleDblClick(): void {
 		if (defaultValue !== undefined) {
 			onchange(defaultValue);
+			oncommit?.(defaultValue);
 		}
 	}
 </script>
@@ -58,6 +66,8 @@
 		{value}
 		oninput={(e) =>
 			onchange(parseFloat((e.currentTarget as HTMLInputElement).value))}
+		onchange={(e) =>
+			oncommit?.(parseFloat((e.currentTarget as HTMLInputElement).value))}
 		ondblclick={handleDblClick}
 		class="range-track {extraClass}"
 	/>

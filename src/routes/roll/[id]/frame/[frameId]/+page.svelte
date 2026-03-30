@@ -7,6 +7,13 @@
 	 * Keyboard shortcuts:
 	 *   ← / → (or j / k)  — navigate to prev / next frame
 	 *   Escape             — back to roll
+	 *
+	 * Filmomat-style color controls (mirrors physical keyboard layout):
+	 *   Q / A  — +/− Cyan
+	 *   W / S  — +/− Magenta
+	 *   E / D  — +/− Yellow
+	 *   R / F  — +/− Grade (contrast)
+	 *   T / G  — +/− Density
 	 */
 	import { onMount, onDestroy } from "svelte";
 	import { goto } from "$app/navigation";
@@ -30,11 +37,13 @@
 		CurvePoints,
 		WhiteBalance,
 		InversionParams,
+		EffectiveEdit,
 	} from "$lib/types";
 	import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
 	import CurvesEditor from "$lib/components/CurvesEditor.svelte";
 	import InversionControls from "$lib/components/InversionControls.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
+	import { ArrowFatUpIcon } from "phosphor-svelte";
 
 	// ─── Undo / redo history ──────────────────────────────────────────────────
 
@@ -117,18 +126,27 @@
 	 * Truncates any "future" entries if we're mid-stack (after undoing).
 	 * Clamps the stack to HISTORY_MAX entries.
 	 */
-	function historyPush(frameEdit: FrameEditOverrides, rollEdit: RollEditParams): void {
+	function historyPush(
+		frameEdit: FrameEditOverrides,
+		rollEdit: RollEditParams,
+	): void {
 		// Drop everything after the cursor (future history).
 		const base = historyStack.slice(0, historyCursor + 1);
 		const next = [...base, { frameEdit, rollEdit }];
 		// Cap length — drop oldest entries from the front.
-		const capped = next.length > HISTORY_MAX ? next.slice(next.length - HISTORY_MAX) : next;
+		const capped =
+			next.length > HISTORY_MAX
+				? next.slice(next.length - HISTORY_MAX)
+				: next;
 		historyStack = capped;
 		historyCursor = capped.length - 1;
 	}
 
 	/** Seed history with the initial loaded state (no undo past load). */
-	function historyInit(frameEdit: FrameEditOverrides, rollEdit: RollEditParams): void {
+	function historyInit(
+		frameEdit: FrameEditOverrides,
+		rollEdit: RollEditParams,
+	): void {
 		historyStack = [{ frameEdit, rollEdit }];
 		historyCursor = 0;
 	}
@@ -136,18 +154,18 @@
 	async function applyHistoryEntry(entry: HistoryEntry): Promise<void> {
 		if (!frame || !roll) return;
 		const newFrame: Frame = {
-			...JSON.parse(JSON.stringify($state.snapshot(frame))) as Frame,
+			...($state.snapshot(frame) as Frame),
 			frameEdit: entry.frameEdit,
 		};
 		const newRoll: Roll = {
-			...JSON.parse(JSON.stringify($state.snapshot(roll))) as Roll,
+			...($state.snapshot(roll) as Roll),
 			rollEdit: entry.rollEdit,
 		};
 		frame = newFrame;
 		roll = newRoll;
 		await Promise.all([
-			putFrame(JSON.parse(JSON.stringify(newFrame)) as Frame),
-			updateRoll(JSON.parse(JSON.stringify(newRoll)) as Roll),
+			putFrame(structuredClone(newFrame)),
+			updateRoll(structuredClone(newRoll)),
 		]);
 		renderFrame();
 	}
@@ -197,8 +215,8 @@
 			// Seed undo history with the state loaded from the database.
 			// Do this before any auto-matrix save so the initial state is index 0.
 			historyInit(
-				JSON.parse(JSON.stringify(frame.frameEdit)) as FrameEditOverrides,
-				JSON.parse(JSON.stringify(roll.rollEdit)) as RollEditParams,
+				$state.snapshot(frame.frameEdit) as FrameEditOverrides,
+				$state.snapshot(roll.rollEdit) as RollEditParams,
 			);
 
 			// ── Load full-res image ──────────────────────────────────────────
@@ -333,9 +351,9 @@
 
 	// ─── Re-render whenever the effective edit changes ────────────────────────
 
-	function renderFrame(): void {
+	function renderFrame(editOverride?: EffectiveEdit): void {
 		if (!pipeline || !roll || !frame) return;
-		const edit = resolveEdit(roll, frame);
+		const edit = editOverride ?? resolveEdit(roll, frame);
 		if (currentRawBuffer) {
 			console.debug(
 				"[frame] renderFrame: RAW path, byteLength =",
@@ -473,32 +491,31 @@
 
 	async function saveEdit(patch: Partial<FrameEditOverrides>): Promise<void> {
 		if (!frame || !roll) return;
-		const snap = JSON.parse(
-			JSON.stringify($state.snapshot(frame)),
-		) as Frame;
+		const snap = $state.snapshot(frame) as Frame;
 		const updatedEdit: FrameEditOverrides = { ...snap.frameEdit, ...patch };
 		const updated: Frame = { ...snap, frameEdit: updatedEdit };
 		// Push the *new* state onto history before mutating reactive state.
 		historyPush(
-			JSON.parse(JSON.stringify(updatedEdit)) as FrameEditOverrides,
-			JSON.parse(JSON.stringify($state.snapshot(roll).rollEdit)) as RollEditParams,
+			structuredClone(updatedEdit),
+			$state.snapshot(roll).rollEdit as RollEditParams,
 		);
 		frame = updated;
-		await putFrame(JSON.parse(JSON.stringify(updated)) as Frame);
+		await putFrame(structuredClone(updated));
 		renderFrame();
 	}
 
 	async function saveRollEdit(patch: Partial<RollEditParams>): Promise<void> {
 		if (!roll || !frame) return;
-		const snap = JSON.parse(JSON.stringify($state.snapshot(roll))) as Roll;
+		const snap = $state.snapshot(roll) as Roll;
 		const updatedRollEdit: RollEditParams = { ...snap.rollEdit, ...patch };
-		roll = { ...snap, rollEdit: updatedRollEdit };
+		const updatedRoll: Roll = { ...snap, rollEdit: updatedRollEdit };
+		roll = updatedRoll;
 		// Push the *new* state onto history before mutating reactive state.
 		historyPush(
-			JSON.parse(JSON.stringify($state.snapshot(frame).frameEdit)) as FrameEditOverrides,
-			JSON.parse(JSON.stringify(updatedRollEdit)) as RollEditParams,
+			$state.snapshot(frame).frameEdit as FrameEditOverrides,
+			structuredClone(updatedRollEdit),
 		);
-		await updateRoll(JSON.parse(JSON.stringify(roll)) as Roll);
+		await updateRoll(structuredClone(updatedRoll));
 		renderFrame();
 	}
 
@@ -506,8 +523,75 @@
 		saveEdit({ whiteBalance: wb });
 	}
 
+	/**
+	 * Live preview while dragging an inversion slider.
+	 * Renders the GPU canvas immediately with patched params — zero reactive
+	 * state mutations, zero IDB writes, zero Svelte re-renders.
+	 */
 	function onInversionChange(params: InversionParams): void {
-		saveEdit({ inversionParams: params });
+		if (!roll || !frame) return;
+		const edit = resolveEdit(roll, frame);
+		renderFrame({ ...edit, inversionParams: params });
+	}
+
+	/** 500ms debounce handle — coalesces rapid commits into one IDB write + history entry. */
+	let inversionCommitTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Apply inversion params immediately (updates frame state + GPU render),
+	 * then debounce the IDB write + history push by 500ms so rapid changes
+	 * (key-hold, quick taps) coalesce into a single undo entry.
+	 */
+	function onInversionCommit(params: InversionParams): void {
+		if (!frame || !roll) return;
+		// Apply immediately — update frame state so sliders and derived values
+		// reflect the new value right away, without waiting for the IDB write.
+		const snap = $state.snapshot(frame) as Frame;
+		frame = {
+			...snap,
+			frameEdit: { ...snap.frameEdit, inversionParams: params },
+		};
+		// Re-render from the now-updated frame state.
+		renderFrame();
+		// Debounce the expensive work: IDB write + history push.
+		if (inversionCommitTimer !== null) clearTimeout(inversionCommitTimer);
+		inversionCommitTimer = setTimeout(() => {
+			inversionCommitTimer = null;
+			if (!frame || !roll) return;
+			const s = $state.snapshot(frame) as Frame;
+			historyPush(
+				structuredClone(s.frameEdit) as FrameEditOverrides,
+				$state.snapshot(roll).rollEdit as RollEditParams,
+			);
+			putFrame(structuredClone(s)).catch((err: unknown) => {
+				console.error("[inversion] putFrame failed:", err);
+			});
+		}, 500);
+	}
+
+	// ─── Fine-tune helpers (Filmomat keyboard layout) ─────────────────────────
+
+	/**
+	 * Nudge a single inversion parameter by `delta`, clamped to [min, max].
+	 * When `shift` is true the delta is multiplied by 10 for quicker coarse iteration.
+	 * Applies immediately via onInversionCommit (instant frame state update +
+	 * GPU render) with debounced IDB persist.
+	 */
+	function nudgeInversion(
+		key: keyof InversionParams,
+		delta: number,
+		min: number,
+		max: number,
+		shift: boolean = false,
+	): void {
+		if (!roll || !frame) return;
+		// Always read from current frame state — it is updated immediately on
+		// every nudge so successive taps accumulate correctly.
+		const current = effectiveInversionParams;
+		const raw = (current[key] as number) + delta * (shift ? 10 : 1);
+		const clamped =
+			Math.round(Math.min(max, Math.max(min, raw)) * 1000) / 1000;
+		onInversionCommit({ ...current, [key]: clamped });
 	}
 
 	type Channel = "global" | "r" | "g" | "b";
@@ -687,9 +771,29 @@
 		goto(`/roll/${rollId}/frame/${target.id}`);
 	}
 
+	/** Throttle map: last timestamp each hotkey was processed (ms). */
+	const keyLastFired = new Map<string, number>();
+	const KEY_THROTTLE_MS = 150;
+
 	async function handleKeydown(e: KeyboardEvent): Promise<void> {
-		const tag = (e.target as HTMLElement | null)?.tagName;
-		if (tag === "INPUT" || tag === "TEXTAREA") return;
+		const el = e.target as HTMLElement | null;
+		const tag = el?.tagName;
+		if (tag === "TEXTAREA") return;
+		if (tag === "INPUT") {
+			const inputType = (el as HTMLInputElement).type;
+			if (inputType !== "range") return;
+			// For range inputs, block only the keys that move the slider vertically
+			// or jump to endpoints — ArrowLeft/Right are reserved for frame navigation.
+			const rangeNativeKeys = new Set([
+				"ArrowUp",
+				"ArrowDown",
+				"Home",
+				"End",
+				"PageUp",
+				"PageDown",
+			]);
+			if (rangeNativeKeys.has(e.key)) return;
+		}
 
 		// Undo / redo — intercept before other single-key shortcuts.
 		if (e.key === "z" && (e.metaKey || e.ctrlKey)) {
@@ -708,6 +812,62 @@
 		}
 
 		switch (e.key) {
+			// ── Filmomat-style color controls ──────────────────────────────────
+			// Top row (Q–Y) = positive nudges; bottom row (A–H) = negative nudges.
+			// Q/A → Cyan  |  W/S → Magenta  |  E/D → Yellow
+			// R/F → Grade  |  T/G → Density
+			// Hold Shift for 10× step.
+			case "q": case "Q":
+			case "a": case "A":
+			case "w": case "W":
+			case "s": case "S":
+			case "e": case "E":
+			case "d": case "D":
+			case "r": case "R":
+			case "f": case "F":
+			case "t": case "T":
+			case "g": case "G": {
+				// Throttle nudge keys to KEY_THROTTLE_MS to prevent runaway key-repeat.
+				const k = e.key.toLowerCase();
+				const now = performance.now();
+				if (now - (keyLastFired.get(k) ?? 0) < KEY_THROTTLE_MS) return;
+				keyLastFired.set(k, now);
+				e.preventDefault();
+				switch (k) {
+					case "q":
+						nudgeInversion("cmyCyan", +0.01, -1, 1, e.shiftKey);
+						break;
+					case "a":
+						nudgeInversion("cmyCyan", -0.01, -1, 1, e.shiftKey);
+						break;
+					case "w":
+						nudgeInversion("cmyMagenta", +0.01, -1, 1, e.shiftKey);
+						break;
+					case "s":
+						nudgeInversion("cmyMagenta", -0.01, -1, 1, e.shiftKey);
+						break;
+					case "e":
+						nudgeInversion("cmyYellow", +0.01, -1, 1, e.shiftKey);
+						break;
+					case "d":
+						nudgeInversion("cmyYellow", -0.01, -1, 1, e.shiftKey);
+						break;
+					case "r":
+						nudgeInversion("grade", +0.1, 0, 10, e.shiftKey);
+						break;
+					case "f":
+						nudgeInversion("grade", -0.1, 0, 10, e.shiftKey);
+						break;
+					case "t":
+						nudgeInversion("density", +0.01, 0, 10, e.shiftKey);
+						break;
+					case "g":
+						nudgeInversion("density", -0.01, 0, 10, e.shiftKey);
+						break;
+				}
+				break;
+			}
+			// ── Frame navigation ───────────────────────────────────────────────
 			case "ArrowLeft":
 			case "k":
 				e.preventDefault();
@@ -939,7 +1099,21 @@
 								       hover:border-content-muted hover:text-content
 								       disabled:opacity-30 disabled:cursor-not-allowed"
 							>
-								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									width="12"
+									height="12"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+									><path d="M3 7v6h6" /><path
+										d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"
+									/></svg
+								>
 								Undo
 							</button>
 							<button
@@ -954,7 +1128,21 @@
 								       disabled:opacity-30 disabled:cursor-not-allowed"
 							>
 								Redo
-								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									width="12"
+									height="12"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									aria-hidden="true"
+									><path d="M21 7v6h-6" /><path
+										d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"
+									/></svg
+								>
 							</button>
 						</div>
 					</section>
@@ -1029,6 +1217,7 @@
 							<InversionControls
 								value={effectiveInversionParams}
 								onChange={onInversionChange}
+								onCommit={onInversionCommit}
 							/>
 						</section>
 					{/if}
@@ -1108,6 +1297,10 @@
 	<KeyboardHintBar
 		hints={[
 			{ keys: ["←", "→"], label: "navigate frames" },
+			{ keys: ["Q–E", "A–D"], label: "+/− CMY" },
+			{ keys: ["R", "F"], label: "+/− grade" },
+			{ keys: ["T", "G"], label: "+/− density" },
+			{ keys: [ArrowFatUpIcon], label: "10× step" },
 			{ keys: ["⌘Z"], label: "undo" },
 			{ keys: ["⌘⇧Z"], label: "redo" },
 			{ keys: ["Esc"], label: "back to roll" },

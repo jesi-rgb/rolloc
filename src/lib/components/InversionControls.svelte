@@ -6,10 +6,17 @@
 
 	interface Props {
 		value: InversionParams;
+		/** Called on every drag tick — for live GPU preview. No IDB write. */
 		onChange: (p: InversionParams) => void;
+		/**
+		 * Called once when the user releases a slider (drag-end).
+		 * Trigger IDB persist + history push here to avoid flooding the DB.
+		 * Falls back to `onChange` if not provided (backwards-compatible).
+		 */
+		onCommit?: (p: InversionParams) => void;
 	}
 
-	let { value, onChange }: Props = $props();
+	let { value, onChange, onCommit }: Props = $props();
 
 	// ─── Local reactive copies (untrack to avoid "only captures initial value" warning) ───
 
@@ -58,8 +65,9 @@
 		shoulderHardness = value.shoulderHardness;
 	});
 
-	function emit(): void {
-		onChange({
+	/** Build the current params object. */
+	function currentParams(): InversionParams {
+		return {
 			density,
 			grade,
 			cmyCyan,
@@ -79,7 +87,17 @@
 			shoulder,
 			shoulderWidth,
 			shoulderHardness,
-		});
+		};
+	}
+
+	/** Called on every drag tick — live GPU preview, no IDB write. */
+	function emit(): void {
+		onChange(currentParams());
+	}
+
+	/** Called on slider drag-end — triggers IDB persist + history push. */
+	function commit(): void {
+		(onCommit ?? onChange)(currentParams());
 	}
 
 	function reset(): void {
@@ -103,7 +121,8 @@
 		shoulder = d.shoulder;
 		shoulderWidth = d.shoulderWidth;
 		shoulderHardness = d.shoulderHardness;
-		emit();
+		// Reset is a discrete action — commit immediately so it persists + adds to history.
+		commit();
 	}
 
 	const isDefault = $derived(
@@ -157,6 +176,7 @@
 					cmyCyan = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 				labelClass="text-[#00bcd4]"
 			/>
@@ -172,6 +192,7 @@
 					cmyMagenta = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 				labelClass="text-[#e91e63]"
 			/>
@@ -187,6 +208,7 @@
 					cmyYellow = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 				labelClass="text-[#ffeb3b]"
 			/>
@@ -213,6 +235,7 @@
 					density = v;
 					emit();
 				}}
+				oncommit={commit}
 			/>
 			<LabeledRange
 				id="inv-grade"
@@ -226,6 +249,7 @@
 					grade = v;
 					emit();
 				}}
+				oncommit={commit}
 			/>
 		</div>
 	</section>
@@ -250,6 +274,7 @@
 					shadows = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 			/>
 			<LabeledRange
@@ -264,6 +289,7 @@
 					toe = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 			/>
 
@@ -281,6 +307,7 @@
 						toeWidth = v;
 						emit();
 					}}
+					oncommit={commit}
 					small
 				/>
 				<LabeledRange
@@ -295,6 +322,7 @@
 						toeHardness = v;
 						emit();
 					}}
+					oncommit={commit}
 					small
 				/>
 			</div>
@@ -318,6 +346,7 @@
 							shadowCyan = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#00bcd4]"
 					/>
@@ -334,6 +363,7 @@
 							shadowMagenta = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#e91e63]"
 					/>
@@ -350,6 +380,7 @@
 							shadowYellow = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#ffeb3b]"
 					/>
@@ -378,6 +409,7 @@
 					highlights = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 			/>
 			<LabeledRange
@@ -392,6 +424,7 @@
 					shoulder = v;
 					emit();
 				}}
+				oncommit={commit}
 				signed
 			/>
 
@@ -409,6 +442,7 @@
 						shoulderWidth = v;
 						emit();
 					}}
+					oncommit={commit}
 					small
 				/>
 				<LabeledRange
@@ -423,6 +457,7 @@
 						shoulderHardness = v;
 						emit();
 					}}
+					oncommit={commit}
 					small
 				/>
 			</div>
@@ -446,6 +481,7 @@
 							highlightCyan = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#00bcd4]"
 					/>
@@ -462,6 +498,7 @@
 							highlightMagenta = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#e91e63]"
 					/>
@@ -478,6 +515,7 @@
 							highlightYellow = v;
 							emit();
 						}}
+						oncommit={commit}
 						signed
 						labelClass="text-[#ffeb3b]"
 					/>
