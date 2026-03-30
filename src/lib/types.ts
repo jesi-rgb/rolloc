@@ -310,8 +310,12 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		lightSourceTemp:      r.lightSourceTemp,
 		exposureCompensation: f.exposureCompensation ?? 0,
 		whiteBalance:         f.whiteBalance         ?? DEFAULT_WHITE_BALANCE,
-		toneCurve:            f.toneCurve            ?? r.baseToneCurve,
-		rgbCurves:            f.rgbCurves            ?? r.baseRGBCurves,
+		toneCurve:            f.toneCurve            ?? r.baseToneCurve ?? identityCurve,
+		// Guard against old DB records where baseRGBCurves may be missing.
+		rgbCurves:
+			f.rgbCurves ??
+			((r as { baseRGBCurves?: [CurvePoints, CurvePoints, CurvePoints] }).baseRGBCurves ??
+				[identityCurve, identityCurve, identityCurve]),
 		invert:               r.invert,
 		// Per-frame override wins; fall back to roll default; guard against old DB records.
 		inversionParams:

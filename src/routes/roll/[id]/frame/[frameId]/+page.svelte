@@ -36,6 +36,23 @@
 	import InversionControls from "$lib/components/InversionControls.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 
+	// ─── Undo / redo history ──────────────────────────────────────────────────
+
+	interface HistoryEntry {
+		frameEdit: FrameEditOverrides;
+		rollEdit: RollEditParams;
+	}
+
+	const HISTORY_MAX = 100;
+
+	/** Ring of snapshots; index 0 = oldest retained entry. */
+	let historyStack = $state<HistoryEntry[]>([]);
+	/** Points at the entry that represents the *current* state. */
+	let historyCursor = $state(-1);
+
+	const canUndo = $derived(historyCursor > 0);
+	const canRedo = $derived(historyCursor < historyStack.length - 1);
+
 	// ─── Route params ──────────────────────────────────────────────────────────
 
 	const rollId = $derived(page.params.id ?? "");
@@ -93,6 +110,60 @@
 			});
 	});
 
+	// ─── History helpers ──────────────────────────────────────────────────────
+
+	/**
+	 * Push the current frame/roll edit state onto the history stack.
+	 * Truncates any "future" entries if we're mid-stack (after undoing).
+	 * Clamps the stack to HISTORY_MAX entries.
+	 */
+	function historyPush(frameEdit: FrameEditOverrides, rollEdit: RollEditParams): void {
+		// Drop everything after the cursor (future history).
+		const base = historyStack.slice(0, historyCursor + 1);
+		const next = [...base, { frameEdit, rollEdit }];
+		// Cap length — drop oldest entries from the front.
+		const capped = next.length > HISTORY_MAX ? next.slice(next.length - HISTORY_MAX) : next;
+		historyStack = capped;
+		historyCursor = capped.length - 1;
+	}
+
+	/** Seed history with the initial loaded state (no undo past load). */
+	function historyInit(frameEdit: FrameEditOverrides, rollEdit: RollEditParams): void {
+		historyStack = [{ frameEdit, rollEdit }];
+		historyCursor = 0;
+	}
+
+	async function applyHistoryEntry(entry: HistoryEntry): Promise<void> {
+		if (!frame || !roll) return;
+		const newFrame: Frame = {
+			...JSON.parse(JSON.stringify($state.snapshot(frame))) as Frame,
+			frameEdit: entry.frameEdit,
+		};
+		const newRoll: Roll = {
+			...JSON.parse(JSON.stringify($state.snapshot(roll))) as Roll,
+			rollEdit: entry.rollEdit,
+		};
+		frame = newFrame;
+		roll = newRoll;
+		await Promise.all([
+			putFrame(JSON.parse(JSON.stringify(newFrame)) as Frame),
+			updateRoll(JSON.parse(JSON.stringify(newRoll)) as Roll),
+		]);
+		renderFrame();
+	}
+
+	async function undo(): Promise<void> {
+		if (!canUndo) return;
+		historyCursor -= 1;
+		await applyHistoryEntry(historyStack[historyCursor]);
+	}
+
+	async function redo(): Promise<void> {
+		if (!canRedo) return;
+		historyCursor += 1;
+		await applyHistoryEntry(historyStack[historyCursor]);
+	}
+
 	// ─── Load frame data + image whenever frameId changes ─────────────────────
 
 	$effect(() => {
@@ -103,6 +174,9 @@
 
 		loading = true;
 		renderError = null;
+		// Clear history on frame navigation — history is per-frame, in-memory only.
+		historyStack = [];
+		historyCursor = -1;
 
 		async function load(): Promise<void> {
 			const [r, f, allFrames] = await Promise.all([
@@ -119,6 +193,13 @@
 				loading = false;
 				return;
 			}
+
+			// Seed undo history with the state loaded from the database.
+			// Do this before any auto-matrix save so the initial state is index 0.
+			historyInit(
+				JSON.parse(JSON.stringify(frame.frameEdit)) as FrameEditOverrides,
+				JSON.parse(JSON.stringify(roll.rollEdit)) as RollEditParams,
+			);
 
 			// ── Load full-res image ──────────────────────────────────────────
 			// For RAW files: invoke raw_decode to get linear u16 pixel data.
@@ -391,23 +472,32 @@
 	// ─── Edit helpers ──────────────────────────────────────────────────────────
 
 	async function saveEdit(patch: Partial<FrameEditOverrides>): Promise<void> {
-		if (!frame) return;
+		if (!frame || !roll) return;
 		const snap = JSON.parse(
 			JSON.stringify($state.snapshot(frame)),
 		) as Frame;
-		const updated: Frame = {
-			...snap,
-			frameEdit: { ...snap.frameEdit, ...patch },
-		};
+		const updatedEdit: FrameEditOverrides = { ...snap.frameEdit, ...patch };
+		const updated: Frame = { ...snap, frameEdit: updatedEdit };
+		// Push the *new* state onto history before mutating reactive state.
+		historyPush(
+			JSON.parse(JSON.stringify(updatedEdit)) as FrameEditOverrides,
+			JSON.parse(JSON.stringify($state.snapshot(roll).rollEdit)) as RollEditParams,
+		);
 		frame = updated;
 		await putFrame(JSON.parse(JSON.stringify(updated)) as Frame);
 		renderFrame();
 	}
 
 	async function saveRollEdit(patch: Partial<RollEditParams>): Promise<void> {
-		if (!roll) return;
+		if (!roll || !frame) return;
 		const snap = JSON.parse(JSON.stringify($state.snapshot(roll))) as Roll;
-		roll = { ...snap, rollEdit: { ...snap.rollEdit, ...patch } };
+		const updatedRollEdit: RollEditParams = { ...snap.rollEdit, ...patch };
+		roll = { ...snap, rollEdit: updatedRollEdit };
+		// Push the *new* state onto history before mutating reactive state.
+		historyPush(
+			JSON.parse(JSON.stringify($state.snapshot(frame).frameEdit)) as FrameEditOverrides,
+			JSON.parse(JSON.stringify(updatedRollEdit)) as RollEditParams,
+		);
 		await updateRoll(JSON.parse(JSON.stringify(roll)) as Roll);
 		renderFrame();
 	}
@@ -601,6 +691,22 @@
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === "INPUT" || tag === "TEXTAREA") return;
 
+		// Undo / redo — intercept before other single-key shortcuts.
+		if (e.key === "z" && (e.metaKey || e.ctrlKey)) {
+			e.preventDefault();
+			if (e.shiftKey) {
+				await redo();
+			} else {
+				await undo();
+			}
+			return;
+		}
+		if (e.key === "y" && (e.metaKey || e.ctrlKey)) {
+			e.preventDefault();
+			await redo();
+			return;
+		}
+
 		switch (e.key) {
 			case "ArrowLeft":
 			case "k":
@@ -649,13 +755,17 @@
 				{ x: 1, y: 1 },
 			],
 		};
-		if (!frame || !roll)
-			return [identity, identity, identity] as [
-				typeof identity,
-				typeof identity,
-				typeof identity,
-			];
-		return resolveEdit(roll, frame).rgbCurves;
+		const fallback: [typeof identity, typeof identity, typeof identity] = [
+			identity,
+			identity,
+			identity,
+		];
+		if (!frame || !roll) return fallback;
+		const curves = resolveEdit(roll, frame).rgbCurves;
+		// Guard against old DB records or transient undo state where baseRGBCurves
+		// may be undefined or a partial array.
+		if (!Array.isArray(curves) || curves.length < 3) return fallback;
+		return curves as [typeof identity, typeof identity, typeof identity];
 	});
 
 	const effectiveInversionParams = $derived.by(() => {
@@ -815,6 +925,40 @@
 		>
 			<div class="flex flex-col gap-l p-l">
 				{#if roll && frame}
+					<!-- Undo / Redo -->
+					<section>
+						<div class="flex items-center gap-xs">
+							<button
+								onclick={undo}
+								disabled={!canUndo}
+								title="Undo (Ctrl+Z)"
+								aria-label="Undo"
+								class="flex-1 flex items-center justify-center gap-xs
+								       px-sm py-xs rounded border text-xs transition
+								       border-base-subtle text-content-muted
+								       hover:border-content-muted hover:text-content
+								       disabled:opacity-30 disabled:cursor-not-allowed"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+								Undo
+							</button>
+							<button
+								onclick={redo}
+								disabled={!canRedo}
+								title="Redo (Ctrl+Shift+Z)"
+								aria-label="Redo"
+								class="flex-1 flex items-center justify-center gap-xs
+								       px-sm py-xs rounded border text-xs transition
+								       border-base-subtle text-content-muted
+								       hover:border-content-muted hover:text-content
+								       disabled:opacity-30 disabled:cursor-not-allowed"
+							>
+								Redo
+								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+							</button>
+						</div>
+					</section>
+
 					<!-- Negative inversion toggle -->
 					<section>
 						<label class="flex items-center gap-sm cursor-pointer">
@@ -964,6 +1108,8 @@
 	<KeyboardHintBar
 		hints={[
 			{ keys: ["←", "→"], label: "navigate frames" },
+			{ keys: ["⌘Z"], label: "undo" },
+			{ keys: ["⌘⇧Z"], label: "redo" },
 			{ keys: ["Esc"], label: "back to roll" },
 		]}
 	/>
