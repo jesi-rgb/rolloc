@@ -11,9 +11,9 @@
  *   3. Compute Gaussian shadow/highlight masks for localized CMY and density shifts
  *   4. Compute toe / shoulder sigmoid damping → k_mod
  *   5. density = D_max × sigmoid(slope × diff_adj × k_mod)
- *   6. transmittance = 10^(-density)
- *   7. output = transmittance^(1/γ)    [γ = 2.2, display gamma]
+ *   6. transmittance = 10^(-density)   ← output is linear-light
  *
+ * Display gamma / sRGB encode is handled downstream by the tonecurve pass.
  * The "invert" is already baked in by the normalization pass (log stretch).
  * This pass is purely the paper-print simulation.
  *
@@ -32,9 +32,9 @@
  *   shadows       : f32         @ 104                →  4 bytes
  *   highlights    : f32         @ 108                →  4 bytes
  *   dMax          : f32         @ 112                →  4 bytes
- *   gamma         : f32         @ 116                →  4 bytes
- *   _pad0         : f32         @ 120                →  4 bytes
- *   _pad1         : f32         @ 124                →  4 bytes
+ *   _pad0         : f32         @ 116                →  4 bytes
+ *   _pad1         : f32         @ 120                →  4 bytes
+ *   _pad2         : f32         @ 124                →  4 bytes
  *   struct size = 128 bytes
  */
 
@@ -53,9 +53,9 @@ struct HDCurveUniforms {
 	shadows          : f32,
 	highlights       : f32,
 	dMax             : f32,
-	gamma            : f32,
 	_pad0            : f32,
 	_pad1            : f32,
+	_pad2            : f32,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -91,6 +91,7 @@ fn fast_sigmoid(x : f32) -> f32 {
 }
 
 /// Apply the full H&D pipeline to one channel.
+/// Returns linear-light transmittance in [0, 1].
 fn hd_channel(
 	pixel       : f32,
 	pivot       : f32,
@@ -107,7 +108,6 @@ fn hd_channel(
 	shadows     : f32,
 	highlights  : f32,
 	d_max       : f32,
-	inv_gamma   : f32,
 ) -> f32 {
 	let eps = 1e-6;
 
@@ -150,37 +150,34 @@ fn hd_channel(
 	// 6. H&D sigmoid → print density
 	let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
 
-	// 7. Density → transmittance → display gamma
-	let transmittance = pow(10.0, -density);
-	return clamp(pow(max(transmittance, 0.0), inv_gamma), 0.0, 1.0);
+	// 7. Density → linear-light transmittance (gamma applied in tonecurve pass)
+	return clamp(pow(10.0, -density), 0.0, 1.0);
 }
 
 @fragment
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let color = textureSample(uTexture, uSampler, in.uv).rgb;
 
-	let inv_gamma = 1.0 / u.gamma;
-
 	let r = hd_channel(
 		color.r, u.pivots.r, u.slopes.r,
 		u.cmyOffsets.r, u.shadowCmy.r, u.highlightCmy.r,
 		u.toe, u.toeWidth, u.toeHardness,
 		u.shoulder, u.shoulderWidth, u.shoulderHardness,
-		u.shadows, u.highlights, u.dMax, inv_gamma,
+		u.shadows, u.highlights, u.dMax,
 	);
 	let g = hd_channel(
 		color.g, u.pivots.g, u.slopes.g,
 		u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
 		u.toe, u.toeWidth, u.toeHardness,
 		u.shoulder, u.shoulderWidth, u.shoulderHardness,
-		u.shadows, u.highlights, u.dMax, inv_gamma,
+		u.shadows, u.highlights, u.dMax,
 	);
 	let b = hd_channel(
 		color.b, u.pivots.b, u.slopes.b,
 		u.cmyOffsets.b, u.shadowCmy.b, u.highlightCmy.b,
 		u.toe, u.toeWidth, u.toeHardness,
 		u.shoulder, u.shoulderWidth, u.shoulderHardness,
-		u.shadows, u.highlights, u.dMax, inv_gamma,
+		u.shadows, u.highlights, u.dMax,
 	);
 
 	return vec4<f32>(r, g, b, 1.0);

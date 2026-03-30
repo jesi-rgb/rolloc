@@ -7,13 +7,15 @@
  *   Pass 2 (colormatrix)  — 3×3 camera-to-sRGB colour matrix
  *   Pass 3 (tonecurve)    — white balance + RGB curves + global tone curve + γ encode
  *
- * Negative (invert = true) — 5-pass NegPy pipeline:
+ * Negative (invert = true) — 4-pass NegPy pipeline:
  *   Pass 0 (ingest_raw)     — rgba16uint linear → rgba16float  [RAW path only]
  *   Pass 1 (normalization)  — log10 conversion + per-channel percentile stretch
  *                             (removes orange mask, inverts negative)
  *   Pass 2 (hd_curve)       — H&D sigmoid: CMY timing + toe/shoulder + paper response
- *   Pass 3 (colormatrix)    — 3×3 camera-to-sRGB colour matrix
- *   Pass 4 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
+ *                             outputs linear-light transmittance (no gamma here)
+ *   Pass 3 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
+ *                             (colormatrix skipped — per-channel stretch already neutralises
+ *                              the orange mask; cam→sRGB matrix would re-introduce cast)
  *
  * Usage:
  *   const gpu = await createPipeline(canvas);
@@ -42,8 +44,6 @@ const DENSITY_MULTIPLIER = 0.2;
 const GRADE_MULTIPLIER = 2.0;
 /** Maximum print density (D_max) — deepest black photographic paper can produce. */
 const D_MAX = 4.0;
-/** Display gamma for the final output. */
-const DISPLAY_GAMMA = 2.2;
 
 // ─── White balance helpers ─────────────────────────────────────────────────────
 
@@ -396,9 +396,12 @@ function makeNormalizationUniforms(
  *   shadows          : f32        @ 104
  *   highlights       : f32        @ 108
  *   dMax             : f32        @ 112
- *   gamma            : f32        @ 116
- *   _pad0            : f32        @ 120
- *   _pad1            : f32        @ 124
+ *   _pad0            : f32        @ 116
+ *   _pad1            : f32        @ 120
+ *   _pad2            : f32        @ 124
+ *
+ * Note: gamma is NOT in this struct — hd_curve outputs linear-light transmittance
+ * and the tonecurve pass handles sRGB gamma encoding.
  */
 function makeHDCurveUniforms(
 	device: GPUDevice,
@@ -409,9 +412,6 @@ function makeHDCurveUniforms(
 	//   pivot          = 1.0 - exposure_shift
 	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
 	// At defaults (density=1.0, grade=2.0): pivot=0.7, slope=5.0.
-	// Using density directly as pivot (old behaviour) placed the midpoint at 0.5,
-	// which maps mid-tones to D = D_MAX * sigmoid(0) = D_MAX/2 = 2.0 →
-	// transmittance = 10^(-2) = 0.01 → nearly black output.
 	const pivot = 1.0 - (0.1 + inv.density * DENSITY_MULTIPLIER);
 	const slope = 1.0 + inv.grade * GRADE_MULTIPLIER;
 
@@ -444,9 +444,9 @@ function makeHDCurveUniforms(
 		inv.shadows,          // shadows
 		inv.highlights,       // highlights
 		D_MAX,                // dMax
-		DISPLAY_GAMMA,        // gamma
 		0.0,                  // _pad0
 		0.0,                  // _pad1
+		0.0,                  // _pad2
 	]);
 	return makeUniformBuffer(device, data);
 }
@@ -588,15 +588,21 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		const encoder = device.createCommandEncoder();
 
-		let afterFirstPass: GPUTextureView;  // output of pass-1 → input of colormatrix
 		const toClean: GPUBuffer[] = [colorMatrixUniformBuf, toneCurveUniformBuf];
+
+		// Texture that feeds the final tonecurve pass.
+		let beforeToneCurve: GPUTextureView;
 
 		if (edit.invert && logPerc) {
 			// ── NegPy inversion path ──────────────────────────────────────────
-			// Pass 1: normalization — sourceTexture → intermediateA
-			// Pass 2: hd_curve     — intermediateA → intermediateC
-			// Pass 3: colormatrix  — intermediateC → intermediateB
-			// Pass 4: tonecurve    — intermediateB → canvas
+			// Pass 1: normalization — sourceTexture  → intermediateA
+			// Pass 2: hd_curve     — intermediateA   → intermediateC
+			// Pass 3: tonecurve    — intermediateC   → outputTexture
+			//
+			// The colormatrix pass is intentionally skipped here.  Per-channel
+			// log-percentile normalisation already neutralises the orange mask and
+			// any WB imbalance; applying a cam→sRGB matrix on top of the inverted
+			// result would re-introduce a colour cast.
 
 			const normBuf = makeNormalizationUniforms(device, logPerc);
 			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
@@ -622,19 +628,19 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				],
 			});
 
-			// Re-use intermediateC as the output of the hd_curve pass.
 			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateC!.createView());
 
-			afterFirstPass = intermediateC!.createView();
+			beforeToneCurve = intermediateC!.createView();
 		} else {
-			// ── Legacy pass-through invert path (positive or non-invert mode) ──
-			// Pass 1: invert — sourceTexture → intermediateA
-			// (invert = 0.0 means pass-through; preserves exposureCompensation)
+			// ── Positive / pass-through path ──────────────────────────────────
+			// Pass 1: invert      — sourceTexture  → intermediateA
+			// Pass 2: colormatrix — intermediateA  → intermediateB
+			// Pass 3: tonecurve   — intermediateB  → outputTexture
 			const invertUniforms = new Float32Array([
 				0, 0, 0, 0,                       // blackPoint rgb + pad
 				1, 1, 1, 0,                       // whitePoint rgb + pad
 				edit.exposureCompensation,        // exposureEV
-				0.0,                              // invert flag = off (NegPy handles the inversion)
+				0.0,                              // invert flag = off
 				isLinear ? 1.0 : 0.0,            // isLinear flag
 				0,                                // _pad
 			]);
@@ -651,29 +657,28 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			});
 
 			drawFullscreenTriangle(encoder, invertPipeline, invertBG, intermediateA!.createView());
-			afterFirstPass = intermediateA!.createView();
+
+			// Color matrix: cam-native → linear sRGB
+			const colorMatrixBG = device.createBindGroup({
+				layout: colorMatrixPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: intermediateA!.createView() },
+					{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBG, intermediateB!.createView());
+
+			beforeToneCurve = intermediateB!.createView();
 		}
-
-		// ── Color matrix pass ───────────────────────────────────────────────
-		const colorMatrixBG = device.createBindGroup({
-			layout: colorMatrixPipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: sampler },
-				{ binding: 1, resource: afterFirstPass },
-				{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
-			],
-		});
-
-		// For the NegPy path colormatrix writes to intermediateB (same as before).
-		// For the legacy path it also writes to intermediateB.
-		drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBG, intermediateB!.createView());
 
 		// ── Tone curve pass → output texture (rgba8unorm, COPY_SRC) ────────────
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
 			entries: [
 				{ binding: 0, resource: lutSampler },
-				{ binding: 1, resource: intermediateB!.createView() },
+				{ binding: 1, resource: beforeToneCurve },
 				{ binding: 2, resource: { buffer: toneCurveUniformBuf } },
 				{ binding: 3, resource: toneLutTex.createView({ dimension: '1d' }) },
 				{ binding: 4, resource: redLutTex.createView({ dimension: '1d' }) },
