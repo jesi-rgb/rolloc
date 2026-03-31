@@ -6,9 +6,13 @@
 //! Two pipeline configurations (mirroring pipeline.ts):
 //!
 //! **Negative path** (invert = true):
-//!   1. Log normalization — log10 per-channel percentile stretch (removes orange mask, inverts)
+//!   1. Log normalization — log10 per-channel percentile stretch on camera-native data
+//!      (removes orange mask, inverts; per-channel stretch handles color separation)
 //!   2. H&D curve — sigmoid paper response with CMY timing, toe/shoulder
-//!   3. Tone curve — WB multipliers + RGB LUTs + global tone LUT (sRGB skipped, H&D already 1/2.2)
+//!   3. Color matrix — cam-native → linear sRGB (applied AFTER H&D when values are
+//!      positive [0,1]; safe to clamp here; negpy has no matrix — rawpy does it)
+//!   3.5. CLAHE — contrast limited adaptive histogram equalization (local contrast)
+//!   4. Tone curve — WB multipliers + RGB LUTs + global tone LUT (sRGB skipped, H&D already 1/2.2)
 //!
 //! **Positive path** (invert = false):
 //!   1. Normalize/invert — black/white point + exposure compensation
@@ -19,14 +23,14 @@ use rayon::prelude::*;
 
 // ─── NegPy constants (must match pipeline.ts) ─────────────────────────────────
 
-const CMY_MAX_DENSITY: f32 = 0.2;
-const DENSITY_MULTIPLIER: f32 = 0.2;
-const GRADE_MULTIPLIER: f32 = 2.0;
+const CMY_MAX_DENSITY: f32 = 0.15;
+const DENSITY_MULTIPLIER: f32 = 0.15;
+const GRADE_MULTIPLIER: f32 = 1.75;
 const D_MAX: f32 = 4.0;
 
 /// Default analysis buffer — crops this fraction of each edge before
 /// computing log percentiles (matches NegPy's analysis_buffer = 0.07).
-const ANALYSIS_BUFFER: f32 = 0.07;
+const ANALYSIS_BUFFER: f32 = 0.10;
 
 // ─── Types (deserialized from JS) ─────────────────────────────────────────────
 
@@ -91,6 +95,8 @@ pub struct InversionParams {
     pub shoulder: f32,
     pub shoulder_width: f32,
     pub shoulder_hardness: f32,
+    /// CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default.
+    pub clahe_strength: f32,
 }
 
 /// Per-channel log-density percentiles for the normalization pass.
@@ -199,11 +205,15 @@ fn build_lut(curve: &CurvePoints) -> [f32; LUT_SIZE] {
     lut
 }
 
-/// Look up a value in a 256-entry LUT with nearest-neighbour indexing.
+/// Look up a value in a 256-entry LUT with linear interpolation.
+/// Matches the GPU tonecurve shader's interpolated LUT lookup.
 #[inline(always)]
 fn lut_lookup(lut: &[f32; LUT_SIZE], v: f32) -> f32 {
-    let idx = (v * 255.0 + 0.5).floor() as usize;
-    lut[idx.min(LUT_SIZE - 1)]
+    let pos = v * (LUT_SIZE as f32 - 1.0);
+    let lo = (pos as usize).min(LUT_SIZE - 1);
+    let hi = (lo + 1).min(LUT_SIZE - 1);
+    let frac = pos - lo as f32;
+    lut[lo] + (lut[hi] - lut[lo]) * frac
 }
 
 // ─── White balance (temperature + tint → multipliers) ─────────────────────────
@@ -259,11 +269,20 @@ fn linear_to_srgb(c: f32) -> f32 {
 
 // ─── Log percentile computation ───────────────────────────────────────────────
 
-/// Compute per-channel 0.5th / 99.5th log10 percentiles from linear f32 RGBA
-/// pixels (3-channel RGB stored as flat f32 with stride 3).
+/// Compute per-channel log10 percentiles from linear f32 RGB pixels.
+///
+/// Floor computation matches negpy: find the 0.001th percentile of the mean
+/// luminance, select pixels at or below that threshold, and average their
+/// per-channel log values.  Ceils use the 99.999th per-channel percentile.
 ///
 /// `pixels` is a flat slice of [R, G, B, R, G, B, ...] f32 values in [0, 1].
-pub fn compute_log_percentiles(pixels: &[f32], width: usize, height: usize) -> LogPercentiles {
+/// `color_matrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
+pub fn compute_log_percentiles(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    color_matrix: Option<&[f32; 9]>,
+) -> LogPercentiles {
     let log10_e: f32 = std::f32::consts::LOG10_E;
     let eps: f32 = 1e-6;
     let stride = 8_usize;
@@ -278,23 +297,35 @@ pub fn compute_log_percentiles(pixels: &[f32], width: usize, height: usize) -> L
     let mut r_log = Vec::new();
     let mut g_log = Vec::new();
     let mut b_log = Vec::new();
+    let mut mean_log = Vec::new();
 
     let mut y = start_y;
     while y < end_y {
         let mut x = start_x;
         while x < end_x {
             let i = (y * width + x) * 3;
-            let r = pixels[i];
-            let g = pixels[i + 1];
-            let b = pixels[i + 2];
-            if r > eps {
-                r_log.push(r.ln() * log10_e);
+            let mut r = pixels[i];
+            let mut g = pixels[i + 1];
+            let mut b = pixels[i + 2];
+
+            // Apply color matrix before log transform (matches GPU pipeline order).
+            if let Some(m) = color_matrix {
+                let cr = (m[0] * r + m[1] * g + m[2] * b).max(0.0);
+                let cg = (m[3] * r + m[4] * g + m[5] * b).max(0.0);
+                let cb = (m[6] * r + m[7] * g + m[8] * b).max(0.0);
+                r = cr;
+                g = cg;
+                b = cb;
             }
-            if g > eps {
-                g_log.push(g.ln() * log10_e);
-            }
-            if b > eps {
-                b_log.push(b.ln() * log10_e);
+
+            if r > eps && g > eps && b > eps {
+                let lr = r.ln() * log10_e;
+                let lg = g.ln() * log10_e;
+                let lb = b.ln() * log10_e;
+                r_log.push(lr);
+                g_log.push(lg);
+                b_log.push(lb);
+                mean_log.push((lr + lg + lb) / 3.0);
             }
             x += stride;
         }
@@ -310,16 +341,44 @@ pub fn compute_log_percentiles(pixels: &[f32], width: usize, height: usize) -> L
         arr[idx.min(arr.len() - 1)]
     }
 
+    // Floors: find the 0.001th percentile of mean luminance, select pixels
+    // at or below that threshold, and average their per-channel log values.
+    let mut mean_sorted = mean_log.clone();
+    let dark_threshold = percentile(&mut mean_sorted, 0.001);
+
+    let mut floor_r = 0.0_f32;
+    let mut floor_g = 0.0_f32;
+    let mut floor_b = 0.0_f32;
+    let mut dark_count = 0_usize;
+    for (i, &m) in mean_log.iter().enumerate() {
+        if m <= dark_threshold {
+            floor_r += r_log[i];
+            floor_g += g_log[i];
+            floor_b += b_log[i];
+            dark_count += 1;
+        }
+    }
+
+    let floors = if dark_count > 0 {
+        [
+            floor_r / dark_count as f32,
+            floor_g / dark_count as f32,
+            floor_b / dark_count as f32,
+        ]
+    } else {
+        [
+            percentile(&mut r_log.clone(), 0.001),
+            percentile(&mut g_log.clone(), 0.001),
+            percentile(&mut b_log.clone(), 0.001),
+        ]
+    };
+
     LogPercentiles {
-        floors: [
-            percentile(&mut r_log, 0.5),
-            percentile(&mut g_log, 0.5),
-            percentile(&mut b_log, 0.5),
-        ],
+        floors,
         ceils: [
-            percentile(&mut r_log, 99.5),
-            percentile(&mut g_log, 99.5),
-            percentile(&mut b_log, 99.5),
+            percentile(&mut r_log, 99.999),
+            percentile(&mut g_log, 99.999),
+            percentile(&mut b_log, 99.999),
         ],
     }
 }
@@ -366,6 +425,10 @@ fn fast_sigmoid(x: f32) -> f32 {
 
 /// Process one channel through the full H&D pipeline.
 /// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
+///
+/// Core H&D math matches negpy's _apply_photometric_fused_kernel.
+/// shadows/highlights are Rolloc extensions: global density level controls
+/// that use the toe/shoulder sigmoid masks to target shadow/highlight regions.
 #[inline(always)]
 fn hd_channel(
     pixel: f32,
@@ -376,10 +439,8 @@ fn hd_channel(
     hi_cmy: f32,
     toe: f32,
     toe_width: f32,
-    toe_hard: f32,
     shoulder: f32,
     sh_width: f32,
-    sh_hard: f32,
     shadows: f32,
     highlights: f32,
     d_max: f32,
@@ -390,42 +451,46 @@ fn hd_channel(
     let val = pixel + cmy_offset;
     let diff = val - pivot;
 
-    // 2. Shadow / highlight Gaussian masks
-    let s_center = (1.0 - pivot) * 0.9;
-    let h_center = (0.0 - pivot) * 0.9;
+    // 2. Toe mask (shadows): active at high diff (dense in negative space)
+    // negpy: toe_width * (diff / max(1.0 - pivot, eps) - 0.5)
+    let t_val = toe_width * (diff / (1.0 - pivot).max(eps) - 0.5);
+    let toe_mask = fast_sigmoid(t_val);
 
-    let s_mask = (-(diff - s_center).powi(2) / 0.15).exp();
-    let shadow_density_offset = shadows * s_mask * 0.3;
-    let shadow_color_offset = shadow_cmy * s_mask;
+    // 3. Shoulder mask (highlights): active at low diff (thin in negative space)
+    // negpy: -shoulder_width * (diff / max(pivot, eps) + 0.5)
+    let s_val = -sh_width * (diff / pivot.max(eps) + 0.5);
+    let shoulder_mask = fast_sigmoid(s_val);
 
-    let h_mask = (-(diff - h_center).powi(2) / 0.15).exp();
-    let hi_density_offset = highlights * h_mask * 0.3;
-    let hi_color_offset = hi_cmy * h_mask;
+    // 4. Density offsets (multiplier 0.1 matches negpy)
+    let toe_density_offset = toe * toe_mask * 0.1;
+    let shoulder_density_offset = shoulder * shoulder_mask * 0.1;
 
-    let diff_adj =
-        diff + shadow_color_offset + hi_color_offset - shadow_density_offset - hi_density_offset;
+    // 5. Localized CMY color shifts via toe/shoulder masks
+    let shadow_color_offset = shadow_cmy * toe_mask;
+    let highlight_color_offset = hi_cmy * shoulder_mask;
 
-    // 3. Shoulder damping
-    let sw_val = sh_width * (diff_adj / pivot.max(eps));
-    let w_s = fast_sigmoid(sw_val);
-    let prot_s = (4.0 * (w_s - 0.5).powi(2)).powf(sh_hard);
-    let damp_sh = shoulder * (1.0 - w_s) * prot_s;
+    // 5b. Shadows/Highlights global density level controls (Rolloc extension).
+    //     Uses the same sigmoid masks as toe/shoulder to target the same regions.
+    let shadow_level_offset = shadows * toe_mask * 0.1;
+    let highlight_level_offset = highlights * shoulder_mask * 0.1;
 
-    // 4. Toe damping
-    let tw_val = toe_width * (diff_adj / (1.0 - pivot).max(eps));
-    let w_t = fast_sigmoid(tw_val);
-    let prot_t = (4.0 * (w_t - 0.5).powi(2)).powf(toe_hard);
-    let damp_t = toe * w_t * prot_t;
+    // 6. Adjusted diff (negpy sign convention + Rolloc shadows/highlights extension)
+    let diff_adj = diff + shadow_color_offset + highlight_color_offset - toe_density_offset
+        + shoulder_density_offset
+        - shadow_level_offset
+        + highlight_level_offset;
 
-    // 5. Effective contrast
-    let k_mod = (1.0 - damp_t - damp_sh).clamp(0.1, 2.0);
+    // 7. Contrast damping (toe/shoulder reduce effective contrast)
+    let damp_toe = toe * toe_mask * 0.5;
+    let damp_shoulder = shoulder * shoulder_mask * 0.5;
+    let k_mod = (1.0 - damp_toe - damp_shoulder).clamp(0.1, 2.0);
 
-    // 6. H&D sigmoid → print density
+    // 8. H&D sigmoid → print density
     let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
 
-    // 7. Density → transmittance → perceptual gamma (1/2.2)
-    let transmittance = 10.0_f32.powf(-density).clamp(0.0, 1.0);
-    transmittance.powf(1.0 / 2.2)
+    // 9. Density → transmittance → perceptual gamma (1/2.2)
+    let transmittance = 10.0_f32.powf(-density);
+    transmittance.max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0)
 }
 
 /// Derived H&D parameters pre-computed from InversionParams.
@@ -443,10 +508,8 @@ struct HDParams {
     h_cmy_b: f32,
     toe: f32,
     toe_width: f32,
-    toe_hardness: f32,
     shoulder: f32,
     shoulder_width: f32,
-    shoulder_hardness: f32,
     shadows: f32,
     highlights: f32,
 }
@@ -454,7 +517,7 @@ struct HDParams {
 impl HDParams {
     fn from_inversion(inv: &InversionParams) -> Self {
         Self {
-            pivot: 1.0 - (0.1 + inv.density * DENSITY_MULTIPLIER),
+            pivot: 1.0 - (0.01 + inv.density * DENSITY_MULTIPLIER),
             slope: 1.0 + inv.grade * GRADE_MULTIPLIER,
             cmy_r: inv.cmy_cyan * CMY_MAX_DENSITY,
             cmy_g: inv.cmy_magenta * CMY_MAX_DENSITY,
@@ -467,10 +530,8 @@ impl HDParams {
             h_cmy_b: inv.highlight_yellow * CMY_MAX_DENSITY,
             toe: inv.toe,
             toe_width: inv.toe_width,
-            toe_hardness: inv.toe_hardness,
             shoulder: inv.shoulder,
             shoulder_width: inv.shoulder_width,
-            shoulder_hardness: inv.shoulder_hardness,
             shadows: inv.shadows,
             highlights: inv.highlights,
         }
@@ -489,10 +550,8 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams) -> [f32; 3] {
             p.h_cmy_r,
             p.toe,
             p.toe_width,
-            p.toe_hardness,
             p.shoulder,
             p.shoulder_width,
-            p.shoulder_hardness,
             p.shadows,
             p.highlights,
             D_MAX,
@@ -506,10 +565,8 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams) -> [f32; 3] {
             p.h_cmy_g,
             p.toe,
             p.toe_width,
-            p.toe_hardness,
             p.shoulder,
             p.shoulder_width,
-            p.shoulder_hardness,
             p.shadows,
             p.highlights,
             D_MAX,
@@ -523,15 +580,198 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams) -> [f32; 3] {
             p.h_cmy_b,
             p.toe,
             p.toe_width,
-            p.toe_hardness,
             p.shoulder,
             p.shoulder_width,
-            p.shoulder_hardness,
             p.shadows,
             p.highlights,
             D_MAX,
         ),
     ]
+}
+
+// ─── Color matrix pass (positive path only) ──────────────────────────────────
+
+// ─── CLAHE (Contrast Limited Adaptive Histogram Equalization) ─────────────────
+
+/// CLAHE tile grid dimensions (matches negpy's default grid_dim=8).
+const CLAHE_TILES_X: usize = 8;
+const CLAHE_TILES_Y: usize = 8;
+/// Number of histogram bins per tile.
+const CLAHE_NUM_BINS: usize = 256;
+
+/// Rec. 709 luminance weights (same as sRGB, matches the GPU shader).
+const LUMA_R: f32 = 0.2126;
+const LUMA_G: f32 = 0.7152;
+const LUMA_B: f32 = 0.0722;
+
+/// Apply CLAHE to an RGB f32 buffer in-place.
+///
+/// Operates on Rec. 709 luminance (matching the GPU shader implementation).
+/// The algorithm:
+///   1. Build per-tile 256-bin histograms of the luminance channel.
+///   2. Clip each histogram at `clip_limit` and redistribute excess.
+///   3. Compute CDFs from the clipped histograms.
+///   4. For each pixel, bilinearly interpolate the CDF lookups from the 4
+///      surrounding tile centers.
+///   5. Blend: L_final = L * (1 - strength) + L_remapped * strength.
+///   6. Reconstruct RGB: out = pixel * (L_final / L).
+fn apply_clahe(pixels: &mut [f32], width: usize, height: usize, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+
+    let tiles_x = CLAHE_TILES_X;
+    let tiles_y = CLAHE_TILES_Y;
+    let num_bins = CLAHE_NUM_BINS;
+
+    // Tile dimensions (ceil division — edge tiles may be smaller).
+    let tile_w = (width + tiles_x - 1) / tiles_x;
+    let tile_h = (height + tiles_y - 1) / tiles_y;
+
+    // Step 1: Build per-tile histograms.
+    let num_tiles = tiles_x * tiles_y;
+    let mut histograms = vec![vec![0u32; num_bins]; num_tiles];
+
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let x0 = tx * tile_w;
+            let y0 = ty * tile_h;
+            let x1 = (x0 + tile_w).min(width);
+            let y1 = (y0 + tile_h).min(height);
+            let hist = &mut histograms[ty * tiles_x + tx];
+
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * width + x) * 3;
+                    let lum =
+                        (LUMA_R * pixels[i] + LUMA_G * pixels[i + 1] + LUMA_B * pixels[i + 2])
+                            .clamp(0.0, 1.0);
+                    let bin = (lum * 255.0).min(255.0) as usize;
+                    hist[bin] += 1;
+                }
+            }
+        }
+    }
+
+    // Step 2: Clip + redistribute.
+    // clip_limit in absolute count units (same formula as GPU side).
+    let tile_pixels = tile_w * tile_h;
+    let clip_limit = (strength * 2.5 * (tile_pixels as f32 / num_bins as f32)) as u32;
+    let clip_limit = clip_limit.max(1);
+
+    for hist in &mut histograms {
+        // Iterative redistribution (4 rounds, same as GPU shader).
+        for _ in 0..4 {
+            let mut excess = 0u32;
+            for bin in hist.iter_mut() {
+                if *bin > clip_limit {
+                    excess += *bin - clip_limit;
+                    *bin = clip_limit;
+                }
+            }
+            if excess == 0 {
+                break;
+            }
+            let per_bin = excess / num_bins as u32;
+            let remainder = (excess % num_bins as u32) as usize;
+            for (i, bin) in hist.iter_mut().enumerate() {
+                *bin += per_bin;
+                if i < remainder {
+                    *bin += 1;
+                }
+            }
+        }
+    }
+
+    // Step 3: Compute CDFs (normalized to [0, 1]).
+    let mut cdfs = vec![vec![0.0_f32; num_bins]; num_tiles];
+    for (tile_idx, hist) in histograms.iter().enumerate() {
+        let cdf = &mut cdfs[tile_idx];
+        // Compute the total pixel count for this tile (may be smaller for edge tiles).
+        let tx = tile_idx % tiles_x;
+        let ty_idx = tile_idx / tiles_x;
+        let x0 = tx * tile_w;
+        let y0 = ty_idx * tile_h;
+        let x1 = (x0 + tile_w).min(width);
+        let y1 = (y0 + tile_h).min(height);
+        let total = ((x1 - x0) * (y1 - y0)).max(1) as f32;
+
+        cdf[0] = hist[0] as f32;
+        for i in 1..num_bins {
+            cdf[i] = cdf[i - 1] + hist[i] as f32;
+        }
+        // Normalize to [0, 1].
+        for v in cdf.iter_mut() {
+            *v /= total;
+        }
+    }
+
+    // Step 4–6: Remap each pixel with bilinear CDF interpolation.
+    // We need to read original luminance and write back, so operate on a copy
+    // would be inefficient — instead read pixels row-by-row.
+
+    /// Linearly interpolated CDF lookup for a given tile and luminance.
+    #[inline(always)]
+    fn cdf_lookup(cdfs: &[Vec<f32>], tile_idx: usize, lum: f32) -> f32 {
+        let cdf = &cdfs[tile_idx];
+        let pos = lum * 255.0;
+        let lo = (pos as usize).min(255);
+        let hi = (lo + 1).min(255);
+        let frac = pos - lo as f32;
+        cdf[lo] + (cdf[hi] - cdf[lo]) * frac
+    }
+
+    // Process rows in parallel.
+    let tile_w_f = tile_w as f32;
+    let tile_h_f = tile_h as f32;
+    let tiles_x_u = tiles_x;
+    let tiles_y_u = tiles_y;
+
+    pixels
+        .par_chunks_mut(width * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let py = y as f32 + 0.5;
+            let fty = (py / tile_h_f) - 0.5;
+            let ty0 = (fty.floor().max(0.0)) as usize;
+            let ty1 = (ty0 + 1).min(tiles_y_u - 1);
+            let fy = (fty - ty0 as f32).clamp(0.0, 1.0);
+
+            for x in 0..width {
+                let i = x * 3;
+                let r = row[i];
+                let g = row[i + 1];
+                let b = row[i + 2];
+
+                let lum = (LUMA_R * r + LUMA_G * g + LUMA_B * b).clamp(0.0, 1.0);
+
+                let px = x as f32 + 0.5;
+                let ftx = (px / tile_w_f) - 0.5;
+                let tx0 = (ftx.floor().max(0.0)) as usize;
+                let tx1 = (tx0 + 1).min(tiles_x_u - 1);
+                let fx = (ftx - tx0 as f32).clamp(0.0, 1.0);
+
+                // Bilinear interpolation of CDF lookups.
+                let c00 = cdf_lookup(&cdfs, ty0 * tiles_x_u + tx0, lum);
+                let c10 = cdf_lookup(&cdfs, ty0 * tiles_x_u + tx1, lum);
+                let c01 = cdf_lookup(&cdfs, ty1 * tiles_x_u + tx0, lum);
+                let c11 = cdf_lookup(&cdfs, ty1 * tiles_x_u + tx1, lum);
+
+                let top = c00 + (c10 - c00) * fx;
+                let bot = c01 + (c11 - c01) * fx;
+                let remapped_lum = top + (bot - top) * fy;
+
+                // Blend with original.
+                let final_lum = lum * (1.0 - strength) + remapped_lum * strength;
+
+                // Reconstruct RGB preserving chrominance.
+                let eps = 1e-6_f32;
+                let ratio = final_lum / lum.max(eps);
+                row[i] = (r * ratio).clamp(0.0, 1.0);
+                row[i + 1] = (g * ratio).clamp(0.0, 1.0);
+                row[i + 2] = (b * ratio).clamp(0.0, 1.0);
+            }
+        });
 }
 
 // ─── Color matrix pass (positive path only) ──────────────────────────────────
@@ -618,35 +858,72 @@ pub fn process_image(
 
     if edit.invert {
         // ── Negative path ──────────────────────────────────────────────────
+        // negpy has NO color matrix — rawpy handles cam→AdobeRGB internally.
+        // Rolloc's rawler outputs camera-native linear, so we run normalization
+        // directly on camera-native data (per-channel log stretch handles color
+        // separation), then apply the cam→sRGB matrix AFTER the H&D curve when
+        // values are positive [0,1].
+        let matrix = &edit.camera_color_matrix;
 
         // Compute or use provided log percentiles.
+        // No color matrix applied — percentiles operate on camera-native data.
         let owned_perc;
         let perc = match log_perc {
             Some(p) => p,
             None => {
-                owned_perc = compute_log_percentiles(pixels, width, height);
+                owned_perc = compute_log_percentiles(pixels, width, height, None);
                 &owned_perc
             }
         };
 
         let hd = HDParams::from_inversion(&edit.inversion_params);
 
-        // Process in parallel: chunk by row for cache friendliness.
+        // Step 1+2: Log normalization + H&D curve (fused, parallel by row).
         pixels.par_chunks_mut(width * 3).for_each(|row| {
             for i in (0..row.len()).step_by(3) {
                 let r = row[i];
                 let g = row[i + 1];
                 let b = row[i + 2];
 
-                // Step 1: Log normalization
+                // Step 1: Log normalization (on camera-native data)
                 let [nr, ng, nb] = normalize_pixel(r, g, b, perc);
 
                 // Step 2: H&D curve
                 let [hr, hg, hb] = hd_pixel(nr, ng, nb, &hd);
 
-                // Step 3: Tone curve (skip sRGB — H&D already did 1/2.2)
+                row[i] = hr;
+                row[i + 1] = hg;
+                row[i + 2] = hb;
+            }
+        });
+
+        // Step 3: Color matrix — cam-native → linear sRGB (after H&D, values
+        // are positive [0,1] so clamping is benign).
+        pixels.par_chunks_mut(width * 3).for_each(|row| {
+            for i in (0..row.len()).step_by(3) {
+                let r = row[i];
+                let g = row[i + 1];
+                let b = row[i + 2];
+
+                let [mr, mg, mb] = apply_color_matrix(r, g, b, matrix);
+                row[i] = mr;
+                row[i + 1] = mg;
+                row[i + 2] = mb;
+            }
+        });
+
+        // Step 3.5: CLAHE (needs the full H&D output before it can run).
+        apply_clahe(pixels, width, height, edit.inversion_params.clahe_strength);
+
+        // Step 4: Tone curve (skip sRGB — H&D already did 1/2.2).
+        pixels.par_chunks_mut(width * 3).for_each(|row| {
+            for i in (0..row.len()).step_by(3) {
+                let r = row[i];
+                let g = row[i + 1];
+                let b = row[i + 2];
+
                 let [fr, fg, fb] = tone_curve_pixel(
-                    hr, hg, hb, &wb, &red_lut, &green_lut, &blue_lut, &tone_lut, true,
+                    r, g, b, &wb, &red_lut, &green_lut, &blue_lut, &tone_lut, true,
                 );
 
                 row[i] = fr;

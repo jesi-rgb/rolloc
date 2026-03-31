@@ -7,15 +7,17 @@
  *   Pass 2 (colormatrix)  — 3×3 camera-to-sRGB colour matrix
  *   Pass 3 (tonecurve)    — white balance + RGB curves + global tone curve + γ encode
  *
- * Negative (invert = true) — 4-pass NegPy pipeline:
+ * Negative (invert = true) — 5-pass NegPy pipeline:
  *   Pass 0 (ingest_raw)     — rgba16uint linear → rgba16float  [RAW path only]
  *   Pass 1 (normalization)  — log10 conversion + per-channel percentile stretch
- *                             (removes orange mask, inverts negative)
+ *                             on camera-native data (per-channel stretch removes the
+ *                             orange mask and inverts, matching negpy where rawpy
+ *                             delivers Adobe RGB and normalization operates directly)
  *   Pass 2 (hd_curve)       — H&D sigmoid: CMY timing + toe/shoulder + paper response
  *                             outputs linear-light transmittance (no gamma here)
- *   Pass 3 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
- *                             (colormatrix skipped — per-channel stretch already neutralises
- *                              the orange mask; cam→sRGB matrix would re-introduce cast)
+ *   Pass 3 (colormatrix)    — 3×3 camera-to-sRGB colour matrix (applied AFTER H&D
+ *                             when values are positive [0,1]; safe to clamp here)
+ *   Pass 4 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
  *
  * Usage:
  *   const gpu = await createPipeline(canvas);
@@ -24,26 +26,33 @@
  *   gpu.destroy();          // free GPU resources
  */
 
-import invertWGSL         from './shaders/invert.wgsl?raw';
-import colorMatrixWGSL    from './shaders/colormatrix.wgsl?raw';
-import toneCurveWGSL      from './shaders/tonecurve.wgsl?raw';
-import ingestRawWGSL      from './shaders/ingest_raw.wgsl?raw';
-import normalizationWGSL  from './shaders/normalization.wgsl?raw';
-import hdCurveWGSL        from './shaders/hd_curve.wgsl?raw';
-import blitWGSL           from './shaders/blit.wgsl?raw';
+import invertWGSL           from './shaders/invert.wgsl?raw';
+import colorMatrixWGSL      from './shaders/colormatrix.wgsl?raw';
+import toneCurveWGSL        from './shaders/tonecurve.wgsl?raw';
+import ingestRawWGSL        from './shaders/ingest_raw.wgsl?raw';
+import normalizationWGSL    from './shaders/normalization.wgsl?raw';
+import hdCurveWGSL          from './shaders/hd_curve.wgsl?raw';
+import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
+import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
+import blitWGSL             from './shaders/blit.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import type { EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
 
 // ─── NegPy constants ───────────────────────────────────────────────────────────
 
-/** Maximum log-density shift per CMY slider unit (matches negpy EXPOSURE_CONSTANTS). */
-const CMY_MAX_DENSITY = 0.2;
-/** Maps the density slider to an exposure shift: shift = 0.1 + density * DENSITY_MULTIPLIER (negpy density_multiplier). */
-const DENSITY_MULTIPLIER = 0.2;
+/** Maximum log-density shift per CMY slider unit (negpy EXPOSURE_CONSTANTS.cmy_max_density). */
+const CMY_MAX_DENSITY = 0.15;
+/** Maps the density slider to an exposure shift: shift = 0.01 + density * DENSITY_MULTIPLIER (negpy density_multiplier). */
+const DENSITY_MULTIPLIER = 0.15;
 /** Maps the grade slider to the sigmoid slope: slope = 1.0 + grade * GRADE_MULTIPLIER (negpy grade_multiplier). */
-const GRADE_MULTIPLIER = 2.0;
+const GRADE_MULTIPLIER = 1.75;
 /** Maximum print density (D_max) — deepest black photographic paper can produce. */
 const D_MAX = 4.0;
+/** CLAHE tile grid dimensions (8×8 matches negpy's default grid_dim). */
+const CLAHE_TILES_X = 8;
+const CLAHE_TILES_Y = 8;
+/** Number of histogram bins per tile (must match NUM_BINS in the WGSL shaders). */
+const CLAHE_NUM_BINS = 256;
 
 // ─── White balance helpers ─────────────────────────────────────────────────────
 
@@ -96,7 +105,7 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
  * Crops this fraction of each edge before computing percentiles, excluding the
  * film rebate border from the analysis.
  */
-const ANALYSIS_BUFFER = 0.07;
+const ANALYSIS_BUFFER = 0.10;
 
 /**
  * Per-channel log-density floor/ceil for the normalization shader.
@@ -114,7 +123,11 @@ export interface LogPercentiles {
  * linear RGBA pixels (length = w * h * 4, R at [0], G at [1], B at [2]).
  *
  * When `width` and `height` are provided, an analysis buffer crop is applied
- * (matching negpy's `analysis_buffer=0.07`) to exclude the film rebate border.
+ * (matching negpy's `analysis_buffer=0.10`) to exclude the film rebate border.
+ *
+ * When `colorMatrix` is provided (row-major 3×3), it is applied to each pixel
+ * before the log transform — this is essential for the negative path where the
+ * GPU applies the cam→sRGB matrix before the normalization shader.
  *
  * Downsamples by `stride` to keep it fast for large images (default: every 8th pixel).
  */
@@ -123,18 +136,42 @@ function computeLogPercentilesFromF32(
 	width: number = 0,
 	height: number = 0,
 	stride: number = 8,
+	colorMatrix?: Matrix3x3,
 ): LogPercentiles {
 	const LOG10_E = 0.43429448190325183;
 	const eps = 1e-6;
 
-	// Reservoir sample — collect log10 values per channel
+	// Optional color matrix application (row-major [m00,m01,m02, m10,m11,m12, m20,m21,m22]).
+	const hasMatrix = colorMatrix !== undefined;
+	const m = colorMatrix;
+
+	// Collect per-pixel log10 values (r, g, b) and their mean luminance.
+	// We store tuples so we can later select "darkest" pixels by mean luminance
+	// and average their per-channel values — matching negpy's floor computation.
 	const rLog: number[] = [];
 	const gLog: number[] = [];
 	const bLog: number[] = [];
+	const meanLog: number[] = [];
+
+	function processPixel(rawR: number, rawG: number, rawB: number): void {
+		let r = rawR, g = rawG, b = rawB;
+		if (hasMatrix && m) {
+			r = Math.max(0, m[0] * rawR + m[1] * rawG + m[2] * rawB);
+			g = Math.max(0, m[3] * rawR + m[4] * rawG + m[5] * rawB);
+			b = Math.max(0, m[6] * rawR + m[7] * rawG + m[8] * rawB);
+		}
+		if (r > eps && g > eps && b > eps) {
+			const lr = Math.log(r) * LOG10_E;
+			const lg = Math.log(g) * LOG10_E;
+			const lb = Math.log(b) * LOG10_E;
+			rLog.push(lr);
+			gLog.push(lg);
+			bLog.push(lb);
+			meanLog.push((lr + lg + lb) / 3);
+		}
+	}
 
 	// Apply analysis buffer crop when dimensions are known.
-	// This excludes the film rebate border from percentile computation,
-	// matching negpy's default analysis_buffer=0.07.
 	const hasDims = width > 0 && height > 0;
 	const cutY = hasDims ? Math.floor(height * ANALYSIS_BUFFER) : 0;
 	const cutX = hasDims ? Math.floor(width * ANALYSIS_BUFFER) : 0;
@@ -144,27 +181,15 @@ function computeLogPercentilesFromF32(
 	const endX   = hasDims ? width - cutX : 0;
 
 	if (hasDims) {
-		// Iterate in 2D to respect the crop region.
 		for (let y = startY; y < endY; y += stride) {
 			for (let x = startX; x < endX; x += stride) {
 				const i = (y * width + x) * 4;
-				const r = pixels[i];
-				const g = pixels[i + 1];
-				const b = pixels[i + 2];
-				if (r > eps) rLog.push(Math.log(r) * LOG10_E);
-				if (g > eps) gLog.push(Math.log(g) * LOG10_E);
-				if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+				processPixel(pixels[i], pixels[i + 1], pixels[i + 2]);
 			}
 		}
 	} else {
-		// Fallback: no crop, flat iteration (JPEG/TIFF path without known dims).
 		for (let i = 0; i < pixels.length; i += 4 * stride) {
-			const r = pixels[i];
-			const g = pixels[i + 1];
-			const b = pixels[i + 2];
-			if (r > eps) rLog.push(Math.log(r) * LOG10_E);
-			if (g > eps) gLog.push(Math.log(g) * LOG10_E);
-			if (b > eps) bLog.push(Math.log(b) * LOG10_E);
+			processPixel(pixels[i], pixels[i + 1], pixels[i + 2]);
 		}
 	}
 
@@ -175,16 +200,30 @@ function computeLogPercentilesFromF32(
 		return sorted[idx];
 	}
 
+	// Floors: find the 0.001th percentile of mean luminance, select pixels
+	// at or below that threshold, and average their per-channel log values.
+	// This matches negpy's analyze_log_exposure_bounds() which uses the mean
+	// of the darkest pixels rather than a raw per-channel percentile.
+	const darkThreshold = percentile(meanLog, 0.001);
+	let floorR = 0, floorG = 0, floorB = 0, darkCount = 0;
+	for (let i = 0; i < meanLog.length; i++) {
+		if (meanLog[i] <= darkThreshold) {
+			floorR += rLog[i];
+			floorG += gLog[i];
+			floorB += bLog[i];
+			darkCount++;
+		}
+	}
+	const floors: [number, number, number] = darkCount > 0
+		? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
+		: [percentile(rLog, 0.001), percentile(gLog, 0.001), percentile(bLog, 0.001)];
+
 	return {
-		floors: [
-			percentile(rLog, 0.5),
-			percentile(gLog, 0.5),
-			percentile(bLog, 0.5),
-		],
+		floors,
 		ceils: [
-			percentile(rLog, 99.5),
-			percentile(gLog, 99.5),
-			percentile(bLog, 99.5),
+			percentile(rLog, 99.999),
+			percentile(gLog, 99.999),
+			percentile(bLog, 99.999),
 		],
 	};
 }
@@ -195,12 +234,14 @@ function computeLogPercentilesFromF32(
  * to [0, 1] before the log transform.
  *
  * `width` and `height` are used to apply the analysis buffer crop.
+ * `colorMatrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
  */
 function computeLogPercentilesFromU16(
 	pixels: Uint16Array,
 	width: number,
 	height: number,
 	stride: number = 8,
+	colorMatrix?: Matrix3x3,
 ): LogPercentiles {
 	// Normalise u16 → [0,1] float and reuse the float percentile path.
 	// Do NOT truncate to the first N pixels — that produces a biased sample
@@ -210,7 +251,7 @@ function computeLogPercentilesFromU16(
 	for (let i = 0; i < pixels.length; i++) {
 		f32[i] = pixels[i] / 65535.0;
 	}
-	return computeLogPercentilesFromF32(f32, width, height, stride);
+	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix);
 }
 
 /**
@@ -432,10 +473,10 @@ function makeNormalizationUniforms(
  *   highlightCmy     : vec4<f32>  @ 64
  *   toe              : f32        @ 80
  *   toeWidth         : f32        @ 84
- *   toeHardness      : f32        @ 88
+ *   _unused0         : f32        @ 88   (toeHardness slot, unused)
  *   shoulder         : f32        @ 92
  *   shoulderWidth    : f32        @ 96
- *   shoulderHardness : f32        @ 100
+ *   _unused1         : f32        @ 100  (shoulderHardness slot, unused)
  *   shadows          : f32        @ 104
  *   highlights       : f32        @ 108
  *   dMax             : f32        @ 112
@@ -451,11 +492,11 @@ function makeHDCurveUniforms(
 	inv: InversionParams,
 ): GPUBuffer {
 	// Pivot and slope match NegPy's PhotometricProcessor formula:
-	//   exposure_shift = 0.1 + (density * DENSITY_MULTIPLIER)
+	//   exposure_shift = 0.01 + (density * DENSITY_MULTIPLIER)
 	//   pivot          = 1.0 - exposure_shift
 	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
-	// At defaults (density=1.0, grade=2.0): pivot=0.7, slope=5.0.
-	const pivot = 1.0 - (0.1 + inv.density * DENSITY_MULTIPLIER);
+	// At defaults (density=1.0, grade=2.5): pivot=0.84, slope=5.375.
+	const pivot = 1.0 - (0.01 + inv.density * DENSITY_MULTIPLIER);
 	const slope = 1.0 + inv.grade * GRADE_MULTIPLIER;
 
 	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
@@ -480,10 +521,10 @@ function makeHDCurveUniforms(
 		hCmyR, hCmyG, hCmyB, 0,           // highlightCmy rgb + pad
 		inv.toe,              // toe
 		inv.toeWidth,         // toeWidth
-		inv.toeHardness,      // toeHardness
+		0.0,                  // _unused0 (toeHardness slot, ignored by shader)
 		inv.shoulder,         // shoulder
 		inv.shoulderWidth,    // shoulderWidth
-		inv.shoulderHardness, // shoulderHardness
+		0.0,                  // _unused1 (shoulderHardness slot, ignored by shader)
 		inv.shadows,          // shadows
 		inv.highlights,       // highlights
 		D_MAX,                // dMax
@@ -527,6 +568,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const invertModule        = device.createShaderModule({ code: invertWGSL });
 	const normalizationModule = device.createShaderModule({ code: normalizationWGSL });
 	const hdCurveModule       = device.createShaderModule({ code: hdCurveWGSL });
+	const claheHistModule     = device.createShaderModule({ code: claheHistogramWGSL });
+	const claheRemapModule    = device.createShaderModule({ code: claheRemapWGSL });
 	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
 	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
 	const blitModule          = device.createShaderModule({ code: blitWGSL });
@@ -548,11 +591,28 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const hdCurvePipeline       = makeRenderPipeline(hdCurveModule,        'rgba16float');
 	const colorMatrixPipeline   = makeRenderPipeline(colorMatrixModule,    'rgba16float');
 	/**
-	 * Tone curve renders to `rgba8unorm` (the readback output texture) rather than
-	 * directly to the swap chain.  A blit pass then copies it to the canvas.
+	 * Tone curve renders to `rgba16float` for maximum precision.
+	 * A blit pass with ordered dithering then converts to the 8-bit swap chain,
+	 * and a separate readback copy quantises to `rgba8unorm` with dithering.
 	 */
-	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      'rgba8unorm');
+	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      'rgba16float');
 	const blitPipeline          = makeRenderPipeline(blitModule,           presentationFormat);
+	/** Blit pipeline targeting rgba8unorm for the readback texture. */
+	const blitReadbackPipeline  = makeRenderPipeline(blitModule,           'rgba8unorm');
+
+	// ── CLAHE pipelines ────────────────────────────────────────────────────
+
+	/** CLAHE remap fragment pipeline (fullscreen triangle). */
+	const claheRemapPipeline = makeRenderPipeline(claheRemapModule, 'rgba16float');
+
+	/**
+	 * CLAHE histogram compute pipeline.
+	 * Bind group layout: @binding(0) texture_2d<f32>, @binding(1) uniform, @binding(2) storage rw.
+	 */
+	const claheHistPipeline = device.createComputePipeline({
+		layout: 'auto',
+		compute: { module: claheHistModule, entryPoint: 'main' },
+	});
 
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
@@ -562,12 +622,24 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let intermediateB: GPUTexture | null = null;
 	/** Third intermediate needed for the 5-pass NegPy invert path. */
 	let intermediateC: GPUTexture | null = null;
+	/** Fourth intermediate: CLAHE remap output (between H&D curve and tonecurve). */
+	let intermediateD: GPUTexture | null = null;
 	/**
-	 * Persistent rgba8unorm output texture (COPY_SRC | RENDER_ATTACHMENT | TEXTURE_BINDING).
-	 * The tone curve pass renders here; a blit pass copies it to the swap chain.
-	 * readPixels() reads back from this texture via copyTextureToBuffer.
+	 * Storage buffer for CLAHE CDF data.
+	 * Size: CLAHE_TILES_X * CLAHE_TILES_Y * CLAHE_NUM_BINS * 4 bytes (f32).
+	 */
+	let claheCdfBuffer: GPUBuffer | null = null;
+	/**
+	 * Persistent rgba16float output texture (RENDER_ATTACHMENT | TEXTURE_BINDING).
+	 * The tone curve pass renders here at full precision; the blit pass dithers
+	 * it down to the 8-bit swap chain.
 	 */
 	let outputTexture: GPUTexture | null = null;
+	/**
+	 * Persistent rgba8unorm readback texture (COPY_SRC | RENDER_ATTACHMENT | TEXTURE_BINDING).
+	 * A dithered blit from outputTexture writes here; readPixels() copies from this texture.
+	 */
+	let readbackTexture: GPUTexture | null = null;
 	/**
 	 * Log percentiles cached from the last RAW preview render.
 	 * Reused on export so full-res and preview-res produce identical normalization.
@@ -641,19 +713,26 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		if (edit.invert && logPerc) {
 			// ── NegPy inversion path ──────────────────────────────────────────
-			// Pass 1: normalization — sourceTexture  → intermediateA
-			// Pass 2: hd_curve     — intermediateA   → intermediateC
-			// Pass 3: tonecurve    — intermediateC   → outputTexture
+			// negpy has NO color matrix step — rawpy handles cam→AdobeRGB
+			// internally.  Rolloc's rawler outputs camera-native linear, so we
+			// run normalization directly on camera-native data (per-channel log
+			// stretch handles color separation), then apply the cam→sRGB matrix
+			// AFTER the H&D curve when values are positive [0,1].
 			//
-			// The colormatrix pass is intentionally skipped here.  Per-channel
-			// log-percentile normalisation already neutralises the orange mask and
-			// any WB imbalance; applying a cam→sRGB matrix on top of the inverted
-			// result would re-introduce a colour cast.
+			// Pass 1: normalization  — sourceTexture  → intermediateA
+			// Pass 2: hd_curve       — intermediateA  → intermediateB
+			// Pass 3: colormatrix    — intermediateB  → intermediateC
+			//         (cam-native → linear sRGB; safe now because H&D output
+			//          is positive [0,1] so clamping is benign)
+			// Pass 3.5: clahe_histogram — compute: intermediateC → claheCdfBuffer
+			// Pass 3.6: clahe_remap    — fragment: intermediateC + CDF → intermediateD
+			// Pass 4: tonecurve      — intermediateD  → outputTexture
 
 			const normBuf = makeNormalizationUniforms(device, logPerc);
 			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
 			toClean.push(normBuf, hdBuf);
 
+			// Normalization: camera-native linear → normalized log-density
 			const normBG = device.createBindGroup({
 				layout: normalizationPipeline.getBindGroupLayout(0),
 				entries: [
@@ -665,6 +744,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			drawFullscreenTriangle(encoder, normalizationPipeline, normBG, intermediateA!.createView());
 
+			// H&D curve: normalized log-density → linear positive transmittance
 			const hdBG = device.createBindGroup({
 				layout: hdCurvePipeline.getBindGroupLayout(0),
 				entries: [
@@ -674,9 +754,99 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				],
 			});
 
-			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateC!.createView());
+			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateB!.createView());
 
-			beforeToneCurve = intermediateC!.createView();
+			// Color matrix: cam-native → linear sRGB (after H&D, values are [0,1])
+			const colorMatrixBGNeg = device.createBindGroup({
+				layout: colorMatrixPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: intermediateB!.createView() },
+					{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBGNeg, intermediateC!.createView());
+
+			// ── CLAHE passes (skip when strength is zero) ────────────────────
+			const claheStrength = edit.inversionParams.claheStrength;
+			if (claheStrength > 0 && claheCdfBuffer) {
+				// Compute pass: build per-tile histograms + CDFs.
+				const tileW = Math.ceil(w / CLAHE_TILES_X);
+				const tileH = Math.ceil(h / CLAHE_TILES_Y);
+				const tilePixels = tileW * tileH;
+				const clipLimit = claheStrength * 2.5 * (tilePixels / CLAHE_NUM_BINS);
+
+				// The struct has u32 fields for width/height/tiles_x/tiles_y,
+				// but we pass them via a Float32Array and reinterpret as u32 in
+				// the uniform buffer. Use a DataView to write the u32 fields correctly.
+				const claheHistUnifData = new ArrayBuffer(32);
+				const claheHistView = new DataView(claheHistUnifData);
+				claheHistView.setUint32(0, w, true);          // width
+				claheHistView.setUint32(4, h, true);          // height
+				claheHistView.setUint32(8, CLAHE_TILES_X, true);   // tiles_x
+				claheHistView.setUint32(12, CLAHE_TILES_Y, true);  // tiles_y
+				claheHistView.setFloat32(16, clipLimit, true);     // clip_limit
+				claheHistView.setFloat32(20, 0, true);             // _pad0
+				claheHistView.setFloat32(24, 0, true);             // _pad1
+				claheHistView.setFloat32(28, 0, true);             // _pad2
+				const claheHistUnifBuf = device.createBuffer({
+					size: 32,
+					usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+				});
+				device.queue.writeBuffer(claheHistUnifBuf, 0, claheHistUnifData);
+				toClean.push(claheHistUnifBuf);
+
+				const claheHistBG = device.createBindGroup({
+					layout: claheHistPipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: intermediateC!.createView() },
+						{ binding: 1, resource: { buffer: claheHistUnifBuf } },
+						{ binding: 2, resource: { buffer: claheCdfBuffer } },
+					],
+				});
+
+				const computePass = encoder.beginComputePass();
+				computePass.setPipeline(claheHistPipeline);
+				computePass.setBindGroup(0, claheHistBG);
+				computePass.dispatchWorkgroups(CLAHE_TILES_X, CLAHE_TILES_Y, 1);
+				computePass.end();
+
+				// Remap pass: bilinear CDF interpolation + luminance remap.
+				const claheRemapUnifData = new ArrayBuffer(32);
+				const claheRemapView = new DataView(claheRemapUnifData);
+				claheRemapView.setUint32(0, w, true);              // width
+				claheRemapView.setUint32(4, h, true);              // height
+				claheRemapView.setUint32(8, CLAHE_TILES_X, true);  // tiles_x
+				claheRemapView.setUint32(12, CLAHE_TILES_Y, true); // tiles_y
+				claheRemapView.setFloat32(16, claheStrength, true); // strength
+				claheRemapView.setFloat32(20, 0, true);            // _pad0
+				claheRemapView.setFloat32(24, 0, true);            // _pad1
+				claheRemapView.setFloat32(28, 0, true);            // _pad2
+				const claheRemapUnifBuf = device.createBuffer({
+					size: 32,
+					usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+				});
+				device.queue.writeBuffer(claheRemapUnifBuf, 0, claheRemapUnifData);
+				toClean.push(claheRemapUnifBuf);
+
+				const claheRemapBG = device.createBindGroup({
+					layout: claheRemapPipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: sampler },
+						{ binding: 1, resource: intermediateC!.createView() },
+						{ binding: 2, resource: { buffer: claheRemapUnifBuf } },
+						{ binding: 3, resource: { buffer: claheCdfBuffer } },
+					],
+				});
+
+				drawFullscreenTriangle(encoder, claheRemapPipeline, claheRemapBG, intermediateD!.createView());
+
+				beforeToneCurve = intermediateD!.createView();
+			} else {
+				// CLAHE disabled — feed colormatrix output directly to tonecurve.
+				beforeToneCurve = intermediateC!.createView();
+			}
 		} else {
 			// ── Positive / pass-through path ──────────────────────────────────
 			// Pass 1: invert      — sourceTexture  → intermediateA
@@ -719,7 +889,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			beforeToneCurve = intermediateB!.createView();
 		}
 
-		// ── Tone curve pass → output texture (rgba8unorm, COPY_SRC) ────────────
+		// ── Tone curve pass → output texture (rgba16float, full precision) ──────
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
 			entries: [
@@ -735,7 +905,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, outputTexture!.createView());
 
-		// ── Blit output texture → canvas swap chain ──────────────────────────
+		// ── Dithered blit → canvas swap chain (8-bit display) ────────────────
 		const blitBG = device.createBindGroup({
 			layout: blitPipeline.getBindGroupLayout(0),
 			entries: [
@@ -745,6 +915,17 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		});
 
 		drawFullscreenTriangle(encoder, blitPipeline, blitBG, context.getCurrentTexture().createView());
+
+		// ── Dithered blit → readback texture (rgba8unorm, COPY_SRC) ──────────
+		const readbackBG = device.createBindGroup({
+			layout: blitReadbackPipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: sampler },
+				{ binding: 1, resource: outputTexture!.createView() },
+			],
+		});
+
+		drawFullscreenTriangle(encoder, blitReadbackPipeline, readbackBG, readbackTexture!.createView());
 
 		device.queue.submit([encoder.finish()]);
 		await device.queue.onSubmittedWorkDone();
@@ -767,10 +948,28 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		if (needC) {
 			intermediateC?.destroy();
 			intermediateC = createRGBA16Texture(device, w, h);
+			// CLAHE needs intermediateD (remap output) + CDF storage buffer.
+			intermediateD?.destroy();
+			intermediateD = createRGBA16Texture(device, w, h);
+			claheCdfBuffer?.destroy();
+			const cdfSize = CLAHE_TILES_X * CLAHE_TILES_Y * CLAHE_NUM_BINS * 4; // f32
+			claheCdfBuffer = device.createBuffer({
+				size: cdfSize,
+				usage: GPUBufferUsage.STORAGE,
+			});
 		}
-		// Rebuild the output texture at the new size.
+		// Rebuild the output texture at the new size (rgba16float for precision).
 		outputTexture?.destroy();
 		outputTexture = device.createTexture({
+			size: [w, h],
+			format: 'rgba16float',
+			usage:
+				GPUTextureUsage.RENDER_ATTACHMENT |
+				GPUTextureUsage.TEXTURE_BINDING,
+		});
+		// Rebuild the readback texture (rgba8unorm for copyTextureToBuffer).
+		readbackTexture?.destroy();
+		readbackTexture = device.createTexture({
 			size: [w, h],
 			format: 'rgba8unorm',
 			usage:
@@ -809,10 +1008,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		}
 
 		// Compute log percentiles for the NegPy normalization pass.
+		// No color matrix applied — percentiles operate on camera-native data,
+		// matching negpy where rawpy delivers already-converted RGB and
+		// normalization works directly on those values.
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			const f32 = await bitmapToF32Pixels(bitmap);
-			logPerc = computeLogPercentilesFromF32(f32, w, h);
+			logPerc = computeLogPercentilesFromF32(f32, w, h, 8);
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -828,12 +1030,14 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// render (which uses a higher-res buffer with different pixel statistics)
 		// can reuse the percentiles from the preview render, keeping colours
 		// consistent between what the user sees and the exported file.
+		// No color matrix applied — percentiles operate on camera-native data,
+		// matching negpy where normalization runs on raw linear RGB directly.
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(pixels, w, h);
+				logPerc = computeLogPercentilesFromU16(pixels, w, h, 8);
 				lastLogPerc = logPerc;
 			}
 		} else {
@@ -926,16 +1130,19 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateA?.destroy();
 		intermediateB?.destroy();
 		intermediateC?.destroy();
+		intermediateD?.destroy();
+		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
+		readbackTexture?.destroy();
 		device.destroy();
 	}
 
 	/**
-	 * Copy a rectangle of pixels from the last rendered output texture back to CPU.
+	 * Copy a rectangle of pixels from the dithered readback texture back to CPU.
 	 * Returns null if no render has completed yet or the region is invalid.
 	 */
 	async function readPixels(x: number, y: number, w: number, h: number): Promise<Uint8ClampedArray | null> {
-		if (!outputTexture || w <= 0 || h <= 0) return null;
+		if (!readbackTexture || w <= 0 || h <= 0) return null;
 
 		// rgba8unorm: 4 bytes per pixel.
 		// GPU buffer bytesPerRow must be aligned to 256.
@@ -951,7 +1158,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		const encoder = device.createCommandEncoder();
 		encoder.copyTextureToBuffer(
-			{ texture: outputTexture, origin: { x, y, z: 0 } },
+			{ texture: readbackTexture!, origin: { x, y, z: 0 } },
 			{ buffer: readbackBuf, bytesPerRow: paddedBytesPerRow, rowsPerImage: h },
 			{ width: w, height: h, depthOrArrayLayers: 1 },
 		);

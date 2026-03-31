@@ -102,6 +102,32 @@ fn inner_export(
 
 // ─── Native export (full-res, f32 pipeline, no GPU) ───────────────────────────
 
+// ─── Ordered dithering helpers ────────────────────────────────────────────────
+
+/// Compute an 8×8 Bayer matrix threshold for position (x, y).
+/// Returns a value in [-0.5, +0.5] (one 8-bit step = 1/255).
+#[inline(always)]
+fn bayer_8x8(x: usize, y: usize) -> f32 {
+    let xb = (x % 8) as u32;
+    let yb = (y % 8) as u32;
+    // Bit-interleaved Bayer value (0..63).
+    let mut v = 0u32;
+    v |= (xb ^ yb) & 1;
+    v |= (((xb >> 1) ^ yb) & 1) << 1;
+    v |= ((xb ^ (yb >> 1)) & 1) << 2;
+    v |= (((xb >> 2) ^ yb) & 1) << 3;
+    v |= ((xb ^ (yb >> 2)) & 1) << 4;
+    v |= (((xb >> 1) ^ (yb >> 1)) & 1) << 5;
+    (v as f32 / 63.0) - 0.5
+}
+
+/// Convert f32 [0,1] to u8 [0,255] with an ordered-dither offset.
+/// `dither` is in [-0.5, +0.5] (Bayer matrix output).
+#[inline(always)]
+fn f32_to_u8_dithered(v: f32, dither: f32) -> u8 {
+    ((v * 255.0 + dither).round()).clamp(0.0, 255.0) as u8
+}
+
 /// Decode a RAW file at full sensor resolution, process it through the CPU-side
 /// colour pipeline in f32 precision, and write the result as a high-quality JPEG.
 ///
@@ -275,10 +301,22 @@ fn inner_export_native(
     // ── Process through the CPU pipeline ─────────────────────────────────────
     process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
 
-    // ── Convert f32 [0,1] sRGB → u8 [0,255] ─────────────────────────────────
+    // ── Convert f32 [0,1] sRGB → u8 [0,255] with ordered dithering ─────────
+    // Uses an 8×8 Bayer matrix to break up banding in smooth gradients
+    // (sky, skin tones, etc.) that would otherwise appear after quantization.
     let u8_data: Vec<u8> = rgb_f32
-        .iter()
-        .map(|&v| (v * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u8)
+        .chunks(3)
+        .enumerate()
+        .flat_map(|(i, pixel)| {
+            let x = i % final_w;
+            let y = i / final_w;
+            let dither = bayer_8x8(x, y);
+            [
+                f32_to_u8_dithered(pixel[0], dither),
+                f32_to_u8_dithered(pixel[1], dither),
+                f32_to_u8_dithered(pixel[2], dither),
+            ]
+        })
         .collect();
 
     let img_buf: ImageBuffer<Rgb<u8>, Vec<u8>> =

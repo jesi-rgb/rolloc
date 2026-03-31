@@ -9,8 +9,11 @@
  *   2. clamp((log - floor) / (ceil - floor), 0, 1)  — stretch per channel
  *      For C-41: floor < ceil → inverts the negative automatically.
  *
- * floors / ceils are computed CPU-side from per-channel percentiles of the
- * full image (0.5th / 99.5th) and passed as uniforms.
+ * floors / ceils are computed CPU-side from per-channel analysis of the
+ * full image and passed as uniforms.  Floors use the mean of pixels below
+ * the 0.001th percentile of mean luminance; ceils use the 99.999th
+ * per-channel percentile.  Analysis crops 10% of each edge (matching
+ * negpy's ProcessConfig.analysis_buffer = 0.10).
  *
  * This pass is only executed when invert = 1u. When disabled the shader is
  * bypassed and the source texture is read directly by the hd_curve pass.

@@ -391,7 +391,7 @@
 	 * CMY_MAX_DENSITY from pipeline.ts — the scale factor for CMY slider units to
 	 * log-density. Must stay in sync with the constant in pipeline.ts.
 	 */
-	const CMY_MAX_DENSITY = 0.2;
+	const CMY_MAX_DENSITY = 0.15;
 
 	function toggleWbPicker(): void {
 		wbPickerActive = !wbPickerActive;

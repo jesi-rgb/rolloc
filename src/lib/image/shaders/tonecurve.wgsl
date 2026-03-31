@@ -52,10 +52,16 @@ fn vs_main(in : VertIn) -> VertOut {
 	return out;
 }
 
-/// Look up a value in a 1D LUT texture (R channel, linear).
+/// Look up a value in a 1D LUT texture with linear interpolation.
+/// Avoids banding from nearest-neighbour snapping.
 fn lutLookup(lut : texture_1d<f32>, v : f32) -> f32 {
-	let idx = clamp(i32(v * (LUT_SIZE - 1.0) + 0.5), 0, i32(LUT_SIZE) - 1);
-	return textureLoad(lut, idx, 0).r;
+	let pos  = v * (LUT_SIZE - 1.0);
+	let lo   = clamp(i32(pos), 0, i32(LUT_SIZE) - 1);
+	let hi   = clamp(lo + 1, 0, i32(LUT_SIZE) - 1);
+	let frac = pos - f32(lo);
+	let a    = textureLoad(lut, lo, 0).r;
+	let b    = textureLoad(lut, hi, 0).r;
+	return mix(a, b, frac);
 }
 
 /// sRGB gamma encode (linear light → display sRGB).

@@ -39,6 +39,7 @@
 	let shoulder = $state(untrack(() => value.shoulder));
 	let shoulderWidth = $state(untrack(() => value.shoulderWidth));
 	let shoulderHardness = $state(untrack(() => value.shoulderHardness));
+	let claheStrength = $state(untrack(() => value.claheStrength));
 
 	// Re-sync when parent swaps to a different frame / roll
 	$effect(() => {
@@ -63,6 +64,7 @@
 		shoulder = value.shoulder;
 		shoulderWidth = value.shoulderWidth;
 		shoulderHardness = value.shoulderHardness;
+		claheStrength = value.claheStrength;
 	});
 
 	/** Build the current params object. */
@@ -87,6 +89,7 @@
 			shoulder,
 			shoulderWidth,
 			shoulderHardness,
+			claheStrength,
 		};
 	}
 
@@ -121,6 +124,7 @@
 		shoulder = d.shoulder;
 		shoulderWidth = d.shoulderWidth;
 		shoulderHardness = d.shoulderHardness;
+		claheStrength = d.claheStrength;
 		// Reset is a discrete action — commit immediately so it persists + adds to history.
 		commit();
 	}
@@ -144,7 +148,8 @@
 			toeHardness === DEFAULT_INVERSION_PARAMS.toeHardness &&
 			shoulder === DEFAULT_INVERSION_PARAMS.shoulder &&
 			shoulderWidth === DEFAULT_INVERSION_PARAMS.shoulderWidth &&
-			shoulderHardness === DEFAULT_INVERSION_PARAMS.shoulderHardness,
+			shoulderHardness === DEFAULT_INVERSION_PARAMS.shoulderHardness &&
+			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength,
 	);
 </script>
 
@@ -521,6 +526,31 @@
 					/>
 				</div>
 			</div>
+		</div>
+	</section>
+
+	<!-- ── Local Contrast (CLAHE) ─────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Local contrast
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-clahe"
+				label="CLAHE"
+				min={0}
+				max={1}
+				step={0.01}
+				value={claheStrength}
+				defaultValue={DEFAULT_INVERSION_PARAMS.claheStrength}
+				onchange={(v) => {
+					claheStrength = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
 		</div>
 	</section>
 

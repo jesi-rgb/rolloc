@@ -87,6 +87,10 @@ export interface InversionParams {
 	shoulder: number;
 	shoulderWidth: number;
 	shoulderHardness: number;
+
+	// ── CLAHE (local contrast enhancement) ────────────────────────────────────
+	/** CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default. */
+	claheStrength: number;
 }
 
 // ─── Edit parameters ──────────────────────────────────────────────────────────
@@ -231,7 +235,7 @@ const identityMatrix: Matrix3x3 = [
 
 export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	density:          1.0,
-	grade:            2.0,
+	grade:            2.5,
 	cmyCyan:          0.0,
 	cmyMagenta:       0.0,
 	cmyYellow:        0.0,
@@ -244,11 +248,12 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	shadows:          0.0,
 	highlights:       0.0,
 	toe:              0.0,
-	toeWidth:         3.0,
+	toeWidth:         2.5,
 	toeHardness:      1.0,
 	shoulder:         0.0,
-	shoulderWidth:    3.0,
+	shoulderWidth:    2.5,
 	shoulderHardness: 1.0,
+	claheStrength:    0.25,
 };
 
 export const DEFAULT_ROLL_EDIT: RollEditParams = {
@@ -318,9 +323,13 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 				[identityCurve, identityCurve, identityCurve]),
 		invert:               r.invert,
 		// Per-frame override wins; fall back to roll default; guard against old DB records.
-		inversionParams:
-			(f as { inversionParams?: InversionParams | null }).inversionParams
-			?? (r as { inversionParams?: InversionParams }).inversionParams
-			?? DEFAULT_INVERSION_PARAMS,
+		// Spread DEFAULT_INVERSION_PARAMS first so any fields missing from older
+		// DB records (e.g. claheStrength added later) get sensible defaults.
+		inversionParams: {
+			...DEFAULT_INVERSION_PARAMS,
+			...((f as { inversionParams?: InversionParams | null }).inversionParams
+				?? (r as { inversionParams?: InversionParams }).inversionParams
+				?? DEFAULT_INVERSION_PARAMS),
+		},
 	};
 }
