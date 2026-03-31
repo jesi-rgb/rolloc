@@ -1347,7 +1347,7 @@
 			{ keys: ["Q–E", "A–D"], label: "+/− CMY" },
 			{ keys: ["R", "F"], label: "+/− grade" },
 			{ keys: ["T", "G"], label: "+/− density" },
-			{ keys: [ArrowFatUpIcon], label: "10× step" },
+			{ keys: [{ icon: ArrowFatUpIcon, eventKey: "Shift" }], label: "10× step" },
 			{ keys: ["⌘Z"], label: "undo" },
 			{ keys: ["⌘⇧Z"], label: "redo" },
 			{ keys: ["Esc"], label: "back to roll" },
