@@ -208,7 +208,7 @@
 	{:else}
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
 
-		<div class="relative h-full">
+		<div class="relative h-full py-xl">
 			<!-- Loading overlay — blocks interaction until all thumbs are ready -->
 			{#if !thumbsReady}
 				<div
@@ -244,7 +244,7 @@
 
 			<!-- Grid — pointer events blocked by inert while loading -->
 			<div inert={!thumbsReady || undefined} class="h-full">
-				<VirtualGrid items={frames} gap={8} overscan={3}>
+				<VirtualGrid items={frames} gap={4} overscan={3}>
 					{#snippet item(frame, i)}
 						<FrameThumb
 							{frame}
