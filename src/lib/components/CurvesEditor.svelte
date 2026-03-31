@@ -17,10 +17,23 @@
 		r: CurvePoints;
 		g: CurvePoints;
 		b: CurvePoints;
+		/** Called on every drag tick — for live GPU preview. No IDB write. */
 		onChange: (channel: Channel, curve: CurvePoints) => void;
+		/**
+		 * Called once when the user releases a control point (drag-end) or
+		 * after adding/removing/resetting a point.
+		 * Trigger IDB persist + history push here to avoid flooding the DB.
+		 * Falls back to `onChange` if not provided (backwards-compatible).
+		 */
+		onCommit?: (channel: Channel, curve: CurvePoints) => void;
 	}
 
-	let { global: globalCurve, r, g, b, onChange }: Props = $props();
+	let { global: globalCurve, r, g, b, onChange, onCommit }: Props = $props();
+
+	/** Emit a commit (drag-end or discrete edit). Falls back to onChange if onCommit not set. */
+	function commit(channel: Channel, curve: CurvePoints): void {
+		(onCommit ?? onChange)(channel, curve);
+	}
 
 	const SIZE = 200; // SVG viewport size in px
 	const PT_R = 5;   // control-point hit radius
@@ -91,6 +104,10 @@
 	}
 
 	function onPointerUp(): void {
+		if (dragging !== null) {
+			// Drag ended — commit the current curve state for IDB persist + history.
+			commit(activeChannel, curves[activeChannel]);
+		}
 		dragging = null;
 	}
 
@@ -105,6 +122,8 @@
 		const updated: CurvePoints = { points: pts };
 		curves = { ...curves, [activeChannel]: updated };
 		onChange(activeChannel, updated);
+		// Adding a point is a discrete action — commit immediately.
+		commit(activeChannel, updated);
 	}
 
 	function removePoint(idx: number): void {
@@ -114,12 +133,16 @@
 		const updated: CurvePoints = { points: pts };
 		curves = { ...curves, [activeChannel]: updated };
 		onChange(activeChannel, updated);
+		// Removing a point is a discrete action — commit immediately.
+		commit(activeChannel, updated);
 	}
 
 	function resetCurve(): void {
 		const identity: CurvePoints = { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] };
 		curves = { ...curves, [activeChannel]: identity };
 		onChange(activeChannel, identity);
+		// Reset is a discrete action — commit immediately.
+		commit(activeChannel, identity);
 	}
 
 	// Channel colours for tabs and curves

@@ -597,13 +597,47 @@
 
 	type Channel = "global" | "r" | "g" | "b";
 
+	/**
+	 * Live preview while dragging a curve control point.
+	 * Renders the GPU canvas immediately with patched curves — zero reactive
+	 * state mutations, zero IDB writes, zero Svelte re-renders.
+	 */
 	function onCurveChange(channel: Channel, curve: CurvePoints): void {
-		if (!frame) return;
-		const snap = $state.snapshot(frame) as Frame;
+		if (!roll || !frame) return;
+		const edit = resolveEdit(roll, frame);
 		if (channel === "global") {
-			saveEdit({ toneCurve: curve });
+			renderFrame({ ...edit, toneCurve: curve });
 		} else {
-			// Patch the specific RGB channel
+			const existing =
+				edit.rgbCurves;
+			const updated: [CurvePoints, CurvePoints, CurvePoints] = [
+				existing[0],
+				existing[1],
+				existing[2],
+			];
+			if (channel === "r") updated[0] = curve;
+			else if (channel === "g") updated[1] = curve;
+			else updated[2] = curve;
+			renderFrame({ ...edit, rgbCurves: updated });
+		}
+	}
+
+	/** 500ms debounce handle — coalesces rapid curve commits into one IDB write + history entry. */
+	let curveCommitTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Commit a curve change: update frame state immediately so derived
+	 * values reflect the new curve, then debounce the IDB write + history push
+	 * so rapid add/remove/reset actions coalesce into a single undo entry.
+	 */
+	function onCurveCommit(channel: Channel, curve: CurvePoints): void {
+		if (!frame || !roll) return;
+		const snap = $state.snapshot(frame) as Frame;
+
+		let patch: Partial<FrameEditOverrides>;
+		if (channel === "global") {
+			patch = { toneCurve: curve };
+		} else {
 			const existing =
 				snap.frameEdit.rgbCurves ??
 				(roll ? [...roll.rollEdit.baseRGBCurves] : null);
@@ -616,8 +650,30 @@
 			if (channel === "r") updated[0] = curve;
 			else if (channel === "g") updated[1] = curve;
 			else updated[2] = curve;
-			saveEdit({ rgbCurves: updated });
+			patch = { rgbCurves: updated };
 		}
+
+		// Apply immediately — update frame state so curves and derived values
+		// reflect the new value right away, without waiting for the IDB write.
+		const updatedEdit: FrameEditOverrides = { ...snap.frameEdit, ...patch };
+		frame = { ...snap, frameEdit: updatedEdit };
+		// Re-render from the now-updated frame state.
+		renderFrame();
+
+		// Debounce the expensive work: IDB write + history push.
+		if (curveCommitTimer !== null) clearTimeout(curveCommitTimer);
+		curveCommitTimer = setTimeout(() => {
+			curveCommitTimer = null;
+			if (!frame || !roll) return;
+			const s = $state.snapshot(frame) as Frame;
+			historyPush(
+				structuredClone(s.frameEdit) as FrameEditOverrides,
+				$state.snapshot(roll).rollEdit as RollEditParams,
+			);
+			putFrame(structuredClone(s)).catch((err: unknown) => {
+				console.error("[curves] putFrame failed:", err);
+			});
+		}, 500);
 	}
 
 	// ─── Export ────────────────────────────────────────────────────────────────
@@ -1225,6 +1281,7 @@
 							g={effectiveRGBCurves[1]}
 							b={effectiveRGBCurves[2]}
 							onChange={onCurveChange}
+							onCommit={onCurveCommit}
 						/>
 					</section>
 
