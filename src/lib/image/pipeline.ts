@@ -7,17 +7,16 @@
  *   Pass 2 (colormatrix)  — 3×3 camera-to-sRGB colour matrix
  *   Pass 3 (tonecurve)    — white balance + RGB curves + global tone curve + γ encode
  *
- * Negative (invert = true) — 5-pass NegPy pipeline:
+ * Negative (invert = true) — NegPy pipeline (no camera colour matrix):
  *   Pass 0 (ingest_raw)     — rgba16uint linear → rgba16float  [RAW path only]
  *   Pass 1 (normalization)  — log10 conversion + per-channel percentile stretch
  *                             on camera-native data (per-channel stretch removes the
  *                             orange mask and inverts, matching negpy where rawpy
  *                             delivers Adobe RGB and normalization operates directly)
  *   Pass 2 (hd_curve)       — H&D sigmoid: CMY timing + toe/shoulder + paper response
- *                             outputs linear-light transmittance (no gamma here)
- *   Pass 3 (colormatrix)    — 3×3 camera-to-sRGB colour matrix (applied AFTER H&D
- *                             when values are positive [0,1]; safe to clamp here)
- *   Pass 4 (tonecurve)      — white balance + RGB curves + global tone curve + γ encode
+ *                             outputs gamma-encoded transmittance (pow 1/2.2)
+ *   Pass 2.5 (clahe)        — optional CLAHE local contrast enhancement
+ *   Pass 3 (tonecurve)      — white balance + RGB curves + global tone curve (no sRGB γ)
  *
  * Usage:
  *   const gpu = await createPipeline(canvas);
@@ -713,20 +712,19 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		if (edit.invert && logPerc) {
 			// ── NegPy inversion path ──────────────────────────────────────────
-			// negpy has NO color matrix step — rawpy handles cam→AdobeRGB
-			// internally.  Rolloc's rawler outputs camera-native linear, so we
-			// run normalization directly on camera-native data (per-channel log
-			// stretch handles color separation), then apply the cam→sRGB matrix
-			// AFTER the H&D curve when values are positive [0,1].
+			// negpy has NO camera color matrix — rawpy converts cam→AdobeRGB
+			// during demosaic via output_color.  The per-channel log
+			// normalization (floors/ceils stretch) handles color separation
+			// and orange mask removal independently per channel, making a
+			// cam→sRGB matrix unnecessary (and harmful: applying it to
+			// post-H&D gamma-encoded data produces incorrect color mixing,
+			// causing a magenta tint).
 			//
 			// Pass 1: normalization  — sourceTexture  → intermediateA
 			// Pass 2: hd_curve       — intermediateA  → intermediateB
-			// Pass 3: colormatrix    — intermediateB  → intermediateC
-			//         (cam-native → linear sRGB; safe now because H&D output
-			//          is positive [0,1] so clamping is benign)
-			// Pass 3.5: clahe_histogram — compute: intermediateC → claheCdfBuffer
-			// Pass 3.6: clahe_remap    — fragment: intermediateC + CDF → intermediateD
-			// Pass 4: tonecurve      — intermediateD  → outputTexture
+			// Pass 2.5: clahe_histogram — compute: intermediateB → claheCdfBuffer
+			// Pass 2.6: clahe_remap    — fragment: intermediateB + CDF → intermediateC
+			// Pass 3: tonecurve      — intermediateC (or B)  → outputTexture
 
 			const normBuf = makeNormalizationUniforms(device, logPerc);
 			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
@@ -744,7 +742,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			drawFullscreenTriangle(encoder, normalizationPipeline, normBG, intermediateA!.createView());
 
-			// H&D curve: normalized log-density → linear positive transmittance
+			// H&D curve: normalized log-density → gamma-encoded positive transmittance
 			const hdBG = device.createBindGroup({
 				layout: hdCurvePipeline.getBindGroupLayout(0),
 				entries: [
@@ -756,17 +754,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateB!.createView());
 
-			// Color matrix: cam-native → linear sRGB (after H&D, values are [0,1])
-			const colorMatrixBGNeg = device.createBindGroup({
-				layout: colorMatrixPipeline.getBindGroupLayout(0),
-				entries: [
-					{ binding: 0, resource: sampler },
-					{ binding: 1, resource: intermediateB!.createView() },
-					{ binding: 2, resource: { buffer: colorMatrixUniformBuf } },
-				],
-			});
-
-			drawFullscreenTriangle(encoder, colorMatrixPipeline, colorMatrixBGNeg, intermediateC!.createView());
+			// No color matrix in the negative path — per-channel log
+			// normalization already handles color separation (matching negpy).
 
 			// ── CLAHE passes (skip when strength is zero) ────────────────────
 			const claheStrength = edit.inversionParams.claheStrength;
@@ -800,7 +789,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				const claheHistBG = device.createBindGroup({
 					layout: claheHistPipeline.getBindGroupLayout(0),
 					entries: [
-						{ binding: 0, resource: intermediateC!.createView() },
+						{ binding: 0, resource: intermediateB!.createView() },
 						{ binding: 1, resource: { buffer: claheHistUnifBuf } },
 						{ binding: 2, resource: { buffer: claheCdfBuffer } },
 					],
@@ -834,18 +823,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 					layout: claheRemapPipeline.getBindGroupLayout(0),
 					entries: [
 						{ binding: 0, resource: sampler },
-						{ binding: 1, resource: intermediateC!.createView() },
+						{ binding: 1, resource: intermediateB!.createView() },
 						{ binding: 2, resource: { buffer: claheRemapUnifBuf } },
 						{ binding: 3, resource: { buffer: claheCdfBuffer } },
 					],
 				});
 
-				drawFullscreenTriangle(encoder, claheRemapPipeline, claheRemapBG, intermediateD!.createView());
+				drawFullscreenTriangle(encoder, claheRemapPipeline, claheRemapBG, intermediateC!.createView());
 
-				beforeToneCurve = intermediateD!.createView();
-			} else {
-				// CLAHE disabled — feed colormatrix output directly to tonecurve.
 				beforeToneCurve = intermediateC!.createView();
+			} else {
+				// CLAHE disabled — feed H&D output directly to tonecurve.
+				beforeToneCurve = intermediateB!.createView();
 			}
 		} else {
 			// ── Positive / pass-through path ──────────────────────────────────

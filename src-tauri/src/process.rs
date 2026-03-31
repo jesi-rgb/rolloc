@@ -9,10 +9,12 @@
 //!   1. Log normalization — log10 per-channel percentile stretch on camera-native data
 //!      (removes orange mask, inverts; per-channel stretch handles color separation)
 //!   2. H&D curve — sigmoid paper response with CMY timing, toe/shoulder
-//!   3. Color matrix — cam-native → linear sRGB (applied AFTER H&D when values are
-//!      positive [0,1]; safe to clamp here; negpy has no matrix — rawpy does it)
-//!   3.5. CLAHE — contrast limited adaptive histogram equalization (local contrast)
+//!   3. CLAHE — contrast limited adaptive histogram equalization (local contrast)
 //!   4. Tone curve — WB multipliers + RGB LUTs + global tone LUT (sRGB skipped, H&D already 1/2.2)
+//!
+//!   No color matrix in the negative path: the per-channel log normalization already
+//!   handles color separation. Applying cam→sRGB after H&D causes a magenta tint
+//!   because the matrix expects linear camera-native values, not post-processed data.
 //!
 //! **Positive path** (invert = false):
 //!   1. Normalize/invert — black/white point + exposure compensation
@@ -858,12 +860,12 @@ pub fn process_image(
 
     if edit.invert {
         // ── Negative path ──────────────────────────────────────────────────
-        // negpy has NO color matrix — rawpy handles cam→AdobeRGB internally.
-        // Rolloc's rawler outputs camera-native linear, so we run normalization
-        // directly on camera-native data (per-channel log stretch handles color
-        // separation), then apply the cam→sRGB matrix AFTER the H&D curve when
-        // values are positive [0,1].
-        let matrix = &edit.camera_color_matrix;
+        // negpy has NO camera color matrix — rawpy handles cam→AdobeRGB
+        // during demosaic via output_color.  The per-channel log
+        // normalization (floors/ceils stretch) handles color separation
+        // and orange mask removal independently per channel, making a
+        // cam→sRGB matrix unnecessary (and harmful: applying it to
+        // post-H&D gamma-encoded data produces incorrect color mixing).
 
         // Compute or use provided log percentiles.
         // No color matrix applied — percentiles operate on camera-native data.
@@ -897,22 +899,10 @@ pub fn process_image(
             }
         });
 
-        // Step 3: Color matrix — cam-native → linear sRGB (after H&D, values
-        // are positive [0,1] so clamping is benign).
-        pixels.par_chunks_mut(width * 3).for_each(|row| {
-            for i in (0..row.len()).step_by(3) {
-                let r = row[i];
-                let g = row[i + 1];
-                let b = row[i + 2];
+        // No color matrix in the negative path — per-channel log
+        // normalization already handles color separation (matching negpy).
 
-                let [mr, mg, mb] = apply_color_matrix(r, g, b, matrix);
-                row[i] = mr;
-                row[i + 1] = mg;
-                row[i + 2] = mb;
-            }
-        });
-
-        // Step 3.5: CLAHE (needs the full H&D output before it can run).
+        // Step 3: CLAHE (needs the full H&D output before it can run).
         apply_clahe(pixels, width, height, edit.inversion_params.clahe_strength);
 
         // Step 4: Tone curve (skip sRGB — H&D already did 1/2.2).
