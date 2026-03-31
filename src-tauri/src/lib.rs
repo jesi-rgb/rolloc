@@ -1,4 +1,6 @@
+mod demosaic;
 mod export;
+mod process;
 mod raw;
 mod thumb;
 
@@ -13,6 +15,7 @@ pub fn run() {
       raw::raw_thumb,
       raw::raw_decode,
       export::export_jpeg,
+      export::export_native,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

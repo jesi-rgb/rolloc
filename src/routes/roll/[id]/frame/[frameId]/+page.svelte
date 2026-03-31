@@ -28,7 +28,7 @@
 	import { createPipeline, parseRawDecodeBuffer } from "$lib/image/pipeline";
 	import { resolveEdit, DEFAULT_INVERSION_PARAMS } from "$lib/types";
 	import { isRawExtension } from "$lib/fs/directory";
-	import type { GpuPipeline } from "$lib/image/pipeline";
+	import type { GpuPipeline, LogPercentiles } from "$lib/image/pipeline";
 	import type {
 		Roll,
 		Frame,
@@ -629,12 +629,14 @@
 	/**
 	 * Export the current frame as a full-quality JPEG.
 	 *
-	 * RAW frames: re-decode at full resolution (no maxPx cap), render through
-	 * the GPU pipeline with the current edit, readback pixels, save via
-	 * native dialog.
+	 * RAW frames: call `export_native` which decodes the RAW at full sensor
+	 * resolution and processes entirely in Rust at f32 precision — no GPU
+	 * texture size limits, no 8-bit quantization until the final JPEG encode.
+	 * Log percentiles from the preview render are passed so colour normalization
+	 * matches what the user sees.
 	 *
-	 * JPEG/TIFF frames: re-render the existing bitmap (already full-res
-	 * preview), readback pixels, save via native dialog.
+	 * JPEG/TIFF frames: re-render the existing bitmap through the GPU pipeline,
+	 * readback pixels, and encode via `export_jpeg`.
 	 */
 	async function exportFrame(): Promise<void> {
 		if (!pipeline || !frame || !roll || exporting) return;
@@ -668,47 +670,40 @@
 				return;
 			}
 
-			// ── Determine export dimensions ────────────────────────────────
-			let exportWidth: number;
-			let exportHeight: number;
+			// Ensure .jpg extension on the path (dialog may or may not append it).
+			const finalPath =
+				savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
+					? savePath
+					: `${savePath}.jpg`;
 
 			if (isRawExtension(currentFrame.filename)) {
-				// ── RAW path: full-res decode ──────────────────────────────
+				// ── RAW path: native f32 export via Rust ───────────────────
 				const dirPath = await getRollPath(rollId);
 				if (!dirPath) {
 					throw new Error("Roll source directory not found.");
 				}
 				const absolutePath = await join(dirPath, currentFrame.filename);
 
-				// Decode at full resolution (no maxPx cap), but still respect
-				// the GPU texture size limit.
-				const gpuLimit = pipeline.maxTextureDimension;
-				const fullResBuffer = await invoke<ArrayBuffer>("raw_decode", {
-					path: absolutePath,
-					maxPx: gpuLimit,
-					skipWb: currentRoll.rollEdit.invert,
-				});
+				// Reuse log percentiles from the preview render so the
+				// colour normalization is identical to what the user sees.
+				const logPerc: LogPercentiles | null =
+					pipeline.lastLogPerc ?? null;
 
-				const { width: w, height: h } =
-					parseRawDecodeBuffer(fullResBuffer);
-				exportWidth = w;
-				exportHeight = h;
-
-				// Render at full resolution into the pipeline, reusing the
-				// log percentiles from the preview render so the colour
-				// normalization is identical to what the user sees.
-				await pipeline.renderRaw(
+				await invoke("export_native", {
+					sourcePath: absolutePath,
+					exportPath: finalPath,
 					edit,
-					fullResBuffer,
-					pipeline.lastLogPerc ?? undefined,
-				);
+					logPerc,
+					skipWb: currentRoll.rollEdit.invert,
+					quality: 95,
+				});
 			} else {
-				// ── JPEG/TIFF path: re-render existing bitmap ──────────────
+				// ── JPEG/TIFF path: GPU readback ───────────────────────────
 				if (!currentBitmap) {
 					throw new Error("No image loaded for this frame.");
 				}
-				exportWidth = currentBitmap.width;
-				exportHeight = currentBitmap.height;
+				const exportWidth = currentBitmap.width;
+				const exportHeight = currentBitmap.height;
 				console.debug(
 					"[export] JPEG path, rendering bitmap",
 					exportWidth,
@@ -719,35 +714,28 @@
 				);
 				await pipeline.render(edit, currentBitmap);
 				console.debug("[export] render complete");
-			}
 
-			// ── Readback rendered pixels ───────────────────────────────────
-			const pixels = await pipeline.readPixels(
-				0,
-				0,
-				exportWidth,
-				exportHeight,
-			);
-			if (!pixels) {
-				throw new Error(
-					"Failed to read back rendered pixels from GPU.",
+				// Readback rendered pixels from GPU
+				const pixels = await pipeline.readPixels(
+					0,
+					0,
+					exportWidth,
+					exportHeight,
 				);
+				if (!pixels) {
+					throw new Error(
+						"Failed to read back rendered pixels from GPU.",
+					);
+				}
+
+				await invoke("export_jpeg", {
+					pixels: Array.from(pixels),
+					width: exportWidth,
+					height: exportHeight,
+					path: finalPath,
+					quality: 95,
+				});
 			}
-
-			// ── Encode + write via Rust ────────────────────────────────────
-			// Ensure .jpg extension on the path (dialog may or may not append it).
-			const finalPath =
-				savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
-					? savePath
-					: `${savePath}.jpg`;
-
-			await invoke("export_jpeg", {
-				pixels: Array.from(pixels),
-				width: exportWidth,
-				height: exportHeight,
-				path: finalPath,
-				quality: 95,
-			});
 
 			exportSuccess = true;
 			// Auto-clear the success message after 3 seconds.

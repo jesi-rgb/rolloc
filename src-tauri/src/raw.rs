@@ -46,7 +46,7 @@ use tauri::ipc::Response;
 
 /// Read the EXIF Orientation tag from a RAW/JPEG file using kamadak-exif.
 /// Returns the tag value 1–8 (TIFF spec), defaulting to 1 (Normal) on any error.
-fn read_exif_orientation(path: &str) -> u32 {
+pub fn read_exif_orientation(path: &str) -> u32 {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return 1,
@@ -72,7 +72,7 @@ fn read_exif_orientation(path: &str) -> u32 {
 ///   6 = Rotate 90 CW (camera held 90° CW → image is 90° CCW → rotate CW to fix)
 ///   7 = Transverse (mirror horizontal then rotate 90)
 ///   8 = Rotate 270 CW (camera held 90° CCW → rotate CCW to fix, i.e. 270 CW)
-fn apply_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
+pub fn apply_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
     match orientation {
         2 => DynamicImage::from(imageops::flip_horizontal(&img)),
         3 => DynamicImage::from(imageops::rotate180(&img)),
