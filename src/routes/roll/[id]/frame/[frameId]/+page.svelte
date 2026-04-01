@@ -875,18 +875,20 @@
 				if (!currentBitmap) {
 					throw new Error("No image loaded for this frame.");
 				}
-				const exportWidth = currentBitmap.width;
-				const exportHeight = currentBitmap.height;
 				console.debug(
 					"[export] JPEG path, rendering bitmap",
-					exportWidth,
+					currentBitmap.width,
 					"x",
-					exportHeight,
+					currentBitmap.height,
 					"edit:",
 					edit,
 				);
 				await pipeline.render(edit, currentBitmap);
-				console.debug("[export] render complete");
+
+				// Get the actual output dimensions (after crop is applied)
+				const exportWidth = pipeline.lastOutputWidth;
+				const exportHeight = pipeline.lastOutputHeight;
+				console.debug("[export] render complete, output size:", exportWidth, "x", exportHeight);
 
 				// Readback rendered pixels from GPU
 				const pixels = await pipeline.readPixels(

@@ -357,6 +357,12 @@ export interface GpuPipeline {
 	maxTextureDimension: number;
 	/** The log percentiles from the last RAW preview render, or null if not yet rendered. */
 	lastLogPerc: LogPercentiles | null;
+	/**
+	 * The output dimensions from the last render (after crop is applied).
+	 * Use these for readPixels() after rendering to get the correct cropped size.
+	 */
+	lastOutputWidth: number;
+	lastOutputHeight: number;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -1302,5 +1308,14 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		return result;
 	}
 
-	return { render, renderRaw, readPixels, destroy, maxTextureDimension, get lastLogPerc() { return lastLogPerc; } };
+	return {
+		render,
+		renderRaw,
+		readPixels,
+		destroy,
+		maxTextureDimension,
+		get lastLogPerc() { return lastLogPerc; },
+		get lastOutputWidth() { return lastOutputWidth; },
+		get lastOutputHeight() { return lastOutputHeight; },
+	};
 }
