@@ -122,6 +122,12 @@ pub struct InversionParams {
     pub shoulder_hardness: f32,
     /// CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default.
     pub clahe_strength: f32,
+    /// Film type: "C41" (color negative), "BW" (black & white), "E6" (slide).
+    pub film_type: String,
+    /// E6 normalize mode — not used in CPU processing yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub e6_normalize: bool,
 }
 
 /// Per-channel log-density percentiles for the normalization pass.
@@ -564,54 +570,62 @@ impl HDParams {
 }
 
 /// Apply H&D curve to a normalized [0,1] RGB pixel.
-fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams) -> [f32; 3] {
-    [
-        hd_channel(
-            r,
-            p.pivot,
-            p.slope,
-            p.cmy_r,
-            p.s_cmy_r,
-            p.h_cmy_r,
-            p.toe,
-            p.toe_width,
-            p.shoulder,
-            p.shoulder_width,
-            p.shadows,
-            p.highlights,
-            D_MAX,
-        ),
-        hd_channel(
-            g,
-            p.pivot,
-            p.slope,
-            p.cmy_g,
-            p.s_cmy_g,
-            p.h_cmy_g,
-            p.toe,
-            p.toe_width,
-            p.shoulder,
-            p.shoulder_width,
-            p.shadows,
-            p.highlights,
-            D_MAX,
-        ),
-        hd_channel(
-            b,
-            p.pivot,
-            p.slope,
-            p.cmy_b,
-            p.s_cmy_b,
-            p.h_cmy_b,
-            p.toe,
-            p.toe_width,
-            p.shoulder,
-            p.shoulder_width,
-            p.shadows,
-            p.highlights,
-            D_MAX,
-        ),
-    ]
+/// When `is_bw` is true, converts output to luminance (grayscale) matching
+/// the GPU shader's B&W mode.
+fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
+    let hr = hd_channel(
+        r,
+        p.pivot,
+        p.slope,
+        p.cmy_r,
+        p.s_cmy_r,
+        p.h_cmy_r,
+        p.toe,
+        p.toe_width,
+        p.shoulder,
+        p.shoulder_width,
+        p.shadows,
+        p.highlights,
+        D_MAX,
+    );
+    let hg = hd_channel(
+        g,
+        p.pivot,
+        p.slope,
+        p.cmy_g,
+        p.s_cmy_g,
+        p.h_cmy_g,
+        p.toe,
+        p.toe_width,
+        p.shoulder,
+        p.shoulder_width,
+        p.shadows,
+        p.highlights,
+        D_MAX,
+    );
+    let hb = hd_channel(
+        b,
+        p.pivot,
+        p.slope,
+        p.cmy_b,
+        p.s_cmy_b,
+        p.h_cmy_b,
+        p.toe,
+        p.toe_width,
+        p.shoulder,
+        p.shoulder_width,
+        p.shadows,
+        p.highlights,
+        D_MAX,
+    );
+
+    // B&W mode: convert to luminance (Rec. 709, same as GPU shader)
+    if is_bw {
+        let lum = LUMA_R * hr + LUMA_G * hg + LUMA_B * hb;
+        [lum, lum, lum]
+    } else {
+        [hr, hg, hb]
+    }
 }
 
 // ─── Color matrix pass (positive path only) ──────────────────────────────────
@@ -878,8 +892,12 @@ pub fn process_image(
     let green_lut = build_lut(&edit.rgb_curves[1]);
     let blue_lut = build_lut(&edit.rgb_curves[2]);
 
-    // WB multipliers
-    let wb = temperature_to_multipliers(edit.white_balance.temperature, edit.white_balance.tint);
+    // WB multipliers — skip for inversion path (CMY timing handles color correction).
+    let wb = if edit.invert {
+        [1.0, 1.0, 1.0]
+    } else {
+        temperature_to_multipliers(edit.white_balance.temperature, edit.white_balance.tint)
+    };
 
     if edit.invert {
         // ── Negative path ──────────────────────────────────────────────────
@@ -902,6 +920,7 @@ pub fn process_image(
         };
 
         let hd = HDParams::from_inversion(&edit.inversion_params);
+        let is_bw = edit.inversion_params.film_type == "BW";
 
         // Step 1+2: Log normalization + H&D curve (fused, parallel by row).
         pixels.par_chunks_mut(width * 3).for_each(|row| {
@@ -913,8 +932,8 @@ pub fn process_image(
                 // Step 1: Log normalization (on camera-native data)
                 let [nr, ng, nb] = normalize_pixel(r, g, b, perc);
 
-                // Step 2: H&D curve
-                let [hr, hg, hb] = hd_pixel(nr, ng, nb, &hd);
+                // Step 2: H&D curve (converts to luminance for B&W mode)
+                let [hr, hg, hb] = hd_pixel(nr, ng, nb, &hd, is_bw);
 
                 row[i] = hr;
                 row[i + 1] = hg;
