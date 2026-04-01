@@ -67,7 +67,7 @@
 	}
 </script>
 
-<svelte:head><title>Roloc — Film Archive</title></svelte:head>
+<svelte:head><title>Rolloc — Film Archive</title></svelte:head>
 
 <div class="min-h-screen bg-base text-content">
 	<!-- Top bar -->
@@ -76,7 +76,7 @@
 	>
 		<div class="flex items-center gap-sm">
 			<span class="text-2xl font-bold tracking-tight text-primary-muted"
-				>Roloc</span
+				>Rolloc</span
 			>
 			<span class="text-content-subtle text-sm hidden sm:inline"
 				>Film Archive</span

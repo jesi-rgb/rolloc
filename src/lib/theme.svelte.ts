@@ -8,7 +8,7 @@
 
 type Theme = 'light' | 'dark';
 
-const STORAGE_KEY = 'roloc-theme';
+const STORAGE_KEY = 'rolloc-theme';
 
 function getInitialTheme(): Theme {
 	if (typeof localStorage === 'undefined') return 'dark';

@@ -1,4 +1,4 @@
-# Roloc — Agent Guidelines
+# Rolloc — Agent Guidelines
 
 Reference for agentic coding agents working in this repository.
 
@@ -6,7 +6,7 @@ Reference for agentic coding agents working in this repository.
 
 ## Project Overview
 
-Roloc is a **local-first, web-based film negative inversion and photo management app**.
+Rolloc is a **local-first, web-based film negative inversion and photo management app**.
 Stack: SvelteKit 2 + Svelte 5 + TypeScript, Tailwind CSS v4, Vitest, WebGPU (Phase 3+).
 No backend, no auth, no cloud. All user data stays on the local filesystem.
 See `PLAN.md` for the full phased build plan — it is the source of truth for scope.

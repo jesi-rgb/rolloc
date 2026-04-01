@@ -2,7 +2,7 @@
 @plugin '@tailwindcss/typography';
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   ROLOC DESIGN TOKENS
+   ROLLOC DESIGN TOKENS
    Tailwind v4 @theme block — all tokens become utility classes automatically.
    Colors are semantic aliases backed by CSS custom properties that flip
    per theme (light / dark). No dark: prefix needed in markup.
@@ -195,7 +195,7 @@
 
 /* ─────────────────────────────────────────────────────────────────────────────
    DARK THEME
-   Applied when <html class="dark"> (default for Roloc).
+   Applied when <html class="dark"> (default for Rolloc).
 ───────────────────────────────────────────────────────────────────────────── */
 :root.dark {
 	/* Base surfaces — dark end of zinc */
@@ -304,8 +304,13 @@ body {
    CUSTOM ANIMATIONS
 ───────────────────────────────────────────────────────────────────────────── */
 @keyframes fadein {
-	from { opacity: 0; }
-	to   { opacity: 1; }
+	from {
+		opacity: 0;
+	}
+
+	to {
+		opacity: 1;
+	}
 }
 
 @utility animate-fadein {

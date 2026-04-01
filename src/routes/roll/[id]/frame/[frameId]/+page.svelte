@@ -608,8 +608,7 @@
 		if (channel === "global") {
 			renderFrame({ ...edit, toneCurve: curve });
 		} else {
-			const existing =
-				edit.rgbCurves;
+			const existing = edit.rgbCurves;
 			const updated: [CurvePoints, CurvePoints, CurvePoints] = [
 				existing[0],
 				existing[1],
@@ -863,16 +862,26 @@
 			// Q/A → Cyan  |  W/S → Magenta  |  E/D → Yellow
 			// R/F → Grade  |  T/G → Density
 			// Hold Shift for 10× step.
-			case "q": case "Q":
-			case "a": case "A":
-			case "w": case "W":
-			case "s": case "S":
-			case "e": case "E":
-			case "d": case "D":
-			case "r": case "R":
-			case "f": case "F":
-			case "t": case "T":
-			case "g": case "G": {
+			case "q":
+			case "Q":
+			case "a":
+			case "A":
+			case "w":
+			case "W":
+			case "s":
+			case "S":
+			case "e":
+			case "E":
+			case "d":
+			case "D":
+			case "r":
+			case "R":
+			case "f":
+			case "F":
+			case "t":
+			case "T":
+			case "g":
+			case "G": {
 				// Throttle nudge keys to KEY_THROTTLE_MS to prevent runaway key-repeat.
 				const k = e.key.toLowerCase();
 				const now = performance.now();
@@ -983,7 +992,7 @@
 </script>
 
 <svelte:head>
-	<title>{frameLabel} — {roll?.label ?? "Roll"} — Roloc</title>
+	<title>{frameLabel} — {roll?.label ?? "Roll"} — Rolloc</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -1347,7 +1356,10 @@
 			{ keys: ["Q–E", "A–D"], label: "+/− CMY" },
 			{ keys: ["R", "F"], label: "+/− grade" },
 			{ keys: ["T", "G"], label: "+/− density" },
-			{ keys: [{ icon: ArrowFatUpIcon, eventKey: "Shift" }], label: "10× step" },
+			{
+				keys: [{ icon: ArrowFatUpIcon, eventKey: "Shift" }],
+				label: "10× step",
+			},
 			{ keys: ["⌘Z"], label: "undo" },
 			{ keys: ["⌘⇧Z"], label: "redo" },
 			{ keys: ["Esc"], label: "back to roll" },

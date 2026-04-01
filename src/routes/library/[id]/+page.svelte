@@ -323,7 +323,7 @@
 </script>
 
 <svelte:head>
-	<title>{library?.label ?? "Library"} — Roloc</title>
+	<title>{library?.label ?? "Library"} — Rolloc</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} />

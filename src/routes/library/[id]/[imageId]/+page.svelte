@@ -148,7 +148,9 @@
 			if (offset === 0) continue;
 			const neighbor = sorted[ci + offset];
 			if (!neighbor) continue;
-			const origIdx = images.findIndex((img) => img.image.id === neighbor.image.id);
+			const origIdx = images.findIndex(
+				(img) => img.image.id === neighbor.image.id,
+			);
 			if (origIdx !== -1) {
 				// Fire-and-forget; errors are handled inside loadImage
 				loadImage(origIdx);
@@ -313,7 +315,7 @@
 </script>
 
 <svelte:head>
-	<title>{library?.label || "Library"} — Roloc</title>
+	<title>{library?.label || "Library"} — Rolloc</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} />

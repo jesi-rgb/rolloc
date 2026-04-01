@@ -61,7 +61,7 @@ function makeFrame(overrides: Partial<Frame> = {}): Frame {
 async function wipeDB(): Promise<void> {
 	closeDB();
 	await new Promise<void>((resolve, reject) => {
-		const req = indexedDB.deleteDatabase('roloc');
+		const req = indexedDB.deleteDatabase('rolloc');
 		req.onsuccess = () => resolve();
 		req.onerror = () => reject(req.error);
 		// onblocked fires when another connection is open; closeDB() above prevents this.

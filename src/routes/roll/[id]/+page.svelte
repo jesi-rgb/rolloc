@@ -161,7 +161,7 @@
 </script>
 
 <svelte:head>
-	<title>{roll?.label ?? "Roll"} — Roloc</title>
+	<title>{roll?.label ?? "Roll"} — Rolloc</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleKeydown} />

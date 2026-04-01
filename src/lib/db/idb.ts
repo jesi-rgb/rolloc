@@ -1,5 +1,5 @@
 /**
- * IndexedDB wrapper for Roloc.
+ * IndexedDB wrapper for Rolloc.
  *
  * Stores:
  *   rolls     — Roll records (without directory path)
@@ -11,16 +11,16 @@
 
 import type { Roll, Frame, Library, LibraryImage } from '$lib/types';
 
-const DB_NAME = 'roloc';
+const DB_NAME = 'rolloc';
 const DB_VERSION = 3;
 
 // ─── Store names ──────────────────────────────────────────────────────────────
 
-const STORE_ROLLS     = 'rolls';
-const STORE_FRAMES    = 'frames';
+const STORE_ROLLS = 'rolls';
+const STORE_FRAMES = 'frames';
 const STORE_LIBRARIES = 'libraries';
-const STORE_IMAGES    = 'images';
-const STORE_HANDLES   = 'handles';
+const STORE_IMAGES = 'images';
+const STORE_HANDLES = 'handles';
 
 // ─── Open ─────────────────────────────────────────────────────────────────────
 
@@ -38,32 +38,32 @@ export function openDB(): Promise<IDBDatabase> {
 	return new Promise((resolve, reject) => {
 		const req = indexedDB.open(DB_NAME, DB_VERSION);
 
-	req.onupgradeneeded = (event) => {
-		const db = (event.target as IDBOpenDBRequest).result;
+		req.onupgradeneeded = (event) => {
+			const db = (event.target as IDBOpenDBRequest).result;
 
-		if (!db.objectStoreNames.contains(STORE_ROLLS)) {
-			db.createObjectStore(STORE_ROLLS, { keyPath: 'id' });
-		}
+			if (!db.objectStoreNames.contains(STORE_ROLLS)) {
+				db.createObjectStore(STORE_ROLLS, { keyPath: 'id' });
+			}
 
-		if (!db.objectStoreNames.contains(STORE_FRAMES)) {
-			const frameStore = db.createObjectStore(STORE_FRAMES, { keyPath: 'id' });
-			frameStore.createIndex('rollId', 'rollId', { unique: false });
-		}
+			if (!db.objectStoreNames.contains(STORE_FRAMES)) {
+				const frameStore = db.createObjectStore(STORE_FRAMES, { keyPath: 'id' });
+				frameStore.createIndex('rollId', 'rollId', { unique: false });
+			}
 
-		if (!db.objectStoreNames.contains(STORE_LIBRARIES)) {
-			db.createObjectStore(STORE_LIBRARIES, { keyPath: 'id' });
-		}
+			if (!db.objectStoreNames.contains(STORE_LIBRARIES)) {
+				db.createObjectStore(STORE_LIBRARIES, { keyPath: 'id' });
+			}
 
-		if (!db.objectStoreNames.contains(STORE_IMAGES)) {
-			const imageStore = db.createObjectStore(STORE_IMAGES, { keyPath: 'id' });
-			imageStore.createIndex('libraryId', 'libraryId', { unique: false });
-		}
+			if (!db.objectStoreNames.contains(STORE_IMAGES)) {
+				const imageStore = db.createObjectStore(STORE_IMAGES, { keyPath: 'id' });
+				imageStore.createIndex('libraryId', 'libraryId', { unique: false });
+			}
 
-		if (!db.objectStoreNames.contains(STORE_HANDLES)) {
-			// Key is rollId or libraryId, value is { rollId/libraryId, handle }
-			db.createObjectStore(STORE_HANDLES, { keyPath: 'rollId' });
-		}
-	};
+			if (!db.objectStoreNames.contains(STORE_HANDLES)) {
+				// Key is rollId or libraryId, value is { rollId/libraryId, handle }
+				db.createObjectStore(STORE_HANDLES, { keyPath: 'rollId' });
+			}
+		};
 
 		req.onsuccess = (event) => {
 			_db = (event.target as IDBOpenDBRequest).result;
@@ -87,7 +87,7 @@ function tx(
 function request<T>(req: IDBRequest<T>): Promise<T> {
 	return new Promise((resolve, reject) => {
 		req.onsuccess = () => resolve(req.result);
-		req.onerror  = () => reject(req.error);
+		req.onerror = () => reject(req.error);
 	});
 }
 

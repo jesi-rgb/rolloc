@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "roloc",
+      "name": "Rolloc",
       "dependencies": {
         "@tanstack/svelte-virtual": "^3.13.23",
         "@tauri-apps/plugin-dialog": "^2.6.0",

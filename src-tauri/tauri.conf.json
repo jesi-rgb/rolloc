@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Roloc",
+  "productName": "Rolloc",
   "version": "0.1.0",
-  "identifier": "com.roloc.app",
+  "identifier": "com.rolloc.app",
   "build": {
     "frontendDist": "../build",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Roloc - Film Negative Inversion",
+        "title": "Rolloc",
         "width": 1400,
         "height": 900,
         "minWidth": 800,
