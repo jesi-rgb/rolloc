@@ -1069,6 +1069,12 @@
 					goto(`/roll/${rollId}`);
 				}
 				break;
+			case "Enter":
+				if (cropModeActive) {
+					e.preventDefault();
+					commitCropAndExit();
+				}
+				break;
 		}
 	}
 
