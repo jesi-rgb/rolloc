@@ -93,9 +93,11 @@ pub struct InversionParams {
     pub highlights: f32,
     pub toe: f32,
     pub toe_width: f32,
+    #[allow(dead_code)] // Present in TS type but not yet used in processing
     pub toe_hardness: f32,
     pub shoulder: f32,
     pub shoulder_width: f32,
+    #[allow(dead_code)] // Present in TS type but not yet used in processing
     pub shoulder_hardness: f32,
     /// CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default.
     pub clahe_strength: f32,

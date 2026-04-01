@@ -251,12 +251,22 @@ fn inner_export_native(
         let cfa_w = cfa.width;
         let cfa_h = cfa.height;
 
+        eprintln!("DEBUG export: CFA {}x{}, pattern: {}", cfa_w, cfa_h, cfa.name);
+        eprintln!("DEBUG export: sensor {}x{}, cpp={}", pw, ph, raw.cpp);
+        
         if cfa_w == 2 && cfa_h == 2 {
             // Bayer 2×2 — AHD full-resolution demosaic.
-            crate::demosaic::demosaic_ahd(pixels, pw, ph, |r, c| cfa.color_at(r, c), norm_ch)
+            let result = crate::demosaic::demosaic_ahd(pixels, pw, ph, |r, c| cfa.color_at(r, c), norm_ch);
+            eprintln!("DEBUG export: AHD output {}x{}", result.0, result.1);
+            result
+        } else if cfa_w == 6 && cfa_h == 6 {
+            // X-Trans 6×6 — bilinear full-resolution demosaic.
+            let result = crate::demosaic::demosaic_xtrans_bilinear(pixels, pw, ph, |r, c| cfa.color_at(r, c), norm_ch);
+            eprintln!("DEBUG export: X-Trans bilinear output {}x{}", result.0, result.1);
+            result
         } else {
-            // X-Trans or other — superpixel fallback.
-            crate::demosaic::demosaic_superpixel(
+            // Other exotic CFA — superpixel fallback (produces smaller but correct image).
+            let result = crate::demosaic::demosaic_superpixel(
                 pixels,
                 pw,
                 ph,
@@ -264,7 +274,9 @@ fn inner_export_native(
                 cfa_h,
                 |r, c| cfa.color_at(r, c),
                 norm_ch,
-            )
+            );
+            eprintln!("DEBUG export: superpixel output {}x{}", result.0, result.1);
+            result
         }
     };
 
