@@ -6,11 +6,11 @@
 	 * Column count is derived from container width and a set of responsive
 	 * breakpoints matching Tailwind's sm/md/lg/xl/2xl scale.
 	 */
-	import { createVirtualizer } from '@tanstack/svelte-virtual';
-	import type { Readable } from 'svelte/store';
-	import { get } from 'svelte/store';
-	import type { SvelteVirtualizer } from '@tanstack/svelte-virtual';
-	import type { Snippet } from 'svelte';
+	import { createVirtualizer } from "@tanstack/svelte-virtual";
+	import type { Readable } from "svelte/store";
+	import { get } from "svelte/store";
+	import type { SvelteVirtualizer } from "@tanstack/svelte-virtual";
+	import type { Snippet } from "svelte";
 
 	interface Props<T> {
 		/** Full item array. */
@@ -85,8 +85,13 @@
 	// virtualInst tracks the current Virtualizer instance from the store.
 	// We re-create the virtualizer only when scrollEl changes.
 
-	let virtualStore: Readable<SvelteVirtualizer<HTMLDivElement, HTMLDivElement>> | null = null;
-	let virtualInst = $state<SvelteVirtualizer<HTMLDivElement, HTMLDivElement> | null>(null);
+	let virtualStore: Readable<
+		SvelteVirtualizer<HTMLDivElement, HTMLDivElement>
+	> | null = null;
+	let virtualInst = $state<SvelteVirtualizer<
+		HTMLDivElement,
+		HTMLDivElement
+	> | null>(null);
 
 	$effect(() => {
 		const el = scrollEl;
@@ -126,7 +131,12 @@
 		const _rowHeight = rowHeight;
 		const _gap = gap;
 		const _overscan = overscan;
-		get(store).setOptions({ count: _rows, estimateSize: () => _rowHeight, gap: _gap, overscan: _overscan });
+		get(store).setOptions({
+			count: _rows,
+			estimateSize: () => _rowHeight,
+			gap: _gap,
+			overscan: _overscan,
+		});
 	});
 
 	// ─── Derived fallback height ──────────────────────────────────────────────────
@@ -139,16 +149,18 @@
 -->
 <div bind:this={scrollEl} class="overflow-y-auto h-full w-full">
 	{#if virtualInst}
-		<div style="height: {virtualInst.getTotalSize()}px; position: relative; width: 100%;">
+		<div
+			style="height: {virtualInst.getTotalSize()}px; position: relative; width: 100%;"
+		>
 			{#each virtualInst.getVirtualItems() as vRow (vRow.key)}
 				{@const rowStart = vRow.index * cols}
 				<div
+					class="p-sm"
 					style="
 						position: absolute;
 						top: 0;
 						left: 0;
 						right: 0;
-						padding: 0 var(--spacing-l, 1.5rem);
 						transform: translateY({vRow.start}px);
 						display: grid;
 						grid-template-columns: repeat({cols}, 1fr);

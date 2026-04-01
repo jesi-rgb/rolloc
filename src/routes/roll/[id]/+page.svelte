@@ -244,7 +244,7 @@
 
 			<!-- Grid — pointer events blocked by inert while loading -->
 			<div inert={!thumbsReady || undefined} class="h-full">
-				<VirtualGrid items={frames} gap={4} overscan={3}>
+				<VirtualGrid items={frames} gap={6} overscan={3}>
 					{#snippet item(frame, i)}
 						<FrameThumb
 							{frame}

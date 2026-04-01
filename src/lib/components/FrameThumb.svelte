@@ -76,8 +76,9 @@
 	bind:this={el}
 	onclick={() => onSelect?.(frame)}
 	class="relative flex flex-col overflow-hidden transition-all w-full
-	       focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 focus:ring-offset-base
-	       {selected ? 'ring-2 ring-primary shadow-lg shadow-primary/20' : ''}"
+	       focus:outline-none focus:ring-2 focus:ring-primary
+	focus:ring-offset-1 focus:ring-offset-base
+	       {selected ? 'ring ring-primary shadow-lg shadow-primary/20' : ''}"
 	aria-pressed={selected}
 >
 	<!-- Film strip wrapper — subtle film rebate with sprocket holes -->
