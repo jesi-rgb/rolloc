@@ -7,6 +7,7 @@
 	 * Keyboard shortcuts:
 	 *   ← / → (or j / k)  — navigate to prev / next frame
 	 *   Escape             — back to roll
+	 *   C                  — toggle crop mode
 	 *
 	 * Filmomat-style color controls (mirrors physical keyboard layout):
 	 *   Q / A  — +/− Cyan
@@ -26,7 +27,7 @@
 	import { readPreview, readThumb } from "$lib/fs/opfs";
 	import { ensurePreview } from "$lib/image/thumbgen";
 	import { createPipeline, parseRawDecodeBuffer } from "$lib/image/pipeline";
-	import { resolveEdit, DEFAULT_INVERSION_PARAMS } from "$lib/types";
+	import { resolveEdit, DEFAULT_INVERSION_PARAMS, DEFAULT_CROP_QUAD } from "$lib/types";
 	import { isRawExtension } from "$lib/fs/directory";
 	import type { GpuPipeline, LogPercentiles } from "$lib/image/pipeline";
 	import type {
@@ -38,11 +39,13 @@
 		WhiteBalance,
 		InversionParams,
 		EffectiveEdit,
+		CropQuad,
 	} from "$lib/types";
 	import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
 	import CurvesEditor from "$lib/components/CurvesEditor.svelte";
 	import InversionControls from "$lib/components/InversionControls.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
+	import CropOverlay from "$lib/components/CropOverlay.svelte";
 	import { ArrowFatUpIcon } from "phosphor-svelte";
 
 	// ─── Undo / redo history ──────────────────────────────────────────────────
@@ -399,6 +402,121 @@
 
 	function cancelWbPicker(): void {
 		wbPickerActive = false;
+	}
+
+	// ─── Crop mode ────────────────────────────────────────────────────────────
+	//
+	// Non-destructive workflow:
+	// - While in crop mode: show the FULL uncropped canvas, overlay shows crop region
+	// - User drags handles to position the crop (only updates overlay, no saves)
+	// - On exit: save the crop position AND apply it (resize canvas)
+	// - Re-entering crop mode: show full canvas again for adjustment
+
+	/** When true, the crop overlay is visible and editable. */
+	let cropModeActive = $state(false);
+
+	/** Local crop quad state while editing (not yet committed to frame). */
+	let localCropQuad = $state<CropQuad | null>(null);
+
+	/** Effective crop quad for the overlay: local state while editing, otherwise from frame. */
+	const effectiveCropQuad = $derived.by(() => {
+		if (localCropQuad) return localCropQuad;
+		if (!frame || !roll) return DEFAULT_CROP_QUAD;
+		return resolveEdit(roll, frame).cropQuad ?? DEFAULT_CROP_QUAD;
+	});
+
+	/**
+	 * Render the canvas without crop applied (for crop mode editing).
+	 * This shows the full image so the user can see what they're cropping.
+	 */
+	function renderUncropped(): void {
+		if (!pipeline || !roll || !frame) return;
+		const edit = resolveEdit(roll, frame);
+		// Render with cropQuad = null to show full image
+		renderFrame({ ...edit, cropQuad: null });
+	}
+
+	function toggleCropMode(): void {
+		if (cropModeActive) {
+			// Exiting crop mode — commit and apply the crop
+			commitCropAndExit();
+		} else {
+			// Entering crop mode — show full uncropped image
+			cropModeActive = true;
+			// Initialize local quad from saved state (or default if none)
+			if (frame && roll) {
+				localCropQuad = resolveEdit(roll, frame).cropQuad ?? DEFAULT_CROP_QUAD;
+			} else {
+				localCropQuad = DEFAULT_CROP_QUAD;
+			}
+			renderUncropped();
+		}
+	}
+
+	/**
+	 * Commit the current crop position to IDB and exit crop mode.
+	 * This is the only place where crop is saved and applied.
+	 */
+	function commitCropAndExit(): void {
+		if (!frame || !roll) {
+			cropModeActive = false;
+			localCropQuad = null;
+			return;
+		}
+
+		const quad = localCropQuad ?? DEFAULT_CROP_QUAD;
+
+		// Check if the quad is effectively the identity (full image, no crop)
+		const isIdentity =
+			quad.tl.x === 0 && quad.tl.y === 0 &&
+			quad.tr.x === 1 && quad.tr.y === 0 &&
+			quad.br.x === 1 && quad.br.y === 1 &&
+			quad.bl.x === 0 && quad.bl.y === 1;
+
+		// Store null for identity crop to save space and indicate "no crop"
+		const cropToStore = isIdentity ? null : quad;
+
+		// Update frame state
+		const snap = $state.snapshot(frame) as Frame;
+		const updatedEdit: FrameEditOverrides = { ...snap.frameEdit, cropQuad: cropToStore };
+		frame = { ...snap, frameEdit: updatedEdit };
+
+		// Exit crop mode
+		cropModeActive = false;
+		localCropQuad = null;
+
+		// Re-render with the crop applied
+		renderFrame();
+
+		// Save to IDB + push history
+		const s = $state.snapshot(frame) as Frame;
+		historyPush(
+			structuredClone(s.frameEdit) as FrameEditOverrides,
+			$state.snapshot(roll).rollEdit as RollEditParams,
+		);
+		putFrame(structuredClone(s)).catch((err: unknown) => {
+			console.error("[crop] putFrame failed:", err);
+		});
+	}
+
+	/**
+	 * Live update while dragging a crop corner.
+	 * Only updates the overlay position — does NOT save or re-render.
+	 * The canvas stays showing the full uncropped image.
+	 */
+	function onCropChange(quad: CropQuad): void {
+		localCropQuad = quad;
+	}
+
+	/**
+	 * Cancel crop mode without saving changes.
+	 * Reverts to the previously saved crop and re-renders.
+	 */
+	function cancelCrop(): void {
+		cropModeActive = false;
+		localCropQuad = null;
+		// Re-render with the previously saved crop (not the local edits)
+		renderFrame();
 	}
 
 	/**
@@ -933,9 +1051,19 @@
 				e.preventDefault();
 				if (hasNext) navigateTo(frameIndex + 1);
 				break;
+			case "c":
+			case "C":
+				// Toggle crop mode (unless modifier keys are held)
+				if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+					e.preventDefault();
+					toggleCropMode();
+				}
+				break;
 			case "Escape":
 				e.preventDefault();
-				if (wbPickerActive) {
+				if (cropModeActive) {
+					cancelCrop();
+				} else if (wbPickerActive) {
 					cancelWbPicker();
 				} else {
 					goto(`/roll/${rollId}`);
@@ -1056,8 +1184,19 @@
 				class="max-w-full max-h-full object-contain rounded shadow-lg"
 				style="display: block; cursor: {wbPickerActive
 					? 'crosshair'
-					: 'default'};"
+					: cropModeActive
+						? 'crosshair'
+						: 'default'};"
 			></canvas>
+
+			<!-- Crop overlay -->
+			{#if cropModeActive && canvasEl}
+				<CropOverlay
+					canvas={canvasEl}
+					value={effectiveCropQuad}
+					onChange={onCropChange}
+				/>
+			{/if}
 
 			<!-- WB picker hint overlay -->
 			{#if wbPickerActive}
@@ -1200,6 +1339,36 @@
 								>
 							</button>
 						</div>
+					</section>
+
+					<!-- Crop mode toggle -->
+					<section>
+						<button
+							onclick={toggleCropMode}
+							title="Toggle crop mode (C)"
+							class="w-full flex items-center justify-center gap-sm
+							       px-sm py-xs rounded border text-xs transition
+							       {cropModeActive
+								? 'border-primary bg-primary/10 text-primary'
+								: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+						>
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M6 2v14a2 2 0 0 0 2 2h14" />
+								<path d="M18 22V8a2 2 0 0 0-2-2H2" />
+							</svg>
+							{cropModeActive ? 'Exit Crop' : 'Crop'}
+						</button>
 					</section>
 
 					<!-- Negative inversion toggle -->
@@ -1353,6 +1522,7 @@
 	<KeyboardHintBar
 		hints={[
 			{ keys: ["←", "→"], label: "navigate frames" },
+			{ keys: ["C"], label: "crop" },
 			{ keys: ["Q–E", "A–D"], label: "+/− CMY" },
 			{ keys: ["R", "F"], label: "+/− grade" },
 			{ keys: ["T", "G"], label: "+/− density" },
