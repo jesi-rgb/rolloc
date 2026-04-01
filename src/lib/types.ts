@@ -8,6 +8,33 @@ export interface Rect {
 	h: number;
 }
 
+/** A 2D point with normalized coordinates (0–1 relative to image dimensions). */
+export interface Point2D {
+	x: number;
+	y: number;
+}
+
+/**
+ * Quadrilateral crop defined by four corner points.
+ * Allows perspective correction by placing each corner at the frame edge.
+ * Points are normalized (0–1) relative to image dimensions.
+ * Order: top-left, top-right, bottom-right, bottom-left (clockwise from TL).
+ */
+export interface CropQuad {
+	tl: Point2D;
+	tr: Point2D;
+	br: Point2D;
+	bl: Point2D;
+}
+
+/** Default identity crop — full image, no perspective correction. */
+export const DEFAULT_CROP_QUAD: CropQuad = {
+	tl: { x: 0, y: 0 },
+	tr: { x: 1, y: 0 },
+	br: { x: 1, y: 1 },
+	bl: { x: 0, y: 1 },
+};
+
 // ─── Color / Curve primitives ─────────────────────────────────────────────────
 
 /** Row-major 3×3 matrix: [m00, m01, m02, m10, m11, m12, m20, m21, m22] */
@@ -141,6 +168,12 @@ export interface FrameEditOverrides {
 	rebateRegion: Rect | null;
 	/** Per-frame NegPy inversion parameters. Null = inherit roll default. */
 	inversionParams: InversionParams | null;
+	/**
+	 * Quadrilateral crop with perspective correction.
+	 * Null = no crop (full image). When set, the four corners define
+	 * where the output rectangle maps to in the source image.
+	 */
+	cropQuad: CropQuad | null;
 }
 
 /**
@@ -164,6 +197,11 @@ export interface EffectiveEdit {
 	invert: boolean;
 	/** NegPy inversion pipeline parameters (only used when invert = true). */
 	inversionParams: InversionParams;
+	/**
+	 * Quadrilateral crop with perspective correction.
+	 * When null, no crop is applied (full image).
+	 */
+	cropQuad: CropQuad | null;
 }
 
 export type FrameFlag = 'pick' | 'reject' | 'edited';
@@ -274,6 +312,7 @@ export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
 	rgbCurves: null,
 	rebateRegion: null,
 	inversionParams: null,
+	cropQuad: null,
 };
 
 export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
@@ -331,5 +370,7 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 				?? (r as { inversionParams?: InversionParams }).inversionParams
 				?? DEFAULT_INVERSION_PARAMS),
 		},
+		// Crop quad is frame-only (no roll-level default).
+		cropQuad: (f as { cropQuad?: CropQuad | null }).cropQuad ?? null,
 	};
 }
