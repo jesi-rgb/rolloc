@@ -704,6 +704,8 @@
 		}, 500);
 	}
 
+	// ─── Transform handlers ───────────────────────────────────────────────────
+
 	// ─── Fine-tune helpers (Filmomat keyboard layout) ─────────────────────────
 
 	/**
@@ -1250,27 +1252,30 @@
 		<div
 			class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
 		>
-			<canvas
-				bind:this={canvasEl}
-				onclick={handleWbPickerClick}
-				class="max-w-full max-h-full object-contain rounded shadow-lg"
-				style="display: block; cursor: {wbPickerActive
-					? 'crosshair'
-					: cropModeActive
+			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping -->
+			<div class="relative">
+				<canvas
+					bind:this={canvasEl}
+					onclick={handleWbPickerClick}
+					class="max-w-full max-h-full object-contain rounded shadow-lg"
+					style="display: block; cursor: {wbPickerActive
 						? 'crosshair'
-						: 'default'}; transform: {effectiveTransform.flipH || effectiveTransform.flipV
+						: cropModeActive
+							? 'crosshair'
+							: 'default'}; transform: {effectiveTransform.flipH || effectiveTransform.flipV
 					? `scale(${effectiveTransform.flipH ? -1 : 1}, ${effectiveTransform.flipV ? -1 : 1})`
 					: 'none'};"
-			></canvas>
+				></canvas>
 
-			<!-- Crop overlay -->
-			{#if cropModeActive && canvasEl}
-				<CropOverlay
-					canvas={canvasEl}
-					value={effectiveCropQuad}
-					onChange={onCropChange}
-				/>
-			{/if}
+				<!-- Crop overlay (inside transform wrapper so it rotates with canvas) -->
+				{#if cropModeActive && canvasEl}
+					<CropOverlay
+						canvas={canvasEl}
+						value={effectiveCropQuad}
+						onChange={onCropChange}
+					/>
+				{/if}
+			</div>
 
 			<!-- WB picker hint overlay -->
 			{#if wbPickerActive}

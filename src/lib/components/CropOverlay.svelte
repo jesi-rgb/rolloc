@@ -45,12 +45,14 @@
 		if (!canvas) return;
 
 		const updateMetrics = () => {
-			// Get the canvas's rendered size in CSS pixels
-			const rect = canvas.getBoundingClientRect();
-			canvasWidth = rect.width;
-			canvasHeight = rect.height;
+			// Use offsetWidth/offsetHeight to get the canvas's layout dimensions
+			// BEFORE any CSS transforms are applied. getBoundingClientRect() would
+			// return the transformed bounding box, which is wrong when the canvas
+			// is rotated (e.g., 90° rotation swaps width/height).
+			canvasWidth = canvas.offsetWidth;
+			canvasHeight = canvas.offsetHeight;
 
-			// Get the canvas's offset within its parent (the flex container)
+			// Get the canvas's offset within its parent (the transform wrapper)
 			// offsetLeft/offsetTop give position relative to offsetParent
 			canvasOffsetLeft = canvas.offsetLeft;
 			canvasOffsetTop = canvas.offsetTop;
@@ -147,12 +149,19 @@
 	function handlePointerMove(e: PointerEvent) {
 		if (!dragging) return;
 
-		// Get position relative to the SVG element.
+		// Convert screen coordinates to SVG coordinates.
+		// This correctly handles CSS transforms on the parent container.
 		const svg = e.currentTarget as SVGSVGElement;
-		const svgRect = svg.getBoundingClientRect();
-		const px = e.clientX - svgRect.left;
-		const py = e.clientY - svgRect.top;
-		const pos = toNormalized(px, py);
+		const ctm = svg.getScreenCTM();
+		if (!ctm) return;
+
+		// Transform client coordinates to SVG local coordinates
+		const pt = svg.createSVGPoint();
+		pt.x = e.clientX;
+		pt.y = e.clientY;
+		const svgPt = pt.matrixTransform(ctm.inverse());
+
+		const pos = toNormalized(svgPt.x, svgPt.y);
 
 		// Update the rectangle based on which corner is being dragged.
 		// Each corner controls two edges of the rectangle.
