@@ -980,10 +980,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		const colorMatrixUniformBuf = makeUniformBuffer(device, colorMatrixUniforms);
 
 		// ── Build tone curve (WB + LUT) uniforms ────────────────────────────
-		const [tcWbR, tcWbG, tcWbB] = temperatureToMultipliers(
-			edit.whiteBalance.temperature,
-			edit.whiteBalance.tint,
-		);
+		// For the inversion path, skip white balance — the CMY color timing
+		// controls handle color correction in log-density space, and applying
+		// WB multipliers on top of the H&D output would double-correct.
+		const [tcWbR, tcWbG, tcWbB] = edit.invert
+			? [1.0, 1.0, 1.0] as [number, number, number]
+			: temperatureToMultipliers(edit.whiteBalance.temperature, edit.whiteBalance.tint);
 		const toneCurveUniforms = new Float32Array([
 			tcWbR, tcWbG, tcWbB, 1.0,              // wbMultipliers
 			edit.invert ? 1.0 : 0.0, 0.0, 0.0, 0.0, // flags: [skipSrgb, pad, pad, pad]
