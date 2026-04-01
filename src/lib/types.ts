@@ -8,6 +8,32 @@ export interface Rect {
 	h: number;
 }
 
+/**
+ * Rotation and flip transform parameters.
+ * Applied in order: flip → 90° rotation → fine rotation.
+ */
+export interface TransformParams {
+	/**
+	 * Number of 90° clockwise rotations (0–3).
+	 * 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270°.
+	 */
+	rotation90: 0 | 1 | 2 | 3;
+	/** Fine rotation adjustment in degrees, typically -45 to +45. */
+	fineRotation: number;
+	/** Horizontal flip (mirror left-right). */
+	flipH: boolean;
+	/** Vertical flip (mirror top-bottom). */
+	flipV: boolean;
+}
+
+/** Default identity transform — no rotation, no flip. */
+export const DEFAULT_TRANSFORM: TransformParams = {
+	rotation90: 0,
+	fineRotation: 0,
+	flipH: false,
+	flipV: false,
+};
+
 /** A 2D point with normalized coordinates (0–1 relative to image dimensions). */
 export interface Point2D {
 	x: number;
@@ -61,6 +87,17 @@ export interface WhiteBalance {
 	/** Green–magenta tint, -100 to +100. */
 	tint: number;
 }
+
+// ─── Film types ───────────────────────────────────────────────────────────────
+
+/**
+ * Film processing mode, matching negpy's ProcessMode.
+ *
+ * - C41: Color negative film (default) — requires inversion + orange mask removal
+ * - BW:  Black & white negative — inversion + luminance conversion
+ * - E6:  Slide/reversal film (positive) — no inversion, just normalization
+ */
+export type FilmType = 'C41' | 'BW' | 'E6';
 
 // ─── NegPy inversion parameters ──────────────────────────────────────────────
 
@@ -118,6 +155,21 @@ export interface InversionParams {
 	// ── CLAHE (local contrast enhancement) ────────────────────────────────────
 	/** CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default. */
 	claheStrength: number;
+
+	// ── Film type and E6-specific settings ────────────────────────────────────
+	/**
+	 * Film processing mode.
+	 * - C41: Color negative (default) — orange mask removal + inversion
+	 * - BW:  B&W negative — inversion + luminance conversion
+	 * - E6:  Slide/reversal (positive) — no inversion needed
+	 */
+	filmType: FilmType;
+	/**
+	 * E6 normalize mode. When true (default), applies per-channel percentile
+	 * stretch like C41. When false, uses a fixed density range from the floor.
+	 * Only relevant when filmType = 'E6'.
+	 */
+	e6Normalize: boolean;
 }
 
 // ─── Edit parameters ──────────────────────────────────────────────────────────
@@ -174,6 +226,10 @@ export interface FrameEditOverrides {
 	 * where the output rectangle maps to in the source image.
 	 */
 	cropQuad: CropQuad | null;
+	/**
+	 * Rotation and flip transform. Null = identity (no transform).
+	 */
+	transform: TransformParams | null;
 }
 
 /**
@@ -202,6 +258,8 @@ export interface EffectiveEdit {
 	 * When null, no crop is applied (full image).
 	 */
 	cropQuad: CropQuad | null;
+	/** Rotation and flip transform. */
+	transform: TransformParams;
 }
 
 export type FrameFlag = 'pick' | 'reject' | 'edited';
@@ -292,6 +350,8 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	shoulderWidth:    2.5,
 	shoulderHardness: 1.0,
 	claheStrength:    0.25,
+	filmType:         'C41',
+	e6Normalize:      true,
 };
 
 export const DEFAULT_ROLL_EDIT: RollEditParams = {
@@ -313,6 +373,7 @@ export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
 	rebateRegion: null,
 	inversionParams: null,
 	cropQuad: null,
+	transform: null,
 };
 
 export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
@@ -372,5 +433,7 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		},
 		// Crop quad is frame-only (no roll-level default).
 		cropQuad: (f as { cropQuad?: CropQuad | null }).cropQuad ?? null,
+		// Transform is frame-only (no roll-level default).
+		transform: (f as { transform?: TransformParams | null }).transform ?? DEFAULT_TRANSFORM,
 	};
 }

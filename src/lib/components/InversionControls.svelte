@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { InversionParams } from "$lib/types";
+	import type { InversionParams, FilmType } from "$lib/types";
 	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
@@ -20,6 +20,8 @@
 
 	// ─── Local reactive copies (untrack to avoid "only captures initial value" warning) ───
 
+	let filmType = $state<FilmType>(untrack(() => value.filmType));
+	let e6Normalize = $state(untrack(() => value.e6Normalize));
 	let density = $state(untrack(() => value.density));
 	let grade = $state(untrack(() => value.grade));
 	let cmyCyan = $state(untrack(() => value.cmyCyan));
@@ -45,6 +47,8 @@
 	$effect(() => {
 		// Deliberately reading reactive `value` to react to prop changes,
 		// then writing local copies — acceptable pattern per AGENTS.md.
+		filmType = value.filmType;
+		e6Normalize = value.e6Normalize;
 		density = value.density;
 		grade = value.grade;
 		cmyCyan = value.cmyCyan;
@@ -70,6 +74,8 @@
 	/** Build the current params object. */
 	function currentParams(): InversionParams {
 		return {
+			filmType,
+			e6Normalize,
 			density,
 			grade,
 			cmyCyan,
@@ -105,6 +111,8 @@
 
 	function reset(): void {
 		const d = DEFAULT_INVERSION_PARAMS;
+		filmType = d.filmType;
+		e6Normalize = d.e6Normalize;
 		density = d.density;
 		grade = d.grade;
 		cmyCyan = d.cmyCyan;
@@ -130,7 +138,9 @@
 	}
 
 	const isDefault = $derived(
-		density === DEFAULT_INVERSION_PARAMS.density &&
+		filmType === DEFAULT_INVERSION_PARAMS.filmType &&
+			e6Normalize === DEFAULT_INVERSION_PARAMS.e6Normalize &&
+			density === DEFAULT_INVERSION_PARAMS.density &&
 			grade === DEFAULT_INVERSION_PARAMS.grade &&
 			cmyCyan === DEFAULT_INVERSION_PARAMS.cmyCyan &&
 			cmyMagenta === DEFAULT_INVERSION_PARAMS.cmyMagenta &&
@@ -161,6 +171,70 @@
 -->
 
 <div class="flex flex-col gap-l">
+	<!-- ── Film Type ───────────────────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Film type
+		</h4>
+		<div class="flex gap-xs">
+			<button
+				type="button"
+				onclick={() => {
+					filmType = 'C41';
+					commit();
+				}}
+				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
+					{filmType === 'C41'
+						? 'bg-accent text-white'
+						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+			>
+				C-41
+			</button>
+			<button
+				type="button"
+				onclick={() => {
+					filmType = 'BW';
+					commit();
+				}}
+				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
+					{filmType === 'BW'
+						? 'bg-accent text-white'
+						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+			>
+				B&W
+			</button>
+			<button
+				type="button"
+				onclick={() => {
+					filmType = 'E6';
+					commit();
+				}}
+				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
+					{filmType === 'E6'
+						? 'bg-accent text-white'
+						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+			>
+				E-6
+			</button>
+		</div>
+		{#if filmType === 'E6'}
+			<label class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer">
+				<input
+					type="checkbox"
+					checked={e6Normalize}
+					onchange={(e) => {
+						e6Normalize = e.currentTarget.checked;
+						commit();
+					}}
+					class="accent-accent"
+				/>
+				Auto-normalize (percentile stretch)
+			</label>
+		{/if}
+	</section>
+
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
 	<section>
 		<h4
