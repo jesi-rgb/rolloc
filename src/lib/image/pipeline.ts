@@ -34,8 +34,9 @@ import hdCurveWGSL          from './shaders/hd_curve.wgsl?raw';
 import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
 import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
 import blitWGSL             from './shaders/blit.wgsl?raw';
+import cropWGSL             from './shaders/crop.wgsl?raw';
 import { buildCurveLUTs } from './curves';
-import type { EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
+import type { CropQuad, EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
 
 // ─── NegPy constants ───────────────────────────────────────────────────────────
 
@@ -356,6 +357,12 @@ export interface GpuPipeline {
 	maxTextureDimension: number;
 	/** The log percentiles from the last RAW preview render, or null if not yet rendered. */
 	lastLogPerc: LogPercentiles | null;
+	/**
+	 * The output dimensions from the last render (after crop is applied).
+	 * Use these for readPixels() after rendering to get the correct cropped size.
+	 */
+	lastOutputWidth: number;
+	lastOutputHeight: number;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -534,6 +541,71 @@ function makeHDCurveUniforms(
 	return makeUniformBuffer(device, data);
 }
 
+// ─── Crop uniform builder ─────────────────────────────────────────────────────
+
+/**
+ * Build the crop pass uniform buffer from a CropQuad.
+ *
+ * CropQuadUniforms layout (total 32 bytes):
+ *   tl : vec2<f32>  @ 0   (top-left)
+ *   tr : vec2<f32>  @ 8   (top-right)
+ *   br : vec2<f32>  @ 16  (bottom-right)
+ *   bl : vec2<f32>  @ 24  (bottom-left)
+ */
+function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
+	const data = new Float32Array([
+		quad.tl.x, quad.tl.y,
+		quad.tr.x, quad.tr.y,
+		quad.br.x, quad.br.y,
+		quad.bl.x, quad.bl.y,
+	]);
+	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Calculate the output dimensions for a crop operation.
+ *
+ * For a quadrilateral crop, we compute the average width and height of the quad
+ * in source pixels. This gives a natural aspect ratio that preserves the cropped
+ * region without distortion.
+ *
+ * - Width: average of top edge (tl→tr) and bottom edge (bl→br)
+ * - Height: average of left edge (tl→bl) and right edge (tr→br)
+ */
+function computeCropOutputDimensions(
+	quad: CropQuad,
+	srcWidth: number,
+	srcHeight: number
+): { width: number; height: number } {
+	// Calculate edge lengths in pixel space
+	const topWidth = Math.sqrt(
+		Math.pow((quad.tr.x - quad.tl.x) * srcWidth, 2) +
+		Math.pow((quad.tr.y - quad.tl.y) * srcHeight, 2)
+	);
+	const bottomWidth = Math.sqrt(
+		Math.pow((quad.br.x - quad.bl.x) * srcWidth, 2) +
+		Math.pow((quad.br.y - quad.bl.y) * srcHeight, 2)
+	);
+	const leftHeight = Math.sqrt(
+		Math.pow((quad.bl.x - quad.tl.x) * srcWidth, 2) +
+		Math.pow((quad.bl.y - quad.tl.y) * srcHeight, 2)
+	);
+	const rightHeight = Math.sqrt(
+		Math.pow((quad.br.x - quad.tr.x) * srcWidth, 2) +
+		Math.pow((quad.br.y - quad.tr.y) * srcHeight, 2)
+	);
+
+	// Average the opposite edges for the output dimensions
+	const width = Math.round((topWidth + bottomWidth) / 2);
+	const height = Math.round((leftHeight + rightHeight) / 2);
+
+	// Ensure minimum size of 1 pixel
+	return {
+		width: Math.max(1, width),
+		height: Math.max(1, height),
+	};
+}
+
 // ─── Pipeline creation ────────────────────────────────────────────────────────
 
 /**
@@ -572,6 +644,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
 	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
 	const blitModule          = device.createShaderModule({ code: blitWGSL });
+	const cropModule          = device.createShaderModule({ code: cropWGSL });
 
 	// ── Build render pipelines ──────────────────────────────────────────────
 
@@ -613,6 +686,14 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		compute: { module: claheHistModule, entryPoint: 'main' },
 	});
 
+	// ── Crop pipeline (perspective quad → rect) ───────────────────────────────
+
+	/**
+	 * Crop pipeline applies perspective correction by sampling from a quadrilateral
+	 * region of the source and mapping it to the output rectangle.
+	 */
+	const cropPipeline = makeRenderPipeline(cropModule, 'rgba16float');
+
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
 	let lastBitmap: ImageBitmap | null = null;
@@ -635,6 +716,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let outputTexture: GPUTexture | null = null;
 	/**
+	 * Intermediate texture for the crop pass (rgba16float).
+	 * When cropping is active, tonecurve → preCropTexture → crop → outputTexture.
+	 */
+	let preCropTexture: GPUTexture | null = null;
+	/**
 	 * Persistent rgba8unorm readback texture (COPY_SRC | RENDER_ATTACHMENT | TEXTURE_BINDING).
 	 * A dithered blit from outputTexture writes here; readPixels() copies from this texture.
 	 */
@@ -645,6 +731,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let lastLogPerc: LogPercentiles | null = null;
 
+	/** Track last output dimensions to detect when resize is needed. */
+	let lastOutputWidth = 0;
+	let lastOutputHeight = 0;
+
 	// ─── Shared main-pass render logic ─────────────────────────────────────────
 
 	/**
@@ -653,6 +743,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 *
 	 * Positive path (invert = false): invert(passthrough) → colormatrix → tonecurve
 	 * Negative path (invert = true):  normalization → hd_curve → colormatrix → tonecurve
+	 *
+	 * When crop is active, the output is resized to match the crop region's natural
+	 * aspect ratio, and the crop shader extracts the region without distortion.
 	 *
 	 * @param isLinear  true for the RAW path (input is linear light);
 	 *                  false for JPEG/TIFF (sRGB-encoded, needs gamma expand in invert pass).
@@ -666,6 +759,39 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		isLinear: boolean,
 		logPerc: LogPercentiles | null,
 	): Promise<void> {
+		// ── Compute output dimensions (may differ from source if cropped) ───
+		const hasCrop = edit.cropQuad !== null;
+		let outW = w;
+		let outH = h;
+		if (hasCrop && edit.cropQuad) {
+			const cropDims = computeCropOutputDimensions(edit.cropQuad, w, h);
+			outW = cropDims.width;
+			outH = cropDims.height;
+		}
+
+		// ── Resize canvas + output textures if dimensions changed ───────────
+		if (outW !== lastOutputWidth || outH !== lastOutputHeight) {
+			canvas.width = outW;
+			canvas.height = outH;
+			context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
+
+			// Rebuild output + readback textures at new size
+			outputTexture?.destroy();
+			outputTexture = device.createTexture({
+				size: [outW, outH],
+				format: 'rgba16float',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+			readbackTexture?.destroy();
+			readbackTexture = device.createTexture({
+				size: [outW, outH],
+				format: 'rgba8unorm',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+			});
+
+			lastOutputWidth = outW;
+			lastOutputHeight = outH;
+		}
 		// ── Build LUT textures ──────────────────────────────────────────────
 
 		const [toneLut, redLut, greenLut, blueLut] = buildCurveLUTs(
@@ -879,6 +1005,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		}
 
 		// ── Tone curve pass → output texture (rgba16float, full precision) ──────
+		// When crop is active, render to preCropTexture first, then apply crop.
+		const toneCurveTarget = hasCrop ? preCropTexture! : outputTexture!;
+
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
 			entries: [
@@ -892,7 +1021,24 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			],
 		});
 
-		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, outputTexture!.createView());
+		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, toneCurveTarget.createView());
+
+		// ── Optional crop pass (perspective quad → rect) ─────────────────────
+		if (hasCrop && edit.cropQuad) {
+			const cropUnifBuf = makeCropUniforms(device, edit.cropQuad);
+			toClean.push(cropUnifBuf);
+
+			const cropBG = device.createBindGroup({
+				layout: cropPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: preCropTexture!.createView() },
+					{ binding: 2, resource: { buffer: cropUnifBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, cropPipeline, cropBG, outputTexture!.createView());
+		}
 
 		// ── Dithered blit → canvas swap chain (8-bit display) ────────────────
 		const blitBG = device.createBindGroup({
@@ -929,17 +1075,27 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	// ─── Helper: ensure intermediate textures exist + intermediateC for NegPy ──
 
-	function ensureIntermediates(w: number, h: number, needC: boolean): void {
+	/**
+	 * Rebuild intermediate textures for the pipeline at source resolution.
+	 * Output textures (outputTexture, readbackTexture) are sized dynamically
+	 * in runMainPasses based on crop dimensions.
+	 *
+	 * @param srcW - Source image width
+	 * @param srcH - Source image height
+	 * @param needC - Whether NegPy inversion passes are needed
+	 */
+	function ensureIntermediates(srcW: number, srcH: number, needC: boolean): void {
+		// Processing intermediates at source resolution
 		intermediateA?.destroy();
 		intermediateB?.destroy();
-		intermediateA = createRGBA16Texture(device, w, h);
-		intermediateB = createRGBA16Texture(device, w, h);
+		intermediateA = createRGBA16Texture(device, srcW, srcH);
+		intermediateB = createRGBA16Texture(device, srcW, srcH);
 		if (needC) {
 			intermediateC?.destroy();
-			intermediateC = createRGBA16Texture(device, w, h);
+			intermediateC = createRGBA16Texture(device, srcW, srcH);
 			// CLAHE needs intermediateD (remap output) + CDF storage buffer.
 			intermediateD?.destroy();
-			intermediateD = createRGBA16Texture(device, w, h);
+			intermediateD = createRGBA16Texture(device, srcW, srcH);
 			claheCdfBuffer?.destroy();
 			const cdfSize = CLAHE_TILES_X * CLAHE_TILES_Y * CLAHE_NUM_BINS * 4; // f32
 			claheCdfBuffer = device.createBuffer({
@@ -947,25 +1103,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				usage: GPUBufferUsage.STORAGE,
 			});
 		}
-		// Rebuild the output texture at the new size (rgba16float for precision).
-		outputTexture?.destroy();
-		outputTexture = device.createTexture({
-			size: [w, h],
+		// Pre-crop texture at source resolution (tone curve renders here when crop is active)
+		preCropTexture?.destroy();
+		preCropTexture = device.createTexture({
+			size: [srcW, srcH],
 			format: 'rgba16float',
 			usage:
 				GPUTextureUsage.RENDER_ATTACHMENT |
 				GPUTextureUsage.TEXTURE_BINDING,
 		});
-		// Rebuild the readback texture (rgba8unorm for copyTextureToBuffer).
-		readbackTexture?.destroy();
-		readbackTexture = device.createTexture({
-			size: [w, h],
-			format: 'rgba8unorm',
-			usage:
-				GPUTextureUsage.RENDER_ATTACHMENT |
-				GPUTextureUsage.TEXTURE_BINDING |
-				GPUTextureUsage.COPY_SRC,
-		});
+		// Reset output dimensions tracking so runMainPasses rebuilds output textures
+		lastOutputWidth = 0;
+		lastOutputHeight = 0;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -973,11 +1122,6 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	async function render(edit: EffectiveEdit, bitmap: ImageBitmap): Promise<void> {
 		const w = bitmap.width;
 		const h = bitmap.height;
-
-		// Resize canvas to match image
-		canvas.width  = w;
-		canvas.height = h;
-		context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
 
 		// Re-upload source texture only when the bitmap changes
 		if (bitmap !== lastBitmap) {
@@ -1032,11 +1176,6 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		} else {
 			lastLogPerc = null;
 		}
-
-		// Resize canvas
-		canvas.width  = w;
-		canvas.height = h;
-		context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
 
 		// Push error scopes to surface any WebGPU validation/OOM errors.
 		device.pushErrorScope('validation');
@@ -1122,6 +1261,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateD?.destroy();
 		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
+		preCropTexture?.destroy();
 		readbackTexture?.destroy();
 		device.destroy();
 	}
@@ -1168,5 +1308,14 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		return result;
 	}
 
-	return { render, renderRaw, readPixels, destroy, maxTextureDimension, get lastLogPerc() { return lastLogPerc; } };
+	return {
+		render,
+		renderRaw,
+		readPixels,
+		destroy,
+		maxTextureDimension,
+		get lastLogPerc() { return lastLogPerc; },
+		get lastOutputWidth() { return lastOutputWidth; },
+		get lastOutputHeight() { return lastOutputHeight; },
+	};
 }

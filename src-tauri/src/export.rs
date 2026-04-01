@@ -102,6 +102,114 @@ fn inner_export(
 
 // ─── Native export (full-res, f32 pipeline, no GPU) ───────────────────────────
 
+// ─── Crop helpers ─────────────────────────────────────────────────────────────
+
+use crate::process::CropQuad;
+
+/// Compute the output dimensions for a crop operation.
+/// Uses the average of horizontal and vertical edge lengths to determine size.
+fn compute_crop_dimensions(crop: &CropQuad, src_w: usize, src_h: usize) -> (usize, usize) {
+    let sw = src_w as f32;
+    let sh = src_h as f32;
+
+    // Top edge length in pixels
+    let top_len = ((crop.tr.x - crop.tl.x) * sw).hypot((crop.tr.y - crop.tl.y) * sh);
+    // Bottom edge length
+    let bot_len = ((crop.br.x - crop.bl.x) * sw).hypot((crop.br.y - crop.bl.y) * sh);
+    // Left edge length
+    let left_len = ((crop.bl.x - crop.tl.x) * sw).hypot((crop.bl.y - crop.tl.y) * sh);
+    // Right edge length
+    let right_len = ((crop.br.x - crop.tr.x) * sw).hypot((crop.br.y - crop.tr.y) * sh);
+
+    let out_w = ((top_len + bot_len) / 2.0).round().max(1.0) as usize;
+    let out_h = ((left_len + right_len) / 2.0).round().max(1.0) as usize;
+
+    (out_w, out_h)
+}
+
+/// Sample a pixel from the source image using bilinear interpolation.
+/// `x` and `y` are in pixel coordinates (can be fractional).
+#[inline]
+fn sample_bilinear(src: &[f32], src_w: usize, src_h: usize, x: f32, y: f32) -> [f32; 3] {
+    // Clamp to valid range
+    let x = x.clamp(0.0, (src_w - 1) as f32);
+    let y = y.clamp(0.0, (src_h - 1) as f32);
+
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(src_w - 1);
+    let y1 = (y0 + 1).min(src_h - 1);
+
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+
+    // Get the four corner pixels
+    let idx00 = (y0 * src_w + x0) * 3;
+    let idx10 = (y0 * src_w + x1) * 3;
+    let idx01 = (y1 * src_w + x0) * 3;
+    let idx11 = (y1 * src_w + x1) * 3;
+
+    let mut result = [0.0_f32; 3];
+    for c in 0..3 {
+        let p00 = src[idx00 + c];
+        let p10 = src[idx10 + c];
+        let p01 = src[idx01 + c];
+        let p11 = src[idx11 + c];
+
+        // Bilinear interpolation
+        let top = p00 * (1.0 - fx) + p10 * fx;
+        let bot = p01 * (1.0 - fx) + p11 * fx;
+        result[c] = top * (1.0 - fy) + bot * fy;
+    }
+
+    result
+}
+
+/// Apply a quadrilateral crop to an RGB f32 image.
+/// Returns (output_width, output_height, cropped_pixels).
+fn apply_crop(
+    src: &[f32],
+    src_w: usize,
+    src_h: usize,
+    crop: &CropQuad,
+) -> (usize, usize, Vec<f32>) {
+    let (out_w, out_h) = compute_crop_dimensions(crop, src_w, src_h);
+
+    let sw = src_w as f32;
+    let sh = src_h as f32;
+
+    let mut dst = vec![0.0_f32; out_w * out_h * 3];
+
+    for out_y in 0..out_h {
+        let v = out_y as f32 / (out_h - 1).max(1) as f32;
+
+        for out_x in 0..out_w {
+            let u = out_x as f32 / (out_w - 1).max(1) as f32;
+
+            // Bilinear interpolation within the quad (same as GPU shader)
+            // top = lerp(tl, tr, u)
+            // bottom = lerp(bl, br, u)
+            // result = lerp(top, bottom, v)
+            let top_x = crop.tl.x * (1.0 - u) + crop.tr.x * u;
+            let top_y = crop.tl.y * (1.0 - u) + crop.tr.y * u;
+            let bot_x = crop.bl.x * (1.0 - u) + crop.br.x * u;
+            let bot_y = crop.bl.y * (1.0 - u) + crop.br.y * u;
+
+            let src_x = (top_x * (1.0 - v) + bot_x * v) * sw;
+            let src_y = (top_y * (1.0 - v) + bot_y * v) * sh;
+
+            let pixel = sample_bilinear(src, src_w, src_h, src_x, src_y);
+
+            let dst_idx = (out_y * out_w + out_x) * 3;
+            dst[dst_idx] = pixel[0];
+            dst[dst_idx + 1] = pixel[1];
+            dst[dst_idx + 2] = pixel[2];
+        }
+    }
+
+    (out_w, out_h, dst)
+}
+
 // ─── Ordered dithering helpers ────────────────────────────────────────────────
 
 /// Compute an 8×8 Bayer matrix threshold for position (x, y).
@@ -312,6 +420,13 @@ fn inner_export_native(
 
     // ── Process through the CPU pipeline ─────────────────────────────────────
     process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
+
+    // ── Apply crop if specified ──────────────────────────────────────────────
+    let (final_w, final_h, rgb_f32) = if let Some(crop) = &edit.crop_quad {
+        apply_crop(&rgb_f32, final_w, final_h, crop)
+    } else {
+        (final_w, final_h, rgb_f32)
+    };
 
     // ── Convert f32 [0,1] sRGB → u8 [0,255] with ordered dithering ─────────
     // Uses an 8×8 Bayer matrix to break up banding in smooth gradients

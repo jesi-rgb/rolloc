@@ -36,6 +36,23 @@ const ANALYSIS_BUFFER: f32 = 0.10;
 
 // ─── Types (deserialized from JS) ─────────────────────────────────────────────
 
+/// A 2D point with normalized coordinates (0–1 relative to image dimensions).
+#[derive(serde::Deserialize, Debug, Clone, Copy)]
+pub struct Point2D {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Quadrilateral crop defined by four corner points.
+/// Points are normalized (0–1) relative to image dimensions.
+#[derive(serde::Deserialize, Debug, Clone, Copy)]
+pub struct CropQuad {
+    pub tl: Point2D,
+    pub tr: Point2D,
+    pub br: Point2D,
+    pub bl: Point2D,
+}
+
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +73,10 @@ pub struct EffectiveEdit {
     #[serde(default)]
     #[allow(dead_code)]
     pub rebate_region: Option<serde_json::Value>,
+    /// Quadrilateral crop with perspective correction.
+    /// When None, no crop is applied (full image).
+    #[serde(default)]
+    pub crop_quad: Option<CropQuad>,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
