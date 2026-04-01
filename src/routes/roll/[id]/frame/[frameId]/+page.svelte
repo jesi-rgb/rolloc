@@ -27,7 +27,7 @@
 	import { readPreview, readThumb } from "$lib/fs/opfs";
 	import { ensurePreview } from "$lib/image/thumbgen";
 	import { createPipeline, parseRawDecodeBuffer } from "$lib/image/pipeline";
-	import { resolveEdit, DEFAULT_INVERSION_PARAMS, DEFAULT_CROP_QUAD } from "$lib/types";
+	import { resolveEdit, DEFAULT_INVERSION_PARAMS, DEFAULT_CROP_QUAD, DEFAULT_TRANSFORM } from "$lib/types";
 	import { isRawExtension } from "$lib/fs/directory";
 	import type { GpuPipeline, LogPercentiles } from "$lib/image/pipeline";
 	import type {
@@ -40,12 +40,14 @@
 		InversionParams,
 		EffectiveEdit,
 		CropQuad,
+		TransformParams,
 	} from "$lib/types";
 	import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
 	import CurvesEditor from "$lib/components/CurvesEditor.svelte";
 	import InversionControls from "$lib/components/InversionControls.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import CropOverlay from "$lib/components/CropOverlay.svelte";
+	import TransformControls from "$lib/components/TransformControls.svelte";
 	import { ArrowFatUpIcon } from "phosphor-svelte";
 
 	// ─── Undo / redo history ──────────────────────────────────────────────────
@@ -91,6 +93,9 @@
 	let currentBitmap = $state<ImageBitmap | null>(null);
 	/** Raw binary payload from `raw_decode`; non-null only for RAW frames. */
 	let currentRawBuffer = $state<ArrayBuffer | null>(null);
+	/** Original image dimensions (before any transforms). */
+	let originalWidth = $state(1);
+	let originalHeight = $state(1);
 
 	// ─── Pipeline init (once, on mount) ───────────────────────────────────────
 
@@ -253,6 +258,11 @@
 				currentBitmap = null;
 				currentRawBuffer = rawBuffer;
 
+				// Track original dimensions for crop overlay coordinate transforms
+				const { width: rawW, height: rawH } = parseRawDecodeBuffer(rawBuffer);
+				originalWidth = rawW;
+				originalHeight = rawH;
+
 				// Parse the metadata to auto-populate cameraColorMatrix and ashotWBCoeffs
 				// on first open.
 				// Do this after setting currentRawBuffer so renderFrame() triggered
@@ -327,6 +337,9 @@
 				currentBitmap?.close();
 				currentBitmap = newBitmap;
 				currentRawBuffer = null;
+				// Track original dimensions for crop overlay coordinate transforms
+				originalWidth = newBitmap.width;
+				originalHeight = newBitmap.height;
 			}
 
 			loading = false;
@@ -427,12 +440,15 @@
 
 	/**
 	 * Render the canvas without crop applied (for crop mode editing).
-	 * This shows the full image so the user can see what they're cropping.
+	 * Keeps transforms (rotation/flip) active so user sees the final orientation
+	 * while editing the crop. The CropOverlay transforms coordinates to/from
+	 * original image space.
 	 */
 	function renderUncropped(): void {
 		if (!pipeline || !roll || !frame) return;
 		const edit = resolveEdit(roll, frame);
-		// Render with cropQuad = null to show full image
+		// Render with cropQuad = null but KEEP transforms
+		// The crop overlay will transform its coordinates to match
 		renderFrame({ ...edit, cropQuad: null });
 	}
 
@@ -793,6 +809,49 @@
 		}, 500);
 	}
 
+	// ─── Transform handlers ───────────────────────────────────────────────────
+
+	/**
+	 * Live preview while adjusting transform (rotation, flip).
+	 * Renders the GPU canvas immediately with patched transform.
+	 */
+	function onTransformChange(params: TransformParams): void {
+		if (!roll || !frame) return;
+		const edit = resolveEdit(roll, frame);
+		renderFrame({ ...edit, transform: params });
+	}
+
+	/** 500ms debounce handle for transform commits. */
+	let transformCommitTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Commit transform changes: update frame state immediately, then
+	 * debounce IDB write + history push.
+	 */
+	function onTransformCommit(params: TransformParams): void {
+		if (!frame || !roll) return;
+		const snap = $state.snapshot(frame) as Frame;
+		frame = {
+			...snap,
+			frameEdit: { ...snap.frameEdit, transform: params },
+		};
+		renderFrame();
+
+		if (transformCommitTimer !== null) clearTimeout(transformCommitTimer);
+		transformCommitTimer = setTimeout(() => {
+			transformCommitTimer = null;
+			if (!frame || !roll) return;
+			const s = $state.snapshot(frame) as Frame;
+			historyPush(
+				structuredClone(s.frameEdit) as FrameEditOverrides,
+				$state.snapshot(roll).rollEdit as RollEditParams,
+			);
+			putFrame(structuredClone(s)).catch((err: unknown) => {
+				console.error("[transform] putFrame failed:", err);
+			});
+		}, 500);
+	}
+
 	// ─── Export ────────────────────────────────────────────────────────────────
 
 	let exporting = $state(false);
@@ -1124,6 +1183,11 @@
 		return resolveEdit(roll, frame).inversionParams;
 	});
 
+	const effectiveTransform = $derived.by(() => {
+		if (!frame || !roll) return DEFAULT_TRANSFORM;
+		return resolveEdit(roll, frame).transform;
+	});
+
 	const frameLabel = $derived(frame ? `Frame ${frame.index}` : "Frame");
 </script>
 
@@ -1194,7 +1258,9 @@
 					? 'crosshair'
 					: cropModeActive
 						? 'crosshair'
-						: 'default'};"
+						: 'default'}; transform: {effectiveTransform.flipH || effectiveTransform.flipV
+					? `scale(${effectiveTransform.flipH ? -1 : 1}, ${effectiveTransform.flipV ? -1 : 1})`
+					: 'none'};"
 			></canvas>
 
 			<!-- Crop overlay -->
@@ -1202,6 +1268,9 @@
 				<CropOverlay
 					canvas={canvasEl}
 					value={effectiveCropQuad}
+					transform={effectiveTransform}
+					{originalWidth}
+					{originalHeight}
 					onChange={onCropChange}
 				/>
 			{/if}
@@ -1377,6 +1446,20 @@
 							</svg>
 							{cropModeActive ? 'Exit Crop' : 'Crop'}
 						</button>
+					</section>
+
+					<!-- Transform controls (rotation, flip) -->
+					<section>
+						<h3
+							class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+						>
+							Transform
+						</h3>
+						<TransformControls
+							value={effectiveTransform}
+							onChange={onTransformChange}
+							onCommit={onTransformCommit}
+						/>
 					</section>
 
 					<!-- Negative inversion toggle -->

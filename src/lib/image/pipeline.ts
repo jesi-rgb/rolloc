@@ -35,8 +35,9 @@ import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
 import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
 import blitWGSL             from './shaders/blit.wgsl?raw';
 import cropWGSL             from './shaders/crop.wgsl?raw';
+import transformWGSL        from './shaders/transform.wgsl?raw';
 import { buildCurveLUTs } from './curves';
-import type { CropQuad, EffectiveEdit, InversionParams, Matrix3x3 } from '$lib/types';
+import type { CropQuad, EffectiveEdit, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
 
 // ─── NegPy constants ───────────────────────────────────────────────────────────
 
@@ -541,16 +542,156 @@ function makeHDCurveUniforms(
 	return makeUniformBuffer(device, data);
 }
 
+// ─── Transform uniform builder ────────────────────────────────────────────────
+
+import { DEFAULT_TRANSFORM } from '$lib/types';
+
+/**
+ * Check if the GPU transform (rotation) is effectively a no-op.
+ * Note: Flips are not considered here since they're handled via CSS.
+ */
+function isIdentityTransform(t: TransformParams): boolean {
+	return (
+		t.rotation90 === 0 &&
+		Math.abs(t.fineRotation) < 0.001
+	);
+}
+
+/**
+ * Compute output dimensions after 90° rotation.
+ * 90° and 270° rotations swap width and height.
+ */
+function computeTransformOutputDimensions(
+	t: TransformParams,
+	srcWidth: number,
+	srcHeight: number
+): { width: number; height: number } {
+	if (t.rotation90 === 1 || t.rotation90 === 3) {
+		return { width: srcHeight, height: srcWidth };
+	}
+	return { width: srcWidth, height: srcHeight };
+}
+
+// ─── Crop coordinate transformation ───────────────────────────────────────────
+
+/**
+ * Transform a normalized point from original image space to rotated image space.
+ *
+ * The key insight from NegPy: we must work in pixel coordinates because
+ * aspect ratio changes with 90°/270° rotation. A normalized coordinate (0.8, 0.3)
+ * in a 1000x600 image means pixel (800, 180). After 90° CW rotation to 600x1000,
+ * the pixel maps to (180, 200) which normalizes to (0.3, 0.2) — NOT (0.7, 0.8).
+ *
+ * @param nx - Normalized x coordinate (0-1) in original image
+ * @param ny - Normalized y coordinate (0-1) in original image
+ * @param origW - Original image width
+ * @param origH - Original image height
+ * @param rotation90 - Rotation steps (0=0°, 1=90°CW, 2=180°, 3=270°CW)
+ * @returns Normalized coordinates in rotated image space
+ */
+function rotatePointToTransformedSpace(
+	nx: number,
+	ny: number,
+	origW: number,
+	origH: number,
+	rotation90: 0 | 1 | 2 | 3,
+): { x: number; y: number } {
+	// Convert to pixel coordinates in original image
+	let px = nx * origW;
+	let py = ny * origH;
+	let w = origW;
+	let h = origH;
+
+	// Apply rotation (matching NegPy's map_coords_to_geometry)
+	switch (rotation90) {
+		case 1: {
+			// 90° CW
+			const newPx = py;
+			const newPy = w - px;
+			px = newPx;
+			py = newPy;
+			// Dimensions swap
+			const tmp = w;
+			w = h;
+			h = tmp;
+			break;
+		}
+		case 2: {
+			// 180°
+			px = w - px;
+			py = h - py;
+			break;
+		}
+		case 3: {
+			// 270° CW
+			const newPx = h - py;
+			const newPy = px;
+			px = newPx;
+			py = newPy;
+			// Dimensions swap
+			const tmp = w;
+			w = h;
+			h = tmp;
+			break;
+		}
+	}
+
+	// Convert back to normalized coordinates in rotated space
+	return {
+		x: Math.max(0, Math.min(1, px / Math.max(w, 1))),
+		y: Math.max(0, Math.min(1, py / Math.max(h, 1))),
+	};
+}
+
+/**
+ * Transform crop quad coordinates from original image space to rotated image space.
+ *
+ * When the user defines a crop on the original (unrotated) image, the crop coordinates
+ * are stored in that original space. After 90° rotation, we need to transform the crop
+ * coordinates to sample from the correct region of the rotated image.
+ *
+ * We transform each corner independently, accounting for aspect ratio changes,
+ * then reassign which corner is tl/tr/br/bl based on rotation.
+ */
+function transformCropQuad(
+	quad: CropQuad,
+	rotation90: 0 | 1 | 2 | 3,
+	origW: number,
+	origH: number,
+): CropQuad {
+	if (rotation90 === 0) return quad;
+
+	// Transform all corner positions from original to rotated space
+	const tlRot = rotatePointToTransformedSpace(quad.tl.x, quad.tl.y, origW, origH, rotation90);
+	const trRot = rotatePointToTransformedSpace(quad.tr.x, quad.tr.y, origW, origH, rotation90);
+	const brRot = rotatePointToTransformedSpace(quad.br.x, quad.br.y, origW, origH, rotation90);
+	const blRot = rotatePointToTransformedSpace(quad.bl.x, quad.bl.y, origW, origH, rotation90);
+
+	// Reassign corners based on rotation to maintain proper quad orientation
+	// After 90° CW rotation: what was left is now top, what was top is now right, etc.
+	// Original TL goes to where TR should be, etc.
+	switch (rotation90) {
+		case 1: // 90° CW
+			return { tl: blRot, tr: tlRot, br: trRot, bl: brRot };
+		case 2: // 180°
+			return { tl: brRot, tr: blRot, br: tlRot, bl: trRot };
+		case 3: // 270° CW
+			return { tl: trRot, tr: brRot, br: blRot, bl: tlRot };
+		default:
+			return quad;
+	}
+}
+
 // ─── Crop uniform builder ─────────────────────────────────────────────────────
 
 /**
- * Build the crop pass uniform buffer from a CropQuad.
+ * Build the crop pass uniform buffer.
  *
  * CropQuadUniforms layout (total 32 bytes):
- *   tl : vec2<f32>  @ 0   (top-left)
- *   tr : vec2<f32>  @ 8   (top-right)
- *   br : vec2<f32>  @ 16  (bottom-right)
- *   bl : vec2<f32>  @ 24  (bottom-left)
+ *   tl : vec2<f32>  @ 0
+ *   tr : vec2<f32>  @ 8
+ *   br : vec2<f32>  @ 16
+ *   bl : vec2<f32>  @ 24
  */
 function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
 	const data = new Float32Array([
@@ -560,6 +701,43 @@ function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
 		quad.bl.x, quad.bl.y,
 	]);
 	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Build the transform pass uniform buffer.
+ *
+ * TransformUniforms layout (total 32 bytes):
+ *   rotation90   : u32   @ 0   (0, 1, 2, or 3)
+ *   flipH        : u32   @ 4   (always 0 - flips handled by CSS)
+ *   flipV        : u32   @ 8   (always 0 - flips handled by CSS)
+ *   fineRotation : f32   @ 12  (radians)
+ *   outputAspect : f32   @ 16  (width/height of output texture)
+ *   _pad0        : f32   @ 20
+ *   _pad1        : f32   @ 24
+ *   _pad2        : f32   @ 28
+ */
+function makeTransformUniforms(device: GPUDevice, t: TransformParams, outputAspect: number): GPUBuffer {
+	const data = new ArrayBuffer(32);
+	const u32View = new Uint32Array(data);
+	const f32View = new Float32Array(data);
+
+	u32View[0] = t.rotation90;
+	u32View[1] = 0; // flipH handled by CSS
+	u32View[2] = 0; // flipV handled by CSS
+	f32View[3] = (t.fineRotation * Math.PI) / 180; // Convert degrees to radians
+	f32View[4] = outputAspect; // For aspect-correct fine rotation
+	f32View[5] = 0; // _pad0
+	f32View[6] = 0; // _pad1
+	f32View[7] = 0; // _pad2
+
+	const buffer = device.createBuffer({
+		size: 32,
+		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+		mappedAtCreation: true,
+	});
+	new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data));
+	buffer.unmap();
+	return buffer;
 }
 
 /**
@@ -694,6 +872,15 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	const cropPipeline = makeRenderPipeline(cropModule, 'rgba16float');
 
+	// ── Transform pipeline (rotation + flip) ──────────────────────────────────
+
+	/**
+	 * Transform pipeline applies 90° rotation steps, fine rotation, and flips.
+	 * This runs after color processing but before crop.
+	 */
+	const transformModule = device.createShaderModule({ code: transformWGSL });
+	const transformPipeline = makeRenderPipeline(transformModule, 'rgba16float');
+
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
 	let lastBitmap: ImageBitmap | null = null;
@@ -716,8 +903,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let outputTexture: GPUTexture | null = null;
 	/**
+	 * Intermediate texture for the transform pass (rgba16float).
+	 * When transform is active, tonecurve → preTransformTexture → transform → [crop] → outputTexture.
+	 */
+	let preTransformTexture: GPUTexture | null = null;
+	/**
 	 * Intermediate texture for the crop pass (rgba16float).
-	 * When cropping is active, tonecurve → preCropTexture → crop → outputTexture.
+	 * When cropping is active, [transform] → preCropTexture → crop → outputTexture.
 	 */
 	let preCropTexture: GPUTexture | null = null;
 	/**
@@ -759,14 +951,28 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		isLinear: boolean,
 		logPerc: LogPercentiles | null,
 	): Promise<void> {
-		// ── Compute output dimensions (may differ from source if cropped) ───
+		// ── Compute output dimensions (may differ from source if transformed/cropped) ───
 		const hasCrop = edit.cropQuad !== null;
+		const hasTransform = !isIdentityTransform(edit.transform);
+		
+		// Start with source dimensions
 		let outW = w;
 		let outH = h;
+		
+		// Apply crop FIRST (crop coordinates are in original image space)
+		// This gives us the crop output dimensions in original orientation
 		if (hasCrop && edit.cropQuad) {
 			const cropDims = computeCropOutputDimensions(edit.cropQuad, w, h);
 			outW = cropDims.width;
 			outH = cropDims.height;
+		}
+		
+		// THEN apply 90° rotation dimension swap (fine rotation doesn't change dimensions)
+		// This rotates the cropped output
+		if (edit.transform.rotation90 === 1 || edit.transform.rotation90 === 3) {
+			const temp = outW;
+			outW = outH;
+			outH = temp;
 		}
 
 		// ── Resize canvas + output textures if dimensions changed ───────────
@@ -1005,8 +1211,21 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		}
 
 		// ── Tone curve pass → output texture (rgba16float, full precision) ──────
-		// When crop is active, render to preCropTexture first, then apply crop.
-		const toneCurveTarget = hasCrop ? preCropTexture! : outputTexture!;
+		// Determine target based on what passes follow:
+		// - If transform or crop is active, render to an intermediate first
+		// - Transform runs before crop, so:
+		//   - hasTransform && hasCrop: tonecurve → preTransformTexture → transform → preCropTexture → crop → output
+		//   - hasTransform only: tonecurve → preTransformTexture → transform → output
+		//   - hasCrop only: tonecurve → preCropTexture → crop → output
+		//   - neither: tonecurve → output
+		let toneCurveTarget: GPUTexture;
+		if (hasTransform) {
+			toneCurveTarget = preTransformTexture!;
+		} else if (hasCrop) {
+			toneCurveTarget = preCropTexture!;
+		} else {
+			toneCurveTarget = outputTexture!;
+		}
 
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
@@ -1023,9 +1242,43 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, toneCurveTarget.createView());
 
+		// ── Optional transform pass (rotation + flip) ────────────────────────
+		// Transform changes the output dimensions for 90°/270° rotations.
+		// The transform pass renders at the rotated dimensions.
+		if (hasTransform) {
+			// Calculate output aspect ratio for aspect-correct fine rotation.
+			// After 90°/270° rotation, dimensions swap.
+			let transformOutW = w;
+			let transformOutH = h;
+			if (edit.transform.rotation90 === 1 || edit.transform.rotation90 === 3) {
+				transformOutW = h;
+				transformOutH = w;
+			}
+			const outputAspect = transformOutW / transformOutH;
+			const transformUnifBuf = makeTransformUniforms(device, edit.transform, outputAspect);
+			toClean.push(transformUnifBuf);
+
+			// Determine the transform output target
+			const transformTarget = hasCrop ? preCropTexture! : outputTexture!;
+
+			const transformBG = device.createBindGroup({
+				layout: transformPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: preTransformTexture!.createView() },
+					{ binding: 2, resource: { buffer: transformUnifBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, transformPipeline, transformBG, transformTarget.createView());
+		}
+
 		// ── Optional crop pass (perspective quad → rect) ─────────────────────
 		if (hasCrop && edit.cropQuad) {
-			const cropUnifBuf = makeCropUniforms(device, edit.cropQuad);
+			// Transform crop coordinates from original image space to rotated image space
+			// w and h are the original source dimensions
+			const transformedQuad = transformCropQuad(edit.cropQuad, edit.transform.rotation90, w, h);
+			const cropUnifBuf = makeCropUniforms(device, transformedQuad);
 			toClean.push(cropUnifBuf);
 
 			const cropBG = device.createBindGroup({
@@ -1103,7 +1356,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				usage: GPUBufferUsage.STORAGE,
 			});
 		}
-		// Pre-crop texture at source resolution (tone curve renders here when crop is active)
+		// Pre-transform texture at source resolution (tone curve renders here when transform is active)
+		preTransformTexture?.destroy();
+		preTransformTexture = device.createTexture({
+			size: [srcW, srcH],
+			format: 'rgba16float',
+			usage:
+				GPUTextureUsage.RENDER_ATTACHMENT |
+				GPUTextureUsage.TEXTURE_BINDING,
+		});
+		// Pre-crop texture at source resolution (transform renders here when crop is also active)
 		preCropTexture?.destroy();
 		preCropTexture = device.createTexture({
 			size: [srcW, srcH],
@@ -1261,6 +1523,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateD?.destroy();
 		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
+		preTransformTexture?.destroy();
 		preCropTexture?.destroy();
 		readbackTexture?.destroy();
 		device.destroy();

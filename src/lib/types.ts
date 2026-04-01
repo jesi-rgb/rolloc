@@ -35,6 +35,30 @@ export const DEFAULT_CROP_QUAD: CropQuad = {
 	bl: { x: 0, y: 1 },
 };
 
+// ─── Transform parameters ─────────────────────────────────────────────────────
+
+/**
+ * Transform parameters for rotation and flipping.
+ * Applied in the GPU pipeline before crop.
+ */
+export interface TransformParams {
+	/** Number of 90° clockwise rotations (0–3). */
+	rotation90: 0 | 1 | 2 | 3;
+	/** Fine rotation in degrees (-45 to +45). Applied after 90° rotation. */
+	fineRotation: number;
+	/** Horizontal flip (mirror). Applied via CSS. */
+	flipH: boolean;
+	/** Vertical flip. Applied via CSS. */
+	flipV: boolean;
+}
+
+export const DEFAULT_TRANSFORM: TransformParams = {
+	rotation90: 0,
+	fineRotation: 0,
+	flipH: false,
+	flipV: false,
+};
+
 // ─── Color / Curve primitives ─────────────────────────────────────────────────
 
 /** Row-major 3×3 matrix: [m00, m01, m02, m10, m11, m12, m20, m21, m22] */
@@ -174,6 +198,11 @@ export interface FrameEditOverrides {
 	 * where the output rectangle maps to in the source image.
 	 */
 	cropQuad: CropQuad | null;
+	/**
+	 * Transform parameters (rotation, flip).
+	 * Null = inherit default (no transform).
+	 */
+	transform: TransformParams | null;
 }
 
 /**
@@ -202,6 +231,8 @@ export interface EffectiveEdit {
 	 * When null, no crop is applied (full image).
 	 */
 	cropQuad: CropQuad | null;
+	/** Transform parameters (rotation, flip). */
+	transform: TransformParams;
 }
 
 export type FrameFlag = 'pick' | 'reject' | 'edited';
@@ -313,6 +344,7 @@ export const DEFAULT_FRAME_EDIT: FrameEditOverrides = {
 	rebateRegion: null,
 	inversionParams: null,
 	cropQuad: null,
+	transform: null,
 };
 
 export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
@@ -372,5 +404,7 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		},
 		// Crop quad is frame-only (no roll-level default).
 		cropQuad: (f as { cropQuad?: CropQuad | null }).cropQuad ?? null,
+		// Transform is frame-only (no roll-level default).
+		transform: (f as { transform?: TransformParams | null }).transform ?? DEFAULT_TRANSFORM,
 	};
 }
