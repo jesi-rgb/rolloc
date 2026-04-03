@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "RWS67hY5xBmEZ5A3umdR1lOzBNbd5iec1umB9d0m1IZ8a6szaCnVDRF+",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY3ODQxOUM0MzkxNkVFQkEKUldTNjdoWTV4Qm1FWjVBM3VtZFIxbE96Qk5iZDVpZWMxdW1COWQwbTFJWjhhNnN6YUNuVkRSRisK",
       "endpoints": [
         "https://github.com/jesi-rgb/rolloc/releases/latest/download/latest.json"
       ]
