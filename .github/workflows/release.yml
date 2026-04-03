@@ -52,21 +52,11 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Decode signing key
-        shell: bash
-        run: |
-          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}" | base64 -d > "$RUNNER_TEMP/tauri.key"
-          # Read content back and set via heredoc to preserve newlines
-          {
-            echo 'TAURI_SIGNING_PRIVATE_KEY<<ENDOFKEY'
-            cat "$RUNNER_TEMP/tauri.key"
-            echo 'ENDOFKEY'
-          } >> $GITHUB_ENV
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
