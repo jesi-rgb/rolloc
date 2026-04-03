@@ -56,7 +56,11 @@ jobs:
         shell: bash
         run: |
           echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}" | base64 -d > /tmp/tauri.key
-          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat /tmp/tauri.key)" >> $GITHUB_ENV
+          {
+            echo 'TAURI_SIGNING_PRIVATE_KEY<<EOF'
+            cat /tmp/tauri.key
+            echo 'EOF'
+          } >> $GITHUB_ENV
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
