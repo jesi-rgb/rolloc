@@ -88,6 +88,17 @@ export interface WhiteBalance {
 	tint: number;
 }
 
+// ─── Film types ───────────────────────────────────────────────────────────────
+
+/**
+ * Film processing mode, matching negpy's ProcessMode.
+ *
+ * - C41: Color negative film (default) — requires inversion + orange mask removal
+ * - BW:  Black & white negative — inversion + luminance conversion
+ * - E6:  Slide/reversal film (positive) — no inversion, just normalization
+ */
+export type FilmType = 'C41' | 'BW' | 'E6';
+
 // ─── NegPy inversion parameters ──────────────────────────────────────────────
 
 /**
@@ -144,6 +155,21 @@ export interface InversionParams {
 	// ── CLAHE (local contrast enhancement) ────────────────────────────────────
 	/** CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default. */
 	claheStrength: number;
+
+	// ── Film type and E6-specific settings ────────────────────────────────────
+	/**
+	 * Film processing mode.
+	 * - C41: Color negative (default) — orange mask removal + inversion
+	 * - BW:  B&W negative — inversion + luminance conversion
+	 * - E6:  Slide/reversal (positive) — no inversion needed
+	 */
+	filmType: FilmType;
+	/**
+	 * E6 normalize mode. When true (default), applies per-channel percentile
+	 * stretch like C41. When false, uses a fixed density range from the floor.
+	 * Only relevant when filmType = 'E6'.
+	 */
+	e6Normalize: boolean;
 }
 
 // ─── Edit parameters ──────────────────────────────────────────────────────────
@@ -325,6 +351,8 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	shoulderWidth:    2.5,
 	shoulderHardness: 1.0,
 	claheStrength:    0.25,
+	filmType:         'C41',
+	e6Normalize:      true,
 };
 
 export const DEFAULT_ROLL_EDIT: RollEditParams = {

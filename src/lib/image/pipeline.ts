@@ -37,7 +37,8 @@ import blitWGSL             from './shaders/blit.wgsl?raw';
 import cropWGSL             from './shaders/crop.wgsl?raw';
 import transformWGSL        from './shaders/transform.wgsl?raw';
 import { buildCurveLUTs } from './curves';
-import type { CropQuad, EffectiveEdit, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
+import type { CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
+import { DEFAULT_TRANSFORM } from '$lib/types';
 
 // ─── NegPy constants ───────────────────────────────────────────────────────────
 
@@ -138,6 +139,7 @@ function computeLogPercentilesFromF32(
 	height: number = 0,
 	stride: number = 8,
 	colorMatrix?: Matrix3x3,
+	filmType: FilmType = 'C41',
 ): LogPercentiles {
 	const LOG10_E = 0.43429448190325183;
 	const eps = 1e-6;
@@ -201,14 +203,26 @@ function computeLogPercentilesFromF32(
 		return sorted[idx];
 	}
 
-	// Floors: find the 0.001th percentile of mean luminance, select pixels
-	// at or below that threshold, and average their per-channel log values.
-	// This matches negpy's analyze_log_exposure_bounds() which uses the mean
-	// of the darkest pixels rather than a raw per-channel percentile.
-	const darkThreshold = percentile(meanLog, 0.001);
+	// Percentile thresholds depend on film type.
+	// E6 (slide) film is a positive: darkest areas correspond to actual dark
+	// subjects, so we invert the percentile selection compared to negatives.
+	// negpy: C41/BW use p_low=0.001, p_high=99.999
+	//        E6 uses p_low=99.999, p_high=0.001
+	const isE6 = filmType === 'E6';
+	const pLow  = isE6 ? 99.999 : 0.001;
+	const pHigh = isE6 ? 0.001  : 99.999;
+
+	// Floors: find the pLow percentile of mean luminance, select pixels
+	// at or below (C41/BW) or above (E6) that threshold, and average their
+	// per-channel log values.  This matches negpy's analyze_log_exposure_bounds()
+	// which uses the mean of the darkest pixels rather than a raw per-channel
+	// percentile.
+	const darkThreshold = percentile(meanLog, pLow);
 	let floorR = 0, floorG = 0, floorB = 0, darkCount = 0;
 	for (let i = 0; i < meanLog.length; i++) {
-		if (meanLog[i] <= darkThreshold) {
+		// E6 inverts the comparison: >= instead of <=
+		const isDark = isE6 ? (meanLog[i] >= darkThreshold) : (meanLog[i] <= darkThreshold);
+		if (isDark) {
 			floorR += rLog[i];
 			floorG += gLog[i];
 			floorB += bLog[i];
@@ -217,14 +231,14 @@ function computeLogPercentilesFromF32(
 	}
 	const floors: [number, number, number] = darkCount > 0
 		? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
-		: [percentile(rLog, 0.001), percentile(gLog, 0.001), percentile(bLog, 0.001)];
+		: [percentile(rLog, pLow), percentile(gLog, pLow), percentile(bLog, pLow)];
 
 	return {
 		floors,
 		ceils: [
-			percentile(rLog, 99.999),
-			percentile(gLog, 99.999),
-			percentile(bLog, 99.999),
+			percentile(rLog, pHigh),
+			percentile(gLog, pHigh),
+			percentile(bLog, pHigh),
 		],
 	};
 }
@@ -236,6 +250,7 @@ function computeLogPercentilesFromF32(
  *
  * `width` and `height` are used to apply the analysis buffer crop.
  * `colorMatrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
+ * `filmType` — controls percentile logic (E6 inverts floor/ceil selection).
  */
 function computeLogPercentilesFromU16(
 	pixels: Uint16Array,
@@ -243,6 +258,7 @@ function computeLogPercentilesFromU16(
 	height: number,
 	stride: number = 8,
 	colorMatrix?: Matrix3x3,
+	filmType: FilmType = 'C41',
 ): LogPercentiles {
 	// Normalise u16 → [0,1] float and reuse the float percentile path.
 	// Do NOT truncate to the first N pixels — that produces a biased sample
@@ -252,7 +268,7 @@ function computeLogPercentilesFromU16(
 	for (let i = 0; i < pixels.length; i++) {
 		f32[i] = pixels[i] / 65535.0;
 	}
-	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix);
+	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix, filmType);
 }
 
 /**
@@ -441,32 +457,69 @@ function makeUniformBuffer(device: GPUDevice, data: Float32Array): GPUBuffer {
 // ─── NegPy uniform builders ───────────────────────────────────────────────────
 
 /**
+ * Convert FilmType string to numeric value for shader.
+ */
+function filmTypeToNumber(filmType: FilmType): number {
+	switch (filmType) {
+		case 'C41': return 0;
+		case 'BW':  return 1;
+		case 'E6':  return 2;
+		default:    return 0;
+	}
+}
+
+/**
  * Build the normalization pass uniform buffer.
  *
- * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 48 bytes):
+ * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 64 bytes):
  *   floors         : vec4<f32>  @ 0   (rgb + pad)
  *   ceils          : vec4<f32>  @ 16  (rgb + pad)
  *   shadowCast     : vec4<f32>  @ 32  (rgb + pad)
  *   shadowStrength : f32        @ 48
  *   wpOffset       : f32        @ 52
  *   bpOffset       : f32        @ 56
- *   _pad           : f32        @ 60
+ *   filmType       : u32        @ 60  (0 = C41, 1 = BW, 2 = E6)
  *   struct size = 64 bytes
  */
 function makeNormalizationUniforms(
 	device: GPUDevice,
 	perc: LogPercentiles,
+	filmType: FilmType,
 ): GPUBuffer {
-	const data = new Float32Array([
-		perc.floors[0], perc.floors[1], perc.floors[2], 0,  // floors + pad
-		perc.ceils[0],  perc.ceils[1],  perc.ceils[2],  0,  // ceils + pad
-		0, 0, 0, 0,  // shadowCast + pad (no shadow cast correction for now)
-		0.0,         // shadowStrength
-		0.0,         // wpOffset
-		0.0,         // bpOffset
-		0.0,         // _pad
-	]);
-	return makeUniformBuffer(device, data);
+	const buffer = device.createBuffer({
+		size: 64,
+		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+	});
+	const data = new ArrayBuffer(64);
+	const floatView = new Float32Array(data);
+	const uintView = new Uint32Array(data);
+
+	// floors (vec4) @ 0
+	floatView[0] = perc.floors[0];
+	floatView[1] = perc.floors[1];
+	floatView[2] = perc.floors[2];
+	floatView[3] = 0;  // pad
+
+	// ceils (vec4) @ 16
+	floatView[4] = perc.ceils[0];
+	floatView[5] = perc.ceils[1];
+	floatView[6] = perc.ceils[2];
+	floatView[7] = 0;  // pad
+
+	// shadowCast (vec4) @ 32
+	floatView[8]  = 0;  // no shadow cast correction for now
+	floatView[9]  = 0;
+	floatView[10] = 0;
+	floatView[11] = 0;  // pad
+
+	// scalars @ 48
+	floatView[12] = 0.0;  // shadowStrength
+	floatView[13] = 0.0;  // wpOffset
+	floatView[14] = 0.0;  // bpOffset
+	uintView[15]  = filmTypeToNumber(filmType);  // filmType as u32
+
+	device.queue.writeBuffer(buffer, 0, data);
+	return buffer;
 }
 
 /**
@@ -480,7 +533,7 @@ function makeNormalizationUniforms(
  *   highlightCmy     : vec4<f32>  @ 64
  *   toe              : f32        @ 80
  *   toeWidth         : f32        @ 84
- *   _unused0         : f32        @ 88   (toeHardness slot, unused)
+ *   filmType         : u32        @ 88   (0 = C41, 1 = BW, 2 = E6)
  *   shoulder         : f32        @ 92
  *   shoulderWidth    : f32        @ 96
  *   _unused1         : f32        @ 100  (shoulderHardness slot, unused)
@@ -520,31 +573,64 @@ function makeHDCurveUniforms(
 	const hCmyG = inv.highlightMagenta * CMY_MAX_DENSITY;
 	const hCmyB = inv.highlightYellow  * CMY_MAX_DENSITY;
 
-	const data = new Float32Array([
-		pivot, pivot, pivot, 0,           // pivots rgb + pad
-		slope, slope, slope, 0,           // slopes rgb + pad
-		cmyR,  cmyG,  cmyB,  0,           // cmyOffsets rgb + pad
-		sCmyR, sCmyG, sCmyB, 0,           // shadowCmy rgb + pad
-		hCmyR, hCmyG, hCmyB, 0,           // highlightCmy rgb + pad
-		inv.toe,              // toe
-		inv.toeWidth,         // toeWidth
-		0.0,                  // _unused0 (toeHardness slot, ignored by shader)
-		inv.shoulder,         // shoulder
-		inv.shoulderWidth,    // shoulderWidth
-		0.0,                  // _unused1 (shoulderHardness slot, ignored by shader)
-		inv.shadows,          // shadows
-		inv.highlights,       // highlights
-		D_MAX,                // dMax
-		0.0,                  // _pad0
-		0.0,                  // _pad1
-		0.0,                  // _pad2
-	]);
-	return makeUniformBuffer(device, data);
+	// Create buffer with mixed float32 and uint32 values
+	const buffer = device.createBuffer({
+		size: 128,
+		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+	});
+	const data = new ArrayBuffer(128);
+	const floatView = new Float32Array(data);
+	const uintView = new Uint32Array(data);
+
+	// pivots (vec4) @ 0
+	floatView[0] = pivot;
+	floatView[1] = pivot;
+	floatView[2] = pivot;
+	floatView[3] = 0;  // pad
+
+	// slopes (vec4) @ 16
+	floatView[4] = slope;
+	floatView[5] = slope;
+	floatView[6] = slope;
+	floatView[7] = 0;  // pad
+
+	// cmyOffsets (vec4) @ 32
+	floatView[8]  = cmyR;
+	floatView[9]  = cmyG;
+	floatView[10] = cmyB;
+	floatView[11] = 0;  // pad
+
+	// shadowCmy (vec4) @ 48
+	floatView[12] = sCmyR;
+	floatView[13] = sCmyG;
+	floatView[14] = sCmyB;
+	floatView[15] = 0;  // pad
+
+	// highlightCmy (vec4) @ 64
+	floatView[16] = hCmyR;
+	floatView[17] = hCmyG;
+	floatView[18] = hCmyB;
+	floatView[19] = 0;  // pad
+
+	// scalars @ 80
+	floatView[20] = inv.toe;          // toe @ 80
+	floatView[21] = inv.toeWidth;     // toeWidth @ 84
+	uintView[22]  = filmTypeToNumber(inv.filmType);  // filmType @ 88 (u32)
+	floatView[23] = inv.shoulder;     // shoulder @ 92
+	floatView[24] = inv.shoulderWidth; // shoulderWidth @ 96
+	floatView[25] = 0.0;              // _unused1 @ 100
+	floatView[26] = inv.shadows;      // shadows @ 104
+	floatView[27] = inv.highlights;   // highlights @ 108
+	floatView[28] = D_MAX;            // dMax @ 112
+	floatView[29] = 0.0;              // _pad0 @ 116
+	floatView[30] = 0.0;              // _pad1 @ 120
+	floatView[31] = 0.0;              // _pad2 @ 124
+
+	device.queue.writeBuffer(buffer, 0, data);
+	return buffer;
 }
 
 // ─── Transform uniform builder ────────────────────────────────────────────────
-
-import { DEFAULT_TRANSFORM } from '$lib/types';
 
 /**
  * Check if the GPU transform (rotation) is effectively a no-op.
@@ -729,8 +815,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	// ── Transform pipeline (rotation + flip) ──────────────────────────────────
 
 	/**
-	 * Transform pipeline applies 90° rotation steps, fine rotation, and flips.
-	 * This runs after color processing but before crop.
+	 * Transform pipeline applies rotation (UV-based, any angle).
+	 * Flips are handled via CSS on the canvas element.
 	 */
 	const transformModule = device.createShaderModule({ code: transformWGSL });
 	const transformPipeline = makeRenderPipeline(transformModule, 'rgba16float');
@@ -813,6 +899,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// Start with source dimensions, apply crop if present
 		let outW = w;
 		let outH = h;
+		
+		// Apply crop dimensions
 		if (hasCrop && edit.cropQuad) {
 			const cropDims = computeCropOutputDimensions(edit.cropQuad, w, h);
 			outW = cropDims.width;
@@ -867,10 +955,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		const colorMatrixUniformBuf = makeUniformBuffer(device, colorMatrixUniforms);
 
 		// ── Build tone curve (WB + LUT) uniforms ────────────────────────────
-		const [tcWbR, tcWbG, tcWbB] = temperatureToMultipliers(
-			edit.whiteBalance.temperature,
-			edit.whiteBalance.tint,
-		);
+		// For the inversion path, skip white balance — the CMY color timing
+		// controls handle color correction in log-density space, and applying
+		// WB multipliers on top of the H&D output would double-correct.
+		const [tcWbR, tcWbG, tcWbB] = edit.invert
+			? [1.0, 1.0, 1.0] as [number, number, number]
+			: temperatureToMultipliers(edit.whiteBalance.temperature, edit.whiteBalance.tint);
 		const toneCurveUniforms = new Float32Array([
 			tcWbR, tcWbG, tcWbB, 1.0,              // wbMultipliers
 			edit.invert ? 1.0 : 0.0, 0.0, 0.0, 0.0, // flags: [skipSrgb, pad, pad, pad]
@@ -902,7 +992,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// Pass 2.6: clahe_remap    — fragment: intermediateB + CDF → intermediateC
 			// Pass 3: tonecurve      — intermediateC (or B)  → outputTexture
 
-			const normBuf = makeNormalizationUniforms(device, logPerc);
+			const normBuf = makeNormalizationUniforms(device, logPerc, edit.inversionParams.filmType);
 			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
 			toClean.push(normBuf, hdBuf);
 
@@ -1128,6 +1218,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			drawFullscreenTriangle(encoder, cropPipeline, cropBG, outputTexture!.createView());
 		}
 
+		// Note: Transform (rotation/flip) is applied via CSS in the UI for instant preview.
+		// The GPU transform pass will be used during export (see exportWithTransform).
+
 		// ── Dithered blit → canvas swap chain (8-bit display) ────────────────
 		const blitBG = device.createBindGroup({
 			layout: blitPipeline.getBindGroupLayout(0),
@@ -1244,7 +1337,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			const f32 = await bitmapToF32Pixels(bitmap);
-			logPerc = computeLogPercentilesFromF32(f32, w, h, 8);
+			logPerc = computeLogPercentilesFromF32(f32, w, h, 8, undefined, edit.inversionParams.filmType);
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -1267,7 +1360,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(pixels, w, h, 8);
+				logPerc = computeLogPercentilesFromU16(pixels, w, h, 8, undefined, edit.inversionParams.filmType);
 				lastLogPerc = logPerc;
 			}
 		} else {
@@ -1360,6 +1453,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		outputTexture?.destroy();
 		preTransformTexture?.destroy();
 		preCropTexture?.destroy();
+		preTransformTexture?.destroy();
 		readbackTexture?.destroy();
 		device.destroy();
 	}

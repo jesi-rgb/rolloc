@@ -19,6 +19,15 @@
  * The "invert" is already baked in by the normalization pass (log stretch).
  * This pass is purely the paper-print simulation.
  *
+ * For B&W mode (filmType == 1), the output is converted to luminance after
+ * the H&D curve and the result is spread across all three channels. This
+ * matches negpy's approach where get_luminance() is applied post-curve.
+ *
+ * filmType uniform values:
+ *   0 = C41 (color negative) — default behavior
+ *   1 = BW  (black & white negative) — convert to luminance post-curve
+ *   2 = E6  (slide/reversal positive) — same as C41 (no special handling here)
+ *
  * Uniform struct is aligned to 16-byte boundaries (WGSL rules):
  *   pivots        : vec4<f32>   @ 0   (rgb + pad)    → 16 bytes
  *   slopes        : vec4<f32>   @ 16  (rgb + pad)    → 16 bytes
@@ -27,7 +36,7 @@
  *   highlightCmy  : vec4<f32>   @ 64  (rgb + pad)    → 16 bytes
  *   toe           : f32         @ 80                 →  4 bytes
  *   toeWidth      : f32         @ 84                 →  4 bytes
- *   _unused0      : f32         @ 88                 →  4 bytes
+ *   filmType      : u32         @ 88                 →  4 bytes
  *   shoulder      : f32         @ 92                 →  4 bytes
  *   shoulderWidth : f32         @ 96                 →  4 bytes
  *   _unused1      : f32         @ 100                →  4 bytes
@@ -40,6 +49,11 @@
  *   struct size = 128 bytes
  */
 
+// Rec. 709 luminance coefficients (matches negpy's LUMA_R, LUMA_G, LUMA_B)
+const LUMA_R: f32 = 0.2126;
+const LUMA_G: f32 = 0.7152;
+const LUMA_B: f32 = 0.0722;
+
 struct HDCurveUniforms {
 	pivots           : vec4<f32>,
 	slopes           : vec4<f32>,
@@ -48,7 +62,7 @@ struct HDCurveUniforms {
 	highlightCmy     : vec4<f32>,
 	toe              : f32,
 	toeWidth         : f32,
-	_unused0         : f32,
+	filmType         : u32,     // 0 = C41, 1 = BW, 2 = E6
 	shoulder         : f32,
 	shoulderWidth    : f32,
 	_unused1         : f32,
@@ -188,6 +202,13 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		u.shoulder, u.shoulderWidth,
 		u.shadows, u.highlights, u.dMax,
 	);
+
+	// B&W mode: convert to luminance (Rec. 709) and output as grayscale
+	// This matches negpy's get_luminance() applied post-curve
+	if (u.filmType == 1u) {
+		let lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
+		return vec4<f32>(lum, lum, lum, 1.0);
+	}
 
 	return vec4<f32>(r, g, b, 1.0);
 }

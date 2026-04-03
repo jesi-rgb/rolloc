@@ -7,13 +7,22 @@
  * Algorithm (per channel, per pixel):
  *   1. log10(clamp(pixel, ε, 1.0))       — convert to log-density space
  *   2. clamp((log - floor) / (ceil - floor), 0, 1)  — stretch per channel
- *      For C-41: floor < ceil → inverts the negative automatically.
+ *      For C-41/BW: floor < ceil → inverts the negative automatically.
+ *      For E-6: floor > ceil → no inversion (slide film is already positive)
  *
  * floors / ceils are computed CPU-side from per-channel analysis of the
  * full image and passed as uniforms.  Floors use the mean of pixels below
  * the 0.001th percentile of mean luminance; ceils use the 99.999th
  * per-channel percentile.  Analysis crops 10% of each edge (matching
  * negpy's ProcessConfig.analysis_buffer = 0.10).
+ *
+ * For E-6 (slide) film, the percentiles are swapped (floor = bright, ceil = dark)
+ * so the output is not inverted — matching negpy's behavior.
+ *
+ * filmType uniform values:
+ *   0 = C41 (color negative)
+ *   1 = BW  (black & white negative)
+ *   2 = E6  (slide/reversal positive)
  *
  * This pass is only executed when invert = 1u. When disabled the shader is
  * bypassed and the source texture is read directly by the hd_curve pass.
@@ -32,7 +41,8 @@ struct NormUniforms {
 	wpOffset    : f32,
 	/// Manual black-point offset in log space (shifts floors).
 	bpOffset    : f32,
-	_pad        : f32,
+	/// Film type: 0 = C41, 1 = BW, 2 = E6
+	filmType    : u32,
 }
 
 @group(0) @binding(0) var uSampler  : sampler;
@@ -78,10 +88,20 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 
 	// 2. Per-channel linear stretch [floor, ceil] → [0, 1]
 	//    Independent per-channel stretch removes the orange mask and inverts.
-	let floors = u.floors.rgb + vec3<f32>(u.bpOffset);
-	let ceils  = u.ceils.rgb  + vec3<f32>(u.wpOffset);
+	//    For E6 (filmType == 2), the offsets are inverted to match negpy behavior.
+	var wp_off = u.wpOffset;
+	var bp_off = u.bpOffset;
+	if (u.filmType == 2u) {
+		// E6 slide film: invert the manual offset directions
+		wp_off = -u.wpOffset;
+		bp_off = -u.bpOffset;
+	}
+
+	let floors = u.floors.rgb + vec3<f32>(bp_off);
+	let ceils  = u.ceils.rgb  + vec3<f32>(wp_off);
 	let delta  = ceils - floors;
 	// Guard against degenerate range (divide by near-zero).
+	// Use sign-preserving epsilon to handle both negative (C41/BW) and positive (E6) ranges.
 	let safeDelta = sign(delta) * max(abs(delta), vec3<f32>(eps));
 
 	var res = clamp((lc - floors) / safeDelta, vec3<f32>(0.0), vec3<f32>(1.0));
