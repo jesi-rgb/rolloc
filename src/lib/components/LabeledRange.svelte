@@ -28,6 +28,10 @@
 		small?: boolean;
 		/** Double-clicking the thumb resets to this value. */
 		defaultValue?: number;
+		/** Custom color for the thumb. */
+		thumbColor?: string;
+		/** Custom color for the track. */
+		trackColor?: string;
 	}
 
 	let {
@@ -46,6 +50,8 @@
 		signed = false,
 		small = false,
 		defaultValue,
+		thumbColor,
+		trackColor,
 	}: Props = $props();
 
 	function fmt(v: number): string {
@@ -79,6 +85,8 @@
 		onpointercancel={() => ondragend?.()}
 		ondblclick={handleDblClick}
 		class="range-track {extraClass}"
+		style:--thumb-color={thumbColor}
+		style:--track-color={trackColor}
 	/>
 {/snippet}
 
@@ -118,43 +126,62 @@
 
 	/* WebKit (Chrome, Safari, Edge) */
 	.range-track::-webkit-slider-runnable-track {
-		height: 0.3rem;
+		height: 0.5rem;
 		border-radius: 9999px;
-		background-color: var(--base-subtle);
+		background-color: var(--track-color, var(--base-subtle));
 	}
 
 	.range-track::-webkit-slider-thumb {
 		-webkit-appearance: none;
 		appearance: none;
-		/* Visual size */
-		width: 0.65rem;
-		height: 0.3rem;
+		/* Visual size - pill shape */
+		width: 1.25rem;
+		height: 0.5rem;
 		border-radius: 9999px;
-		background-color: var(--primary);
-		background-clip: content-box;
-		/* Invisible padding expands the hit area without changing the look */
-		box-sizing: content-box;
-		border: 0.5rem solid transparent;
-		margin-top: calc(-0.5rem + (0.3rem - 0.3rem) / 2);
+		background-color: var(--thumb-color, var(--primary));
+		box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+		/* Center thumb on track */
+		margin-top: calc((0.5rem - 0.5rem) / 2);
 		cursor: pointer;
+		/* Smooth scale transitions */
+		transition: transform 150ms ease-out;
+		transform: scale(1);
+	}
+
+	.range-track:hover::-webkit-slider-thumb {
+		transform: scale(1.15);
+	}
+
+	.range-track:active::-webkit-slider-thumb {
+		transform: scale(0.95);
 	}
 
 	/* Firefox */
 	.range-track::-moz-range-track {
-		height: 0.25rem;
-		background-color: var(--base-subtle);
+		height: 0.5rem;
+		border-radius: 9999px;
+		background-color: var(--track-color, var(--base-subtle));
 	}
 
 	.range-track::-moz-range-thumb {
-		/* Visual size */
-		width: 0.65rem;
-		height: 0.3rem;
+		/* Visual size - pill shape */
+		width: 1.25rem;
+		height: 0.5rem;
 		border-radius: 9999px;
-		background-color: var(--primary);
-		background-clip: content-box;
-		/* Invisible padding expands the hit area */
-		box-sizing: content-box;
-		border: 0.5rem solid transparent;
+		background-color: var(--thumb-color, var(--primary));
+		box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+		border: none;
 		cursor: pointer;
+		/* Smooth scale transitions */
+		transition: transform 150ms ease-out;
+		transform: scale(1);
+	}
+
+	.range-track:hover::-moz-range-thumb {
+		transform: scale(1.15);
+	}
+
+	.range-track:active::-moz-range-thumb {
+		transform: scale(0.95);
 	}
 </style>

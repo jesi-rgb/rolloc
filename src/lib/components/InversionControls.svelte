@@ -182,45 +182,47 @@
 			<button
 				type="button"
 				onclick={() => {
-					filmType = 'C41';
+					filmType = "C41";
 					commit();
 				}}
 				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
 					{filmType === 'C41'
-						? 'bg-accent text-white'
-						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+					? 'bg-accent text-white'
+					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
 			>
 				C-41
 			</button>
 			<button
 				type="button"
 				onclick={() => {
-					filmType = 'BW';
+					filmType = "BW";
 					commit();
 				}}
 				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
 					{filmType === 'BW'
-						? 'bg-accent text-white'
-						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+					? 'bg-accent text-white'
+					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
 			>
 				B&W
 			</button>
 			<button
 				type="button"
 				onclick={() => {
-					filmType = 'E6';
+					filmType = "E6";
 					commit();
 				}}
 				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
 					{filmType === 'E6'
-						? 'bg-accent text-white'
-						: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
+					? 'bg-accent text-white'
+					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
 			>
 				E-6
 			</button>
 		</div>
-		{#if filmType === 'E6'}
-			<label class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer">
+		{#if filmType === "E6"}
+			<label
+				class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
+			>
 				<input
 					type="checkbox"
 					checked={e6Normalize}
@@ -258,6 +260,8 @@
 				oncommit={commit}
 				signed
 				labelClass="text-[#00bcd4]"
+				thumbColor="#00bcd4"
+				trackColor="#00bcd413"
 			/>
 			<LabeledRange
 				id="inv-magenta"
@@ -274,6 +278,8 @@
 				oncommit={commit}
 				signed
 				labelClass="text-[#e91e63]"
+				thumbColor="#e91e63"
+				trackColor="#e91e6313"
 			/>
 			<LabeledRange
 				id="inv-yellow"
@@ -290,6 +296,8 @@
 				oncommit={commit}
 				signed
 				labelClass="text-[#ffeb3b]"
+				thumbColor="#ffeb3b"
+				trackColor="#ffeb3b13"
 			/>
 		</div>
 	</section>
@@ -428,6 +436,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#00bcd4]"
+						thumbColor="#00bcd4"
+						trackColor="#00bcd418"
 					/>
 					<LabeledRange
 						id="inv-s-magenta"
@@ -445,6 +455,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#e91e63]"
+						thumbColor="#e91e63"
+						trackColor="#e91e6333"
 					/>
 					<LabeledRange
 						id="inv-s-yellow"
@@ -462,6 +474,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#ffeb3b]"
+						thumbColor="#ffeb3b"
+						trackColor="#ffeb3b33"
 					/>
 				</div>
 			</div>
@@ -563,6 +577,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#00bcd4]"
+						thumbColor="#00bcd4"
+						trackColor="#00bcd418"
 					/>
 					<LabeledRange
 						id="inv-h-magenta"
@@ -580,6 +596,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#e91e63]"
+						thumbColor="#e91e63"
+						trackColor="#e91e6333"
 					/>
 					<LabeledRange
 						id="inv-h-yellow"
@@ -597,6 +615,8 @@
 						oncommit={commit}
 						signed
 						labelClass="text-[#ffeb3b]"
+						thumbColor="#ffeb3b"
+						trackColor="#ffeb3b33"
 					/>
 				</div>
 			</div>
