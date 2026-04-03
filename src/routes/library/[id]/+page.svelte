@@ -22,7 +22,6 @@
 	import type { Library, LibraryImage } from "$lib/types";
 	import { SvelteMap } from "svelte/reactivity";
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
-	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
 	import {
@@ -383,7 +382,6 @@
 					</select>
 				</div>
 			{/if}
-			<ThemeSwitcher />
 		</div>
 	</header>
 

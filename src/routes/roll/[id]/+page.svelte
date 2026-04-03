@@ -17,7 +17,6 @@
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
-	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
 	import {
@@ -190,7 +189,6 @@
 				{frames.length} frame{frames.length !== 1 ? "s" : ""}
 			</span>
 		{/if}
-		<div class="ml-auto"><ThemeSwitcher /></div>
 	</header>
 
 	{#if loading}

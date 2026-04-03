@@ -4,7 +4,7 @@
 	import { getLibraries, deleteLibrary } from "$lib/db/libraries";
 	import NewRollDialog from "$lib/components/NewRollDialog.svelte";
 	import NewLibraryDialog from "$lib/components/NewLibraryDialog.svelte";
-	import ThemeSwitcher from "$lib/components/ThemeSwitcher.svelte";
+	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import RollThumbStrip from "$lib/components/RollThumbStrip.svelte";
 	import LibraryThumbStrip from "$lib/components/LibraryThumbStrip.svelte";
 	import type { Roll, Library } from "$lib/types";
@@ -69,7 +69,7 @@
 
 <svelte:head><title>Rolloc — Film Archive</title></svelte:head>
 
-<div class="min-h-screen bg-base text-content">
+<div class="min-h-screen bg-base text-content flex flex-col">
 	<!-- Top bar -->
 	<header
 		class="flex items-center justify-between px-l py-base border-b border-base-subtle"
@@ -83,7 +83,6 @@
 			>
 		</div>
 		<div class="flex items-center gap-xs">
-			<ThemeSwitcher />
 			{#if activeTab === "rolls"}
 				<button
 					onclick={() => (showNewRoll = true)}
@@ -138,7 +137,7 @@
 		</div>
 	</nav>
 
-	<main class="px-l py-xl max-w-5xl mx-auto">
+	<main class="flex-1 px-l py-xl max-w-5xl mx-auto">
 		{#if loading}
 			<p class="text-content-muted">Loading…</p>
 		{:else if activeTab === "rolls"}
@@ -345,6 +344,7 @@
 			{/if}
 		{/if}
 	</main>
+	<KeyboardHintBar hints={[]} />
 </div>
 
 {#if showNewRoll}

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Component } from "svelte";
+	import { getTheme, toggleTheme } from "$lib/theme.svelte";
 
 	/** An icon key bound to one or more KeyboardEvent.key values. */
 	interface IconKey {
@@ -21,6 +22,8 @@
 	}
 
 	let { hints, progress }: Props = $props();
+
+	const theme = $derived(getTheme());
 
 	/** Type guard: is the key an IconKey object (not a bare Component)? */
 	function isIconKey(key: Key): key is IconKey {
@@ -136,7 +139,7 @@
 <svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onBlur} />
 
 <footer
-	class="flex items-baseline gap-base px-l py-xs
+	class="flex items-center gap-base px-l py-xs
 	       border-t border-base-subtle bg-base-muted select-none"
 >
 	{#each hints as hint (hint.label)}
@@ -169,4 +172,47 @@
 	{#if progress}
 		<span class="ml-auto text-xs text-content-subtle">{progress}</span>
 	{/if}
+
+	<!-- Theme toggle (sun/moon) -->
+	<button
+		onclick={toggleTheme}
+		aria-label="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
+		title="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
+		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress ? '' : 'ml-auto'}"
+	>
+		{#if theme === "dark"}
+			<!-- Sun icon (switch to light) -->
+			<svg
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<circle cx="12" cy="12" r="4" />
+				<path
+					d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+				/>
+			</svg>
+		{:else}
+			<!-- Moon icon (switch to dark) -->
+			<svg
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+			</svg>
+		{/if}
+	</button>
 </footer>
