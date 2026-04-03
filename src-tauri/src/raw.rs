@@ -11,6 +11,9 @@
 //!      sensor data and JPEG-encode the result.
 //! Returns raw JPEG bytes (same contract as `generate_thumb` in thumb.rs).
 //!
+//! Both paths apply quick film-negative inversion (log percentile stretch +
+//! sigmoid curve) to give a recognizable inverted preview.
+//!
 //! ## `raw_decode`
 //! Full-quality decode for the editor pipeline.
 //! Returns a compact binary payload:
@@ -41,6 +44,8 @@ use rawler::{
 };
 use serde::Serialize;
 use tauri::ipc::Response;
+
+use crate::thumb::apply_quick_inversion;
 
 // ─── EXIF orientation ────────────────────────────────────────────────────────
 
@@ -253,13 +258,17 @@ fn raw_to_float(raw: &RawImage) -> Result<Vec<f32>, String> {
 /// Fast thumbnail / preview for a RAW file.
 ///
 /// Returns raw JPEG bytes — same binary contract as `generate_thumb`.
+/// Applies quick film-negative inversion for recognizable preview.
 #[tauri::command]
 pub async fn raw_thumb(path: String, max_px: u32, quality: u8) -> Result<Response, String> {
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         // ── 1. Try embedded JPEG preview ────────────────────────────────────
         if let Some(preview_img) = extract_embedded_preview(&path) {
             let resized = resize_to(preview_img, max_px);
-            return encode_jpeg(resized, quality);
+            // Apply quick inversion to the embedded preview
+            let mut rgb = resized.to_rgb8();
+            apply_quick_inversion(&mut rgb);
+            return encode_jpeg(DynamicImage::from(rgb), quality);
         }
 
         // ── 2. Fall back: decode RAW and do a fast superpixel demosaic ──────
@@ -284,7 +293,10 @@ pub async fn raw_thumb(path: String, max_px: u32, quality: u8) -> Result<Respons
             demosaic_superpixel(&raw)?
         };
         let resized = resize_to(rgb, max_px);
-        encode_jpeg(resized, quality)
+        // Apply quick inversion to the demosaiced result
+        let mut rgb_out = resized.to_rgb8();
+        apply_quick_inversion(&mut rgb_out);
+        encode_jpeg(DynamicImage::from(rgb_out), quality)
     })
     .await
     .map_err(|e| format!("task panicked: {e:?}"))??;

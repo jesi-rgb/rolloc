@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
-	import { getFrames } from '$lib/db/idb';
-	import { getRollPath } from '$lib/db/rolls';
-	import { thumbURL } from '$lib/fs/opfs';
-	import { getThumbURL } from '$lib/image/thumbgen';
-	import { join } from '@tauri-apps/api/path';
-	import type { Frame } from '$lib/types';
+	import { onDestroy, onMount } from "svelte";
+	import { getFrames } from "$lib/db/idb";
+	import { getRollPath } from "$lib/db/rolls";
+	import { thumbURL } from "$lib/fs/opfs";
+	import { getThumbURL } from "$lib/image/thumbgen";
+	import { join } from "@tauri-apps/api/path";
+	import type { Frame } from "$lib/types";
 
 	interface Props {
 		rollId: string;
@@ -13,7 +13,7 @@
 
 	let { rollId }: Props = $props();
 
-	const PREVIEW_COUNT = 5;
+	const PREVIEW_COUNT = 10;
 
 	interface ThumbEntry {
 		frame: Frame;
@@ -43,7 +43,10 @@
 				if (!dirPath) dirPath = await getRollPath(rollId);
 				if (dirPath) {
 					try {
-						const absolutePath = await join(dirPath, frame.filename);
+						const absolutePath = await join(
+							dirPath,
+							frame.filename,
+						);
 						url = await getThumbURL(frame.id, { absolutePath });
 					} catch {
 						// leave null — thumbnail stays as skeleton
@@ -68,10 +71,12 @@
 	Shows animated skeletons while loading, falls back to a plain gradient
 	if the roll has no frames yet.
 -->
-<div class="flex gap-px w-full overflow-hidden" style="height: 80px;">
+<div class="flex gap-px overflow-hidden" style="height: 80px;">
 	{#if entries.length === 0}
 		<!-- No frames yet: show the accent gradient bar -->
-		<div class="w-full h-full bg-gradient-to-r from-primary to-orange-600 opacity-70"></div>
+		<div
+			class="w-full h-full bg-gradient-to-r from-primary to-orange-600 opacity-70"
+		></div>
 	{:else}
 		{#each entries as entry (entry.frame.id)}
 			<div class="flex-1 min-w-0 overflow-hidden bg-base-subtle relative">
@@ -82,7 +87,9 @@
 						class="w-full h-full object-cover"
 					/>
 				{:else}
-					<div class="w-full h-full animate-pulse bg-base-muted"></div>
+					<div
+						class="w-full h-full animate-pulse bg-base-muted"
+					></div>
 				{/if}
 			</div>
 		{/each}

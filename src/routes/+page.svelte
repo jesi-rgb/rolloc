@@ -170,9 +170,7 @@
 					{rolls.length} Roll{rolls.length !== 1 ? "s" : ""}
 				</h1>
 
-				<ul
-					class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base"
-				>
+				<ul class="flex flex-col gap-base">
 					{#each rolls as roll (roll.id)}
 						<li
 							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
