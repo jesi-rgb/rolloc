@@ -18,8 +18,9 @@
 	 * within its parent container. We track both the canvas size and its position
 	 * relative to the parent to ensure the overlay lines up exactly.
 	 */
-	import type { CropQuad, Point2D } from '$lib/types';
-	import { DEFAULT_CROP_QUAD } from '$lib/types';
+	import type { CropQuad, Point2D } from "$lib/types";
+	import { DEFAULT_CROP_QUAD } from "$lib/types";
+	import { fade } from "svelte/transition";
 
 	interface Props {
 		/** Current crop quad in normalized coords (0–1). */
@@ -28,9 +29,11 @@
 		canvas: HTMLCanvasElement;
 		/** Called during drag with updated quad. */
 		onChange?: (quad: CropQuad) => void;
+		/** When true, show more grid lines (10+) for horizon alignment during fine rotation. */
+		fineRotating?: boolean;
 	}
 
-	let { value, canvas, onChange }: Props = $props();
+	let { value, canvas, onChange, fineRotating = false }: Props = $props();
 
 	// ─── Reactively track canvas size and position ────────────────────────────
 
@@ -132,7 +135,7 @@
 
 	// ─── Drag state ───────────────────────────────────────────────────────────
 
-	type Corner = 'tl' | 'tr' | 'br' | 'bl';
+	type Corner = "tl" | "tr" | "br" | "bl";
 	let dragging = $state<Corner | null>(null);
 
 	/** Minimum crop size in normalized coords (prevents zero-size crops). */
@@ -167,7 +170,7 @@
 		// Each corner controls two edges of the rectangle.
 		let newRect: Rect;
 		switch (dragging) {
-			case 'tl':
+			case "tl":
 				newRect = {
 					left: Math.min(pos.x, rect.right - MIN_SIZE),
 					top: Math.min(pos.y, rect.bottom - MIN_SIZE),
@@ -175,7 +178,7 @@
 					bottom: rect.bottom,
 				};
 				break;
-			case 'tr':
+			case "tr":
 				newRect = {
 					left: rect.left,
 					top: Math.min(pos.y, rect.bottom - MIN_SIZE),
@@ -183,7 +186,7 @@
 					bottom: rect.bottom,
 				};
 				break;
-			case 'br':
+			case "br":
 				newRect = {
 					left: rect.left,
 					top: rect.top,
@@ -191,7 +194,7 @@
 					bottom: Math.max(pos.y, rect.top + MIN_SIZE),
 				};
 				break;
-			case 'bl':
+			case "bl":
 				newRect = {
 					left: Math.min(pos.x, rect.right - MIN_SIZE),
 					top: rect.top,
@@ -220,24 +223,39 @@
 	// ─── SVG path for the crop rectangle ──────────────────────────────────────
 
 	const cropPath = $derived(
-		`M ${tlPx.x},${tlPx.y} L ${trPx.x},${trPx.y} L ${brPx.x},${brPx.y} L ${blPx.x},${blPx.y} Z`
+		`M ${tlPx.x},${tlPx.y} L ${trPx.x},${trPx.y} L ${brPx.x},${brPx.y} L ${blPx.x},${blPx.y} Z`,
 	);
 
 	// ─── Rule of thirds grid lines ────────────────────────────────────────────
 
-	const gridLines = $derived.by(() => {
-		const lines: { x1: number; y1: number; x2: number; y2: number }[] = [];
+	interface GridLine {
+		x1: number;
+		y1: number;
+		x2: number;
+		y2: number;
+		/** Unique key based on normalized position (e.g., "h-0.333" or "v-0.5") */
+		key: string;
+	}
 
-		// Horizontal thirds
-		for (const t of [1 / 3, 2 / 3]) {
+	const gridLines = $derived.by(() => {
+		const lines: GridLine[] = [];
+
+		// Use denser grid (10 divisions) during fine rotation for horizon alignment,
+		// otherwise standard rule-of-thirds (3 divisions = 2 lines).
+		const divisions = fineRotating ? 10 : 3;
+
+		// Horizontal lines
+		for (let i = 1; i < divisions; i++) {
+			const t = i / divisions;
 			const y = tlPx.y + (blPx.y - tlPx.y) * t;
-			lines.push({ x1: tlPx.x, y1: y, x2: trPx.x, y2: y });
+			lines.push({ x1: tlPx.x, y1: y, x2: trPx.x, y2: y, key: `h-${t.toFixed(3)}` });
 		}
 
-		// Vertical thirds
-		for (const t of [1 / 3, 2 / 3]) {
+		// Vertical lines
+		for (let i = 1; i < divisions; i++) {
+			const t = i / divisions;
 			const x = tlPx.x + (trPx.x - tlPx.x) * t;
-			lines.push({ x1: x, y1: tlPx.y, x2: x, y2: blPx.y });
+			lines.push({ x1: x, y1: tlPx.y, x2: x, y2: blPx.y, key: `v-${t.toFixed(3)}` });
 		}
 
 		return lines;
@@ -252,7 +270,9 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<svg
 		class="absolute pointer-events-auto"
-		style="left: {canvasOffsetLeft}px; top: {canvasOffsetTop}px; cursor: {dragging ? 'grabbing' : 'default'};"
+		style="left: {canvasOffsetLeft}px; top: {canvasOffsetTop}px; cursor: {dragging
+			? 'grabbing'
+			: 'default'};"
 		width={canvasWidth}
 		height={canvasHeight}
 		onpointermove={handlePointerMove}
@@ -292,26 +312,8 @@
 			class="pointer-events-none"
 		/>
 
-		<!-- Rule of thirds grid -->
-		{#each gridLines as line, i (i)}
-			<line
-				x1={line.x1}
-				y1={line.y1}
-				x2={line.x2}
-				y2={line.y2}
-				stroke="rgba(255,255,255,0.4)"
-				stroke-width="1"
-				class="pointer-events-none"
-			/>
-		{/each}
-
 		<!-- Corner handles -->
-		{#each [
-			{ corner: 'tl' as Corner, pos: tlPx },
-			{ corner: 'tr' as Corner, pos: trPx },
-			{ corner: 'br' as Corner, pos: brPx },
-			{ corner: 'bl' as Corner, pos: blPx },
-		] as { corner, pos } (corner)}
+		{#each [{ corner: "tl" as Corner, pos: tlPx }, { corner: "tr" as Corner, pos: trPx }, { corner: "br" as Corner, pos: brPx }, { corner: "bl" as Corner, pos: blPx }] as { corner, pos } (corner)}
 			<circle
 				cx={pos.x}
 				cy={pos.y}
@@ -326,10 +328,34 @@
 		{/each}
 	</svg>
 
+	<!-- Rule of thirds grid (separate SVG for blend-mode to work with background) -->
+	<svg
+		class="absolute pointer-events-none"
+		style="left: {canvasOffsetLeft}px; top: {canvasOffsetTop}px; mix-blend-mode: difference;"
+		width={canvasWidth}
+		height={canvasHeight}
+	>
+		{#each gridLines as line (line.key)}
+			<line
+				in:fade={{ duration: 150 }}
+				out:fade={{ duration: 150 }}
+				x1={line.x1}
+				y1={line.y1}
+				x2={line.x2}
+				y2={line.y2}
+				stroke="white"
+				stroke-width="2"
+				stroke-dasharray="5,5"
+			/>
+		{/each}
+	</svg>
+
 	<!-- Reset button (positioned relative to canvas) -->
 	<button
 		onclick={resetCrop}
-		style="left: {canvasOffsetLeft + canvasWidth - 80}px; top: {canvasOffsetTop + 8}px;"
+		style="left: {canvasOffsetLeft +
+			canvasWidth -
+			80}px; top: {canvasOffsetTop + 8}px;"
 		class="absolute px-2 py-1 text-xs bg-base/80 border border-base-subtle
 		       text-content-muted hover:text-content hover:bg-base rounded transition"
 	>

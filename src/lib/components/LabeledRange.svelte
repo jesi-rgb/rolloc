@@ -13,6 +13,10 @@
 		 * that should not fire on every drag tick.
 		 */
 		oncommit?: (v: number) => void;
+		/** Called when the user starts dragging the slider. */
+		ondragstart?: () => void;
+		/** Called when the user stops dragging the slider. */
+		ondragend?: () => void;
 		/** 'stacked' = label+value above, input below (default).
 		 *  'inline'  = label | input | value in one row. */
 		layout?: "stacked" | "inline";
@@ -35,6 +39,8 @@
 		value,
 		onchange,
 		oncommit,
+		ondragstart,
+		ondragend,
 		layout = "stacked",
 		labelClass = "text-content-muted",
 		signed = false,
@@ -68,6 +74,9 @@
 			onchange(parseFloat((e.currentTarget as HTMLInputElement).value))}
 		onchange={(e) =>
 			oncommit?.(parseFloat((e.currentTarget as HTMLInputElement).value))}
+		onpointerdown={() => ondragstart?.()}
+		onpointerup={() => ondragend?.()}
+		onpointercancel={() => ondragend?.()}
 		ondblclick={handleDblClick}
 		class="range-track {extraClass}"
 	/>

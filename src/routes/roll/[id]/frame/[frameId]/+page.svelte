@@ -428,6 +428,9 @@
 	/** When true, the crop overlay is visible and editable. */
 	let cropModeActive = $state(false);
 
+	/** When true, user is dragging the fine rotation slider — show denser alignment grid. */
+	let fineRotating = $state(false);
+
 	/** Local crop quad state while editing (not yet committed to frame). */
 	let localCropQuad = $state<CropQuad | null>(null);
 
@@ -1273,6 +1276,7 @@
 						canvas={canvasEl}
 						value={effectiveCropQuad}
 						onChange={onCropChange}
+						{fineRotating}
 					/>
 				{/if}
 			</div>
@@ -1461,6 +1465,7 @@
 							value={effectiveTransform}
 							onChange={onTransformChange}
 							onCommit={onTransformCommit}
+							onFineRotateDrag={(dragging) => (fineRotating = dragging)}
 						/>
 					</section>
 

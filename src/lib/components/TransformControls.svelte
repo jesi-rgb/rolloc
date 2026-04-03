@@ -14,9 +14,11 @@
 		 * Falls back to `onChange` if not provided.
 		 */
 		onCommit?: (p: TransformParams) => void;
+		/** Called when fine rotation dragging starts/ends. Useful for showing alignment grid. */
+		onFineRotateDrag?: (dragging: boolean) => void;
 	}
 
-	let { value, onChange, onCommit }: Props = $props();
+	let { value, onChange, onCommit, onFineRotateDrag }: Props = $props();
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
 
@@ -88,7 +90,7 @@
 		let displayRot = rotation % 360;
 		if (displayRot > 180) displayRot -= 360;
 		if (displayRot < -180) displayRot += 360;
-		
+
 		// Show integer if it's a clean multiple of 90, otherwise one decimal
 		if (displayRot === Math.round(displayRot)) {
 			return `${displayRot}°`;
@@ -134,7 +136,7 @@
 		<span class="text-xs text-content-muted w-16">Rotate</span>
 		<div class="flex items-center gap-xs flex-1">
 			<button
-				onclick={rotateLeft}
+				onclick={rotateRight}
 				title="Rotate 90° counter-clockwise"
 				aria-label="Rotate left"
 				class="flex-1 flex items-center justify-center gap-xs
@@ -163,7 +165,7 @@
 				{rotationLabel}
 			</span>
 			<button
-				onclick={rotateRight}
+				onclick={rotateLeft}
 				title="Rotate 90° clockwise"
 				aria-label="Rotate right"
 				class="flex-1 flex items-center justify-center gap-xs
@@ -200,6 +202,8 @@
 		defaultValue={0}
 		onchange={onFineChange}
 		oncommit={commit}
+		ondragstart={() => onFineRotateDrag?.(true)}
+		ondragend={() => onFineRotateDrag?.(false)}
 		signed
 	/>
 
