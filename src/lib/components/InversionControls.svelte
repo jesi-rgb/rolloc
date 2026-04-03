@@ -352,8 +352,8 @@
 			<LabeledRange
 				id="inv-shadows"
 				label="Shadows"
-				min={-1}
-				max={1}
+				min={-10}
+				max={10}
 				step={0.01}
 				value={shadows}
 				defaultValue={DEFAULT_INVERSION_PARAMS.shadows}
