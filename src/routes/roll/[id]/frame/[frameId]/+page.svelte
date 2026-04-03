@@ -1268,9 +1268,6 @@
 				<CropOverlay
 					canvas={canvasEl}
 					value={effectiveCropQuad}
-					transform={effectiveTransform}
-					{originalWidth}
-					{originalHeight}
 					onChange={onCropChange}
 				/>
 			{/if}

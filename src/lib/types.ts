@@ -40,12 +40,15 @@ export const DEFAULT_CROP_QUAD: CropQuad = {
 /**
  * Transform parameters for rotation and flipping.
  * Applied in the GPU pipeline before crop.
+ *
+ * Rotation is handled entirely by `rotation` (degrees, any value).
+ * The 90° buttons simply add/subtract 90 to this value.
  */
 export interface TransformParams {
-	/** Number of 90° clockwise rotations (0–3). */
-	rotation90: 0 | 1 | 2 | 3;
-	/** Fine rotation in degrees (-45 to +45). Applied after 90° rotation. */
-	fineRotation: number;
+	/** @deprecated Use `rotation` instead. Kept for backwards compatibility. */
+	rotation90?: 0 | 1 | 2 | 3;
+	/** Rotation in degrees (positive = clockwise). Supports any value. */
+	rotation: number;
 	/** Horizontal flip (mirror). Applied via CSS. */
 	flipH: boolean;
 	/** Vertical flip. Applied via CSS. */
@@ -53,8 +56,7 @@ export interface TransformParams {
 }
 
 export const DEFAULT_TRANSFORM: TransformParams = {
-	rotation90: 0,
-	fineRotation: 0,
+	rotation: 0,
 	flipH: false,
 	flipV: false,
 };

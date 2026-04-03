@@ -11,41 +11,26 @@
 	 * The crop is stored as a CropQuad for compatibility, but this component
 	 * constrains it to always be an axis-aligned rectangle (90° corners).
 	 *
-	 * COORDINATE SYSTEMS:
-	 * - Crop values are stored in ORIGINAL image space (before rotation)
-	 * - Canvas displays the ROTATED image
-	 * - This component transforms coordinates between spaces for display and interaction
+	 * Rotation is purely visual (GPU UV remapping) and doesn't affect crop coordinates.
+	 * Crop is applied BEFORE rotation in the rendering pipeline.
 	 *
 	 * POSITIONING: The SVG is positioned absolutely using the canvas's offset
 	 * within its parent container. We track both the canvas size and its position
 	 * relative to the parent to ensure the overlay lines up exactly.
 	 */
-	import type { CropQuad, Point2D, TransformParams } from '$lib/types';
-	import { DEFAULT_CROP_QUAD, DEFAULT_TRANSFORM } from '$lib/types';
+	import type { CropQuad, Point2D } from '$lib/types';
+	import { DEFAULT_CROP_QUAD } from '$lib/types';
 
 	interface Props {
-		/** Current crop quad in normalized coords (0–1) in ORIGINAL image space. */
+		/** Current crop quad in normalized coords (0–1). */
 		value: CropQuad;
 		/** Canvas element to overlay — used for sizing and coord conversion. */
 		canvas: HTMLCanvasElement;
-		/** Current transform params — needed to transform crop coords to/from display space. */
-		transform?: TransformParams;
-		/** Original image width (before rotation). */
-		originalWidth?: number;
-		/** Original image height (before rotation). */
-		originalHeight?: number;
-		/** Called during drag with updated quad (in original image space). */
+		/** Called during drag with updated quad. */
 		onChange?: (quad: CropQuad) => void;
 	}
 
-	let {
-		value,
-		canvas,
-		transform = DEFAULT_TRANSFORM,
-		originalWidth = 1,
-		originalHeight = 1,
-		onChange,
-	}: Props = $props();
+	let { value, canvas, onChange }: Props = $props();
 
 	// ─── Reactively track canvas size and position ────────────────────────────
 
@@ -117,115 +102,7 @@
 
 	// ─── Coordinate conversion ────────────────────────────────────────────────
 
-	/**
-	 * Transform a point from ORIGINAL image space to DISPLAY (rotated) space.
-	 * This is used for rendering the crop overlay on the rotated canvas.
-	 *
-	 * Based on NegPy's map_coords_to_geometry approach:
-	 * 1. Convert to pixel coords in original space
-	 * 2. Apply rotation transform
-	 * 3. Convert to normalized coords in rotated space
-	 */
-	function originalToDisplay(nx: number, ny: number): Point2D {
-		const rotation90 = transform.rotation90 as 0 | 1 | 2 | 3;
-		if (rotation90 === 0) return { x: nx, y: ny };
-
-		// Convert to pixel coords in original space
-		let px = nx * originalWidth;
-		let py = ny * originalHeight;
-		let w = originalWidth;
-		let h = originalHeight;
-
-		// Apply rotation
-		switch (rotation90) {
-			case 1: {
-				// 90° CW: (px, py) → (py, w - px), then swap dims
-				const newPx = py;
-				const newPy = w - px;
-				px = newPx;
-				py = newPy;
-				const tmp = w; w = h; h = tmp;
-				break;
-			}
-			case 2: {
-				// 180°: (px, py) → (w - px, h - py)
-				px = w - px;
-				py = h - py;
-				break;
-			}
-			case 3: {
-				// 270° CW: (px, py) → (h - py, px), then swap dims
-				const newPx = h - py;
-				const newPy = px;
-				px = newPx;
-				py = newPy;
-				const tmp = w; w = h; h = tmp;
-				break;
-			}
-		}
-
-		// Convert back to normalized in rotated space
-		return {
-			x: Math.max(0, Math.min(1, px / Math.max(w, 1))),
-			y: Math.max(0, Math.min(1, py / Math.max(h, 1))),
-		};
-	}
-
-	/**
-	 * Transform a point from DISPLAY (rotated) space to ORIGINAL image space.
-	 * This is the inverse of originalToDisplay, used for user interactions.
-	 */
-	function displayToOriginal(nx: number, ny: number): Point2D {
-		const rotation90 = transform.rotation90 as 0 | 1 | 2 | 3;
-		if (rotation90 === 0) return { x: nx, y: ny };
-
-		// Rotated dimensions
-		let rotW = originalWidth;
-		let rotH = originalHeight;
-		if (rotation90 === 1 || rotation90 === 3) {
-			rotW = originalHeight;
-			rotH = originalWidth;
-		}
-
-		// Convert to pixel coords in rotated space
-		let px = nx * rotW;
-		let py = ny * rotH;
-
-		// Apply INVERSE rotation to get back to original space
-		switch (rotation90) {
-			case 1: {
-				// Inverse of 90° CW is 270° CW: (px, py) → (rotH - py, px)
-				// But we need to map back to original dims
-				const newPx = rotH - py;
-				const newPy = px;
-				px = newPx;
-				py = newPy;
-				break;
-			}
-			case 2: {
-				// Inverse of 180° is 180°
-				px = rotW - px;
-				py = rotH - py;
-				break;
-			}
-			case 3: {
-				// Inverse of 270° CW is 90° CW: (px, py) → (py, rotW - px)
-				const newPx = py;
-				const newPy = rotW - px;
-				px = newPx;
-				py = newPy;
-				break;
-			}
-		}
-
-		// Convert back to normalized in original space
-		return {
-			x: Math.max(0, Math.min(1, px / Math.max(originalWidth, 1))),
-			y: Math.max(0, Math.min(1, py / Math.max(originalHeight, 1))),
-		};
-	}
-
-	/** Convert normalized (0–1) DISPLAY coords to pixel coords relative to SVG origin. */
+	/** Convert normalized (0–1) coords to pixel coords relative to SVG origin. */
 	function toPixel(p: Point2D): { x: number; y: number } {
 		return {
 			x: p.x * canvasWidth,
@@ -233,8 +110,8 @@
 		};
 	}
 
-	/** Convert pixel coords (relative to SVG) to normalized DISPLAY coords (0–1), clamped. */
-	function toNormalizedDisplay(px: number, py: number): Point2D {
+	/** Convert pixel coords (relative to SVG) to normalized (0–1), clamped. */
+	function toNormalized(px: number, py: number): Point2D {
 		if (canvasWidth === 0 || canvasHeight === 0) return { x: 0, y: 0 };
 		return {
 			x: Math.max(0, Math.min(1, px / canvasWidth)),
@@ -244,22 +121,12 @@
 
 	// ─── Derived rectangle and pixel positions ────────────────────────────────
 
-	/** The crop rect in ORIGINAL image space (from props). */
 	const rect = $derived(quadToRect(value));
 
-	/**
-	 * Transform the rect corners from original to display space, then to pixels.
-	 * This accounts for rotation when displaying the crop overlay.
-	 */
-	const tlDisplay = $derived(originalToDisplay(rect.left, rect.top));
-	const trDisplay = $derived(originalToDisplay(rect.right, rect.top));
-	const brDisplay = $derived(originalToDisplay(rect.right, rect.bottom));
-	const blDisplay = $derived(originalToDisplay(rect.left, rect.bottom));
-
-	const tlPx = $derived(toPixel(tlDisplay));
-	const trPx = $derived(toPixel(trDisplay));
-	const brPx = $derived(toPixel(brDisplay));
-	const blPx = $derived(toPixel(blDisplay));
+	const tlPx = $derived(toPixel({ x: rect.left, y: rect.top }));
+	const trPx = $derived(toPixel({ x: rect.right, y: rect.top }));
+	const brPx = $derived(toPixel({ x: rect.right, y: rect.bottom }));
+	const blPx = $derived(toPixel({ x: rect.left, y: rect.bottom }));
 
 	// ─── Drag state ───────────────────────────────────────────────────────────
 
@@ -277,45 +144,20 @@
 		};
 	}
 
-	/**
-	 * Map a display-space corner to the corresponding original-space corner.
-	 * When the image is rotated, the corners shift:
-	 * - 90° CW:  display TL = original BL, display TR = original TL, etc.
-	 * - 180°:    display TL = original BR, etc.
-	 * - 270° CW: display TL = original TR, etc.
-	 */
-	function displayCornerToOriginal(displayCorner: Corner): Corner {
-		const rotation90 = transform.rotation90 as 0 | 1 | 2 | 3;
-		// Mapping: which original corner appears at each display position
-		const mapping: Record<0 | 1 | 2 | 3, Record<Corner, Corner>> = {
-			0: { tl: 'tl', tr: 'tr', br: 'br', bl: 'bl' },
-			1: { tl: 'bl', tr: 'tl', br: 'tr', bl: 'br' },  // 90° CW
-			2: { tl: 'br', tr: 'bl', br: 'tl', bl: 'tr' },  // 180°
-			3: { tl: 'tr', tr: 'br', br: 'bl', bl: 'tl' },  // 270° CW
-		};
-		return mapping[rotation90][displayCorner];
-	}
-
 	function handlePointerMove(e: PointerEvent) {
 		if (!dragging) return;
 
-		// Get position relative to the SVG element (in display space).
+		// Get position relative to the SVG element.
 		const svg = e.currentTarget as SVGSVGElement;
 		const svgRect = svg.getBoundingClientRect();
 		const px = e.clientX - svgRect.left;
 		const py = e.clientY - svgRect.top;
-		const displayPos = toNormalizedDisplay(px, py);
+		const pos = toNormalized(px, py);
 
-		// Transform to original image space
-		const pos = displayToOriginal(displayPos.x, displayPos.y);
-
-		// Map the display corner to the original corner
-		const originalCorner = displayCornerToOriginal(dragging);
-
-		// Update the rectangle based on which ORIGINAL corner is being controlled.
+		// Update the rectangle based on which corner is being dragged.
 		// Each corner controls two edges of the rectangle.
 		let newRect: Rect;
-		switch (originalCorner) {
+		switch (dragging) {
 			case 'tl':
 				newRect = {
 					left: Math.min(pos.x, rect.right - MIN_SIZE),

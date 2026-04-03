@@ -185,26 +185,6 @@ export function rotationCropScale(srcW: number, srcH: number, angleDeg: number):
 }
 
 /**
- * Compute output dimensions after rotation, accounting for dimension swapping
- * on 90° rotations.
- *
- * @param srcW Source width
- * @param srcH Source height
- * @param rotation90 Number of 90° clockwise rotations (0–3)
- * @returns [outW, outH] dimensions after rotation
- */
-export function dimensionsAfterRotation90(
-	srcW: number,
-	srcH: number,
-	rotation90: 0 | 1 | 2 | 3,
-): [number, number] {
-	if (rotation90 === 1 || rotation90 === 3) {
-		return [srcH, srcW]; // Swap dimensions
-	}
-	return [srcW, srcH];
-}
-
-/**
  * Compute the maximum crop bounds given a fine rotation angle.
  *
  * Returns a normalized Rect representing the largest area that contains
