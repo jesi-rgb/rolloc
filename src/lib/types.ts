@@ -8,32 +8,6 @@ export interface Rect {
 	h: number;
 }
 
-/**
- * Rotation and flip transform parameters.
- * Applied in order: flip → 90° rotation → fine rotation.
- */
-export interface TransformParams {
-	/**
-	 * Number of 90° clockwise rotations (0–3).
-	 * 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270°.
-	 */
-	rotation90: 0 | 1 | 2 | 3;
-	/** Fine rotation adjustment in degrees, typically -45 to +45. */
-	fineRotation: number;
-	/** Horizontal flip (mirror left-right). */
-	flipH: boolean;
-	/** Vertical flip (mirror top-bottom). */
-	flipV: boolean;
-}
-
-/** Default identity transform — no rotation, no flip. */
-export const DEFAULT_TRANSFORM: TransformParams = {
-	rotation90: 0,
-	fineRotation: 0,
-	flipH: false,
-	flipV: false,
-};
-
 /** A 2D point with normalized coordinates (0–1 relative to image dimensions). */
 export interface Point2D {
 	x: number;
@@ -59,6 +33,32 @@ export const DEFAULT_CROP_QUAD: CropQuad = {
 	tr: { x: 1, y: 0 },
 	br: { x: 1, y: 1 },
 	bl: { x: 0, y: 1 },
+};
+
+// ─── Transform parameters ─────────────────────────────────────────────────────
+
+/**
+ * Transform parameters for rotation and flipping.
+ * Applied in the GPU pipeline before crop.
+ *
+ * Rotation is handled entirely by `rotation` (degrees, any value).
+ * The 90° buttons simply add/subtract 90 to this value.
+ */
+export interface TransformParams {
+	/** @deprecated Use `rotation` instead. Kept for backwards compatibility. */
+	rotation90?: 0 | 1 | 2 | 3;
+	/** Rotation in degrees (positive = clockwise). Supports any value. */
+	rotation: number;
+	/** Horizontal flip (mirror). Applied via CSS. */
+	flipH: boolean;
+	/** Vertical flip. Applied via CSS. */
+	flipV: boolean;
+}
+
+export const DEFAULT_TRANSFORM: TransformParams = {
+	rotation: 0,
+	flipH: false,
+	flipV: false,
 };
 
 // ─── Color / Curve primitives ─────────────────────────────────────────────────
@@ -227,7 +227,8 @@ export interface FrameEditOverrides {
 	 */
 	cropQuad: CropQuad | null;
 	/**
-	 * Rotation and flip transform. Null = identity (no transform).
+	 * Transform parameters (rotation, flip).
+	 * Null = inherit default (no transform).
 	 */
 	transform: TransformParams | null;
 }
@@ -258,7 +259,7 @@ export interface EffectiveEdit {
 	 * When null, no crop is applied (full image).
 	 */
 	cropQuad: CropQuad | null;
-	/** Rotation and flip transform. */
+	/** Transform parameters (rotation, flip). */
 	transform: TransformParams;
 }
 

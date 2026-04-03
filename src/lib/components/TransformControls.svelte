@@ -20,15 +20,13 @@
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
 
-	let rotation90 = $state(untrack(() => value.rotation90));
-	let fineRotation = $state(untrack(() => value.fineRotation));
+	let rotation = $state(untrack(() => value.rotation));
 	let flipH = $state(untrack(() => value.flipH));
 	let flipV = $state(untrack(() => value.flipV));
 
 	// Re-sync when parent swaps to a different frame
 	$effect(() => {
-		rotation90 = value.rotation90;
-		fineRotation = value.fineRotation;
+		rotation = value.rotation;
 		flipH = value.flipH;
 		flipV = value.flipV;
 	});
@@ -36,8 +34,7 @@
 	/** Build the current params object. */
 	function currentParams(): TransformParams {
 		return {
-			rotation90,
-			fineRotation,
+			rotation,
 			flipH,
 			flipV,
 		};
@@ -54,13 +51,13 @@
 	}
 
 	function rotateLeft(): void {
-		rotation90 = ((rotation90 - 1 + 4) % 4) as 0 | 1 | 2 | 3;
+		rotation -= 90;
 		emit();
 		commit();
 	}
 
 	function rotateRight(): void {
-		rotation90 = ((rotation90 + 1) % 4) as 0 | 1 | 2 | 3;
+		rotation += 90;
 		emit();
 		commit();
 	}
@@ -79,34 +76,56 @@
 
 	function reset(): void {
 		const d = DEFAULT_TRANSFORM;
-		rotation90 = d.rotation90;
-		fineRotation = d.fineRotation;
+		rotation = d.rotation;
 		flipH = d.flipH;
 		flipV = d.flipV;
 		commit();
 	}
 
-	/** Label showing the total rotation (90° steps + fine adjustment). */
+	/** Label showing the total rotation. */
 	const rotationLabel = $derived.by(() => {
-		const base = rotation90 * 90;
-		if (fineRotation === 0) {
-			return `${base}°`;
+		// Normalize to -180 to +180 for display
+		let displayRot = rotation % 360;
+		if (displayRot > 180) displayRot -= 360;
+		if (displayRot < -180) displayRot += 360;
+		
+		// Show integer if it's a clean multiple of 90, otherwise one decimal
+		if (displayRot === Math.round(displayRot)) {
+			return `${displayRot}°`;
 		}
-		const sign = fineRotation > 0 ? "+" : "";
-		return `${base}° ${sign}${fineRotation.toFixed(1)}°`;
+		return `${displayRot.toFixed(1)}°`;
 	});
 
 	const isDefault = $derived(
-		rotation90 === DEFAULT_TRANSFORM.rotation90 &&
-			fineRotation === DEFAULT_TRANSFORM.fineRotation &&
+		rotation === DEFAULT_TRANSFORM.rotation &&
 			flipH === DEFAULT_TRANSFORM.flipH &&
 			flipV === DEFAULT_TRANSFORM.flipV,
 	);
+
+	/**
+	 * Fine rotation slider value: the fractional part after removing 90° steps.
+	 * E.g., rotation=95 → fine=5, rotation=-100 → fine=-10
+	 */
+	const fineValue = $derived.by(() => {
+		// Find nearest 90° step
+		const nearest90 = Math.round(rotation / 90) * 90;
+		return rotation - nearest90;
+	});
+
+	/**
+	 * Handle fine rotation slider change.
+	 * Adjusts the total rotation while preserving the 90° base.
+	 */
+	function onFineChange(fine: number): void {
+		const nearest90 = Math.round(rotation / 90) * 90;
+		rotation = nearest90 + fine;
+		emit();
+	}
 </script>
 
 <!--
 	TransformControls
-	Rotation (90° steps + fine adjustment) and flip controls.
+	Rotation (90° buttons + fine slider) and flip controls.
 -->
 
 <div class="flex flex-col gap-sm">
@@ -177,12 +196,9 @@
 		min={-45}
 		max={45}
 		step={0.1}
-		value={fineRotation}
-		defaultValue={DEFAULT_TRANSFORM.fineRotation}
-		onchange={(v) => {
-			fineRotation = v;
-			emit();
-		}}
+		value={fineValue}
+		defaultValue={0}
+		onchange={onFineChange}
 		oncommit={commit}
 		signed
 	/>

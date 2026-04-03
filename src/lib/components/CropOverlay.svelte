@@ -11,6 +11,9 @@
 	 * The crop is stored as a CropQuad for compatibility, but this component
 	 * constrains it to always be an axis-aligned rectangle (90° corners).
 	 *
+	 * Rotation is purely visual (GPU UV remapping) and doesn't affect crop coordinates.
+	 * Crop is applied BEFORE rotation in the rendering pipeline.
+	 *
 	 * POSITIONING: The SVG is positioned absolutely using the canvas's offset
 	 * within its parent container. We track both the canvas size and its position
 	 * relative to the parent to ensure the overlay lines up exactly.

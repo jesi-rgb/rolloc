@@ -630,16 +630,26 @@ function makeHDCurveUniforms(
 	return buffer;
 }
 
+// ─── Transform uniform builder ────────────────────────────────────────────────
+
+/**
+ * Check if the GPU transform (rotation) is effectively a no-op.
+ * Note: Flips are not considered here since they're handled via CSS.
+ */
+function isIdentityTransform(t: TransformParams): boolean {
+	return Math.abs(t.rotation) < 0.001;
+}
+
 // ─── Crop uniform builder ─────────────────────────────────────────────────────
 
 /**
- * Build the crop pass uniform buffer from a CropQuad.
+ * Build the crop pass uniform buffer.
  *
  * CropQuadUniforms layout (total 32 bytes):
- *   tl : vec2<f32>  @ 0   (top-left)
- *   tr : vec2<f32>  @ 8   (top-right)
- *   br : vec2<f32>  @ 16  (bottom-right)
- *   bl : vec2<f32>  @ 24  (bottom-left)
+ *   tl : vec2<f32>  @ 0
+ *   tr : vec2<f32>  @ 8
+ *   br : vec2<f32>  @ 16
+ *   bl : vec2<f32>  @ 24
  */
 function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
 	const data = new Float32Array([
@@ -647,6 +657,25 @@ function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
 		quad.tr.x, quad.tr.y,
 		quad.br.x, quad.br.y,
 		quad.bl.x, quad.bl.y,
+	]);
+	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Build the transform pass uniform buffer.
+ *
+ * TransformUniforms layout (total 16 bytes):
+ *   rotation     : f32   @ 0   (radians)
+ *   outputAspect : f32   @ 4   (width/height of output texture)
+ *   _pad0        : f32   @ 8
+ *   _pad1        : f32   @ 12
+ */
+function makeTransformUniforms(device: GPUDevice, t: TransformParams, outputAspect: number): GPUBuffer {
+	const data = new Float32Array([
+		(t.rotation * Math.PI) / 180, // Convert degrees to radians
+		outputAspect,                  // For aspect-correct rotation
+		0,                             // _pad0
+		0,                             // _pad1
 	]);
 	return makeUniformBuffer(device, data);
 }
@@ -693,61 +722,6 @@ function computeCropOutputDimensions(
 		width: Math.max(1, width),
 		height: Math.max(1, height),
 	};
-}
-
-// ─── Transform uniform builder ────────────────────────────────────────────────
-
-/**
- * Build the transform pass uniform buffer from TransformParams.
- *
- * TransformUniforms layout (total 16 bytes):
- *   rotation90    : u32     @ 0   (0, 1, 2, or 3 for 0°, 90°, 180°, 270°)
- *   flipH         : u32     @ 4   (0 or 1)
- *   flipV         : u32     @ 8   (0 or 1)
- *   fineRotation  : f32     @ 12  (radians)
- */
-function makeTransformUniforms(device: GPUDevice, transform: TransformParams): GPUBuffer {
-	const buffer = device.createBuffer({
-		size: 16,
-		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-	});
-	const data = new ArrayBuffer(16);
-	const view = new DataView(data);
-	view.setUint32(0, transform.rotation90, true);
-	view.setUint32(4, transform.flipH ? 1 : 0, true);
-	view.setUint32(8, transform.flipV ? 1 : 0, true);
-	// Convert degrees to radians for fine rotation
-	view.setFloat32(12, (transform.fineRotation * Math.PI) / 180, true);
-	device.queue.writeBuffer(buffer, 0, data);
-	return buffer;
-}
-
-/**
- * Check if a transform is the identity (no rotation, no flip).
- */
-function isIdentityTransform(transform: TransformParams): boolean {
-	return (
-		transform.rotation90 === 0 &&
-		transform.fineRotation === 0 &&
-		!transform.flipH &&
-		!transform.flipV
-	);
-}
-
-/**
- * Compute output dimensions after applying transform.
- * 90° and 270° rotations swap width and height.
- */
-function computeTransformOutputDimensions(
-	transform: TransformParams,
-	srcWidth: number,
-	srcHeight: number
-): { width: number; height: number } {
-	// 90° and 270° rotations swap dimensions
-	if (transform.rotation90 === 1 || transform.rotation90 === 3) {
-		return { width: srcHeight, height: srcWidth };
-	}
-	return { width: srcWidth, height: srcHeight };
 }
 
 // ─── Pipeline creation ────────────────────────────────────────────────────────
@@ -838,12 +812,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	const cropPipeline = makeRenderPipeline(cropModule, 'rgba16float');
 
-	// ── Transform pipeline (rotation + flip) ───────────────────────────────────
+	// ── Transform pipeline (rotation + flip) ──────────────────────────────────
 
-	const transformModule = device.createShaderModule({ code: transformWGSL });
 	/**
-	 * Transform pipeline applies rotation (90° steps + fine) and flip operations.
+	 * Transform pipeline applies rotation (UV-based, any angle).
+	 * Flips are handled via CSS on the canvas element.
 	 */
+	const transformModule = device.createShaderModule({ code: transformWGSL });
 	const transformPipeline = makeRenderPipeline(transformModule, 'rgba16float');
 
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
@@ -868,15 +843,15 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let outputTexture: GPUTexture | null = null;
 	/**
-	 * Intermediate texture for the crop pass (rgba16float).
-	 * When cropping is active, tonecurve → preCropTexture → crop → outputTexture.
-	 */
-	let preCropTexture: GPUTexture | null = null;
-	/**
 	 * Intermediate texture for the transform pass (rgba16float).
-	 * When transform is active, crop/tonecurve → preTransformTexture → transform → outputTexture.
+	 * When transform is active, tonecurve → preTransformTexture → transform → [crop] → outputTexture.
 	 */
 	let preTransformTexture: GPUTexture | null = null;
+	/**
+	 * Intermediate texture for the crop pass (rgba16float).
+	 * When cropping is active, [transform] → preCropTexture → crop → outputTexture.
+	 */
+	let preCropTexture: GPUTexture | null = null;
 	/**
 	 * Persistent rgba8unorm readback texture (COPY_SRC | RENDER_ATTACHMENT | TEXTURE_BINDING).
 	 * A dithered blit from outputTexture writes here; readPixels() copies from this texture.
@@ -917,11 +892,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		logPerc: LogPercentiles | null,
 	): Promise<void> {
 		// ── Compute output dimensions (may differ from source if cropped) ───
-		// Note: Transform (rotation/flip) is applied via CSS in the UI for instant preview.
-		// The GPU transform pass is only used during export.
+		// Rotation does NOT change dimensions — it's purely UV-based in the GPU.
 		const hasCrop = edit.cropQuad !== null;
+		const hasTransform = !isIdentityTransform(edit.transform);
 		
-		// Start with source dimensions
+		// Start with source dimensions, apply crop if present
 		let outW = w;
 		let outH = h;
 		
@@ -1170,8 +1145,21 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		}
 
 		// ── Tone curve pass → output texture (rgba16float, full precision) ──────
-		// When crop is active, render to preCropTexture first, then apply crop.
-		const toneCurveTarget = hasCrop ? preCropTexture! : outputTexture!;
+		// Determine target based on what passes follow:
+		// - If transform or crop is active, render to an intermediate first
+		// - Transform runs before crop, so:
+		//   - hasTransform && hasCrop: tonecurve → preTransformTexture → transform → preCropTexture → crop → output
+		//   - hasTransform only: tonecurve → preTransformTexture → transform → output
+		//   - hasCrop only: tonecurve → preCropTexture → crop → output
+		//   - neither: tonecurve → output
+		let toneCurveTarget: GPUTexture;
+		if (hasTransform) {
+			toneCurveTarget = preTransformTexture!;
+		} else if (hasCrop) {
+			toneCurveTarget = preCropTexture!;
+		} else {
+			toneCurveTarget = outputTexture!;
+		}
 
 		const toneCurveBG = device.createBindGroup({
 			layout: toneCurvePipeline.getBindGroupLayout(0),
@@ -1188,7 +1176,32 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, toneCurveTarget.createView());
 
+		// ── Optional transform pass (rotation) ───────────────────────────────
+		// Rotation is purely UV-based, no dimension changes.
+		if (hasTransform) {
+			// Use source aspect ratio for aspect-correct rotation
+			const outputAspect = w / h;
+			const transformUnifBuf = makeTransformUniforms(device, edit.transform, outputAspect);
+			toClean.push(transformUnifBuf);
+
+			// Determine the transform output target
+			const transformTarget = hasCrop ? preCropTexture! : outputTexture!;
+
+			const transformBG = device.createBindGroup({
+				layout: transformPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: preTransformTexture!.createView() },
+					{ binding: 2, resource: { buffer: transformUnifBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, transformPipeline, transformBG, transformTarget.createView());
+		}
+
 		// ── Optional crop pass (perspective quad → rect) ─────────────────────
+		// Crop coordinates are in the same space as the displayed image (post-rotation).
+		// No coordinate transformation needed since rotation is purely visual.
 		if (hasCrop && edit.cropQuad) {
 			const cropUnifBuf = makeCropUniforms(device, edit.cropQuad);
 			toClean.push(cropUnifBuf);
@@ -1271,7 +1284,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				usage: GPUBufferUsage.STORAGE,
 			});
 		}
-		// Pre-crop texture at source resolution (tone curve renders here when crop is active)
+		// Pre-transform texture at source resolution (tone curve renders here when transform is active)
+		preTransformTexture?.destroy();
+		preTransformTexture = device.createTexture({
+			size: [srcW, srcH],
+			format: 'rgba16float',
+			usage:
+				GPUTextureUsage.RENDER_ATTACHMENT |
+				GPUTextureUsage.TEXTURE_BINDING,
+		});
+		// Pre-crop texture at source resolution (transform renders here when crop is also active)
 		preCropTexture?.destroy();
 		preCropTexture = device.createTexture({
 			size: [srcW, srcH],
@@ -1429,6 +1451,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateD?.destroy();
 		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
+		preTransformTexture?.destroy();
 		preCropTexture?.destroy();
 		preTransformTexture?.destroy();
 		readbackTexture?.destroy();
