@@ -57,7 +57,8 @@
 			const absolutePath = await join(dirPath, frame.filename);
 			// requestThumb routes through the worker pool + LRU cache.
 			// The cache owns the object URL — do NOT revoke it here.
-			const objUrl = await requestThumb(frame.id, absolutePath, "high");
+			// Pass invert=true since rolls contain film negatives.
+			const objUrl = await requestThumb(frame.id, absolutePath, "high", true);
 			url = objUrl;
 			status = "ready";
 		} catch {

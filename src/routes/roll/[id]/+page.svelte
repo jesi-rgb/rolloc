@@ -81,10 +81,12 @@
 		// Kick off background generation for all frames immediately.
 		// Uses the worker pool so it runs off the main thread; high-priority
 		// requests from IntersectionObserver (FrameThumb) will jump the queue.
+		// Pass invert=true since rolls contain film negatives.
 		if (dirPath && frames.length > 0) {
 			void prefetchThumbs(
 				frames.map((f) => ({ id: f.id, relativePath: f.filename })),
 				dirPath,
+				true,
 			);
 		}
 	});

@@ -1,9 +1,9 @@
 //! Native thumbnail generation command.
 //!
 //! Reads an image file from disk, decodes it with the `image` crate, applies
-//! EXIF orientation correction, resizes to `max_px` on the long edge, applies
-//! the full NegPy film-negative inversion pipeline, and returns a JPEG as raw
-//! bytes via Tauri's binary IPC channel.
+//! EXIF orientation correction, resizes to `max_px` on the long edge, and
+//! optionally applies the full NegPy film-negative inversion pipeline before
+//! returning a JPEG as raw bytes via Tauri's binary IPC channel.
 //!
 //! Key design decisions:
 //!   - `Triangle` (bilinear) filter instead of Lanczos3: ~10× faster for
@@ -36,6 +36,8 @@ const ANALYSIS_BUFFER: f32 = 0.10;
 /// - `max_px`  — maximum pixel count on the long edge (e.g. 300 for thumbs,
 ///               1200 for previews).
 /// - `quality` — JPEG quality 1–100 (e.g. 88).
+/// - `invert`  — if true, apply NegPy film-negative inversion (for film scans);
+///               if false, output a straight downsample (for digital photos).
 ///
 /// Returns raw JPEG bytes as a binary `Response` (no base64 overhead).
 #[tauri::command]
@@ -43,9 +45,10 @@ pub async fn generate_thumb(
     path: String,
     max_px: u32,
     quality: u8,
+    invert: bool,
 ) -> Result<Response, String> {
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        inner_generate(path, max_px, quality)
+        inner_generate(path, max_px, quality, invert)
     })
     .await
     .map_err(|e| format!("task panicked: {:?}", e))??;
@@ -311,7 +314,7 @@ pub fn apply_quick_inversion(img: &mut image::RgbImage) {
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
 
-fn inner_generate(path: String, max_px: u32, quality: u8) -> Result<Vec<u8>, String> {
+fn inner_generate(path: String, max_px: u32, quality: u8, invert: bool) -> Result<Vec<u8>, String> {
     // ── Decode ────────────────────────────────────────────────────────────────
     let img = image::open(&path).map_err(|e| format!("decode failed: {e}"))?;
 
@@ -330,17 +333,21 @@ fn inner_generate(path: String, max_px: u32, quality: u8) -> Result<Vec<u8>, Str
         img.resize(max_px, max_px, FilterType::Triangle)
     };
 
-    // ── Inversion (film negative → positive preview) ──────────────────────────
-    // Apply quick inversion to give a recognizable preview. This is always
-    // applied since the app is designed for film negative scans.
-    let mut rgb = thumb.to_rgb8();
-    apply_quick_inversion(&mut rgb);
+    // ── Optional inversion (film negative → positive preview) ─────────────────
+    // Only apply for film negative scans (rolls). Digital library images
+    // should be output as-is.
+    let rgb = if invert {
+        let mut rgb = thumb.to_rgb8();
+        apply_quick_inversion(&mut rgb);
+        DynamicImage::from(rgb)
+    } else {
+        thumb
+    };
 
     // ── JPEG encode ───────────────────────────────────────────────────────────
     let mut buf = Cursor::new(Vec::with_capacity(32 * 1024));
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-    DynamicImage::from(rgb)
-        .write_with_encoder(encoder)
+    rgb.write_with_encoder(encoder)
         .map_err(|e| format!("encode failed: {e}"))?;
 
     Ok(buf.into_inner())

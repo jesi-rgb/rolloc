@@ -47,12 +47,18 @@ function isTauri(): boolean {
  *
  * The Rust side returns `tauri::ipc::Response` (raw bytes), so `invoke`
  * resolves to an `ArrayBuffer` — no base64 round-trip.
+ *
+ * @param absolutePath Absolute path to the source image.
+ * @param maxPx        Maximum pixel count on the long edge.
+ * @param invert       If true, apply NegPy film-negative inversion (for rolls).
+ *                     If false, output a straight downsample (for libraries).
  */
-async function generateThumbNative(absolutePath: string, maxPx: number): Promise<Blob> {
+async function generateThumbNative(absolutePath: string, maxPx: number, invert: boolean): Promise<Blob> {
 	const buf = await invoke<ArrayBuffer>('generate_thumb', {
 		path:    absolutePath,
 		maxPx,
 		quality: Math.round(JPEG_QUALITY * 100),
+		invert,
 	});
 	return new Blob([buf], { type: 'image/jpeg' });
 }
@@ -258,10 +264,16 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
  * Prefers the native Tauri path (absolutePath) when available — no file bytes
  * cross the IPC boundary.  Falls back to blob-based generation when a file
  * is provided instead.
+ *
+ * @param frameId Unique identifier for the frame/image.
+ * @param source  Path or File to the source image.
+ * @param invert  If true, apply NegPy film-negative inversion (for rolls).
+ *                If false (default), output a straight downsample (for libraries).
  */
 export async function ensureThumb(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
+	invert: boolean = false,
 ): Promise<Blob> {
 	const existing = await readThumb(frameId);
 	if (existing) return existing;
@@ -272,7 +284,7 @@ export async function ensureThumb(
 		if (isRawExtension(source.absolutePath)) {
 			blob = await generateRawThumbNative(source.absolutePath, THUMB_SIZE);
 		} else {
-			blob = await generateThumbNative(source.absolutePath, THUMB_SIZE);
+			blob = await generateThumbNative(source.absolutePath, THUMB_SIZE, invert);
 		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
@@ -286,10 +298,16 @@ export async function ensureThumb(
 /**
  * Generates and caches a full preview for a frame.
  * No-ops if a preview is already cached.
+ *
+ * @param frameId Unique identifier for the frame/image.
+ * @param source  Path or File to the source image.
+ * @param invert  If true, apply NegPy film-negative inversion (for rolls).
+ *                If false (default), output a straight downsample (for libraries).
  */
 export async function ensurePreview(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
+	invert: boolean = false,
 ): Promise<Blob> {
 	const existing = await readPreview(frameId);
 	if (existing) return existing;
@@ -300,7 +318,7 @@ export async function ensurePreview(
 		if (isRawExtension(source.absolutePath)) {
 			blob = await generateRawThumbNative(source.absolutePath, PREVIEW_SIZE);
 		} else {
-			blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE);
+			blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE, invert);
 		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
@@ -315,12 +333,18 @@ export async function ensurePreview(
  * Returns an object URL for the frame's thumbnail.
  * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
+ *
+ * @param frameId Unique identifier for the frame/image.
+ * @param source  Path or File to the source image.
+ * @param invert  If true, apply NegPy film-negative inversion (for rolls).
+ *                If false (default), output a straight downsample (for libraries).
  */
 export async function getThumbURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
+	invert: boolean = false,
 ): Promise<string> {
-	const blob = await ensureThumb(frameId, source);
+	const blob = await ensureThumb(frameId, source, invert);
 	return URL.createObjectURL(blob);
 }
 
@@ -328,12 +352,18 @@ export async function getThumbURL(
  * Returns an object URL for the frame's full preview (1200px long edge).
  * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
+ *
+ * @param frameId Unique identifier for the frame/image.
+ * @param source  Path or File to the source image.
+ * @param invert  If true, apply NegPy film-negative inversion (for rolls).
+ *                If false (default), output a straight downsample (for libraries).
  */
 export async function getPreviewURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
+	invert: boolean = false,
 ): Promise<string> {
-	const blob = await ensurePreview(frameId, source);
+	const blob = await ensurePreview(frameId, source, invert);
 	return URL.createObjectURL(blob);
 }
 

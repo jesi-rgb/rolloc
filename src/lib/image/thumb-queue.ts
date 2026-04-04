@@ -33,6 +33,8 @@ interface QueueEntry {
 	/** Absolute path to the source file (preferred — no file bytes in JS heap). */
 	absolutePath: string;
 	priority: ThumbPriority;
+	/** If true, apply NegPy film-negative inversion (for rolls). */
+	invert: boolean;
 	resolve: (url: string) => void;
 	reject: (err: unknown) => void;
 }
@@ -103,7 +105,7 @@ function dequeueNext(): QueueEntry | undefined {
 }
 
 async function processEntry(entry: QueueEntry): Promise<void> {
-	const { imageId, absolutePath, resolve, reject } = entry;
+	const { imageId, absolutePath, invert, resolve, reject } = entry;
 	try {
 		// Layer 2: OPFS cache hit
 		const cachedUrl = await thumbURL(imageId);
@@ -121,7 +123,7 @@ async function processEntry(entry: QueueEntry): Promise<void> {
 		// Layer 3: generate from source (native Tauri path preferred)
 		thumbQueueProgress.generating++;
 		notifyProgress();
-		const url = await getThumbURL(imageId, { absolutePath });
+		const url = await getThumbURL(imageId, { absolutePath }, invert);
 		thumbCache.set(imageId, url);
 		if (!_countedAsCached.has(imageId)) {
 			_countedAsCached.add(imageId);
@@ -163,11 +165,14 @@ function maybeSpawnWorker(): void {
  * @param imageId      Unique image identifier.
  * @param absolutePath Absolute filesystem path to the source image.
  * @param priority     "high" for viewport-visible items, "low" for prefetch.
+ * @param invert       If true, apply NegPy film-negative inversion (for rolls).
+ *                     If false (default), output a straight downsample (for libraries).
  */
 export function requestThumb(
 	imageId: string,
 	absolutePath: string,
 	priority: ThumbPriority = 'high',
+	invert: boolean = false,
 ): Promise<string> {
 	// Layer 1: module-level cache — synchronous
 	const cached = thumbCache.get(imageId);
@@ -180,7 +185,7 @@ export function requestThumb(
 	if (existing) return existing;
 
 	const promise = new Promise<string>((resolve, reject) => {
-		queue.push({ imageId, absolutePath, priority, resolve, reject });
+		queue.push({ imageId, absolutePath, priority, invert, resolve, reject });
 		// Only increment total if this ID was not pre-counted by initThumbQueueForLibrary.
 		if (!_initialisedIds.has(imageId)) {
 			thumbQueueProgress.total++;
@@ -275,10 +280,13 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
  *
  * @param images  Array of `{ id, relativePath }` — the library images.
  * @param dirPath Absolute directory path.
+ * @param invert  If true, apply NegPy film-negative inversion (for rolls).
+ *                If false (default), output a straight downsample (for libraries).
  */
 export async function prefetchThumbs(
 	images: Array<{ id: string; relativePath: string }>,
 	dirPath: string,
+	invert: boolean = false,
 ): Promise<void> {
 	const READ_CONCURRENCY = 4;
 
@@ -295,7 +303,7 @@ export async function prefetchThumbs(
 
 				try {
 					const absolutePath = await join(dirPath, image.relativePath);
-					void requestThumb(image.id, absolutePath, 'low');
+					void requestThumb(image.id, absolutePath, 'low', invert);
 				} catch (err) {
 					console.error(`[prefetchThumbs] Failed to build path for ${image.relativePath}:`, err);
 				}
