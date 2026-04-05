@@ -1,7 +1,12 @@
 <script lang="ts">
 	import type { Component } from "svelte";
 	import { getTheme, toggleTheme } from "$lib/theme.svelte";
-	import { SunIcon, MoonIcon } from "phosphor-svelte";
+	import {
+		getAvailableUpdate,
+		isDownloading,
+		installUpdate,
+	} from "$lib/updater.svelte";
+	import { SunIcon, MoonIcon, DownloadSimpleIcon } from "phosphor-svelte";
 
 	/** An icon key bound to one or more KeyboardEvent.key values. */
 	interface IconKey {
@@ -25,6 +30,8 @@
 	let { hints, progress }: Props = $props();
 
 	const theme = $derived(getTheme());
+	const update = $derived(getAvailableUpdate());
+	const downloading = $derived(isDownloading());
 
 	/** Type guard: is the key an IconKey object (not a bare Component)? */
 	function isIconKey(key: Key): key is IconKey {
@@ -174,12 +181,30 @@
 		<span class="ml-auto text-xs text-content-subtle">{progress}</span>
 	{/if}
 
+	<!-- Update available indicator -->
+	{#if update}
+		<button
+			onclick={installUpdate}
+			disabled={downloading}
+			aria-label={downloading ? "Installing update..." : `Update to ${update.version}`}
+			title={downloading ? "Installing update..." : `Update to ${update.version}`}
+			class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
+			       {downloading
+				? 'text-content-muted cursor-wait'
+				: 'text-accent hover:bg-accent/10 transition-colors'}
+			       {progress ? '' : 'ml-auto'}"
+		>
+			<DownloadSimpleIcon size={14} class={downloading ? 'animate-bounce' : ''} />
+			<span>{downloading ? 'Installing...' : `v${update.version}`}</span>
+		</button>
+	{/if}
+
 	<!-- Theme toggle (sun/moon) -->
 	<button
 		onclick={toggleTheme}
 		aria-label="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
 		title="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
-		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress ? '' : 'ml-auto'}"
+		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress || update ? '' : 'ml-auto'}"
 	>
 		{#if theme === "dark"}
 			<SunIcon size={14} />
