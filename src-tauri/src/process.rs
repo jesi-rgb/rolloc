@@ -53,6 +53,19 @@ pub struct CropQuad {
     pub bl: Point2D,
 }
 
+/// Transform parameters: rotation and flips.
+/// Mirrors `TransformParams` from types.ts.
+#[derive(serde::Deserialize, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformParams {
+    /// Rotation in degrees (positive = clockwise). Supports any value.
+    pub rotation: f32,
+    /// Horizontal flip (mirror).
+    pub flip_h: bool,
+    /// Vertical flip.
+    pub flip_v: bool,
+}
+
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +90,9 @@ pub struct EffectiveEdit {
     /// When None, no crop is applied (full image).
     #[serde(default)]
     pub crop_quad: Option<CropQuad>,
+    /// Transform parameters (rotation, flip).
+    #[serde(default)]
+    pub transform: TransformParams,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]

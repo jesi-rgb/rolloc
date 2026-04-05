@@ -21,7 +21,7 @@ use std::path::Path;
 
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 
-use crate::process::{self, EffectiveEdit, LogPercentiles};
+use crate::process::{self, EffectiveEdit, LogPercentiles, TransformParams};
 use crate::raw::read_exif_orientation;
 
 // ─── Command ──────────────────────────────────────────────────────────────────
@@ -102,13 +102,19 @@ fn inner_export(
 
 // ─── Native export (full-res, f32 pipeline, no GPU) ───────────────────────────
 
-// ─── Crop helpers ─────────────────────────────────────────────────────────────
+// ─── Transform + Crop helpers ─────────────────────────────────────────────────
 
 use crate::process::CropQuad;
 
 /// Compute the output dimensions for a crop operation.
-/// Uses the average of horizontal and vertical edge lengths to determine size.
-fn compute_crop_dimensions(crop: &CropQuad, src_w: usize, src_h: usize) -> (usize, usize) {
+/// The crop coordinates are normalized (0-1) relative to the SOURCE image dimensions,
+/// even when rotation is applied (because the GPU uses UV-based rotation that doesn't
+/// change the texture buffer dimensions).
+fn compute_crop_dimensions(
+    crop: &CropQuad,
+    src_w: usize,
+    src_h: usize,
+) -> (usize, usize) {
     let sw = src_w as f32;
     let sh = src_h as f32;
 
@@ -165,15 +171,41 @@ fn sample_bilinear(src: &[f32], src_w: usize, src_h: usize, x: f32, y: f32) -> [
     result
 }
 
-/// Apply a quadrilateral crop to an RGB f32 image.
-/// Returns (output_width, output_height, cropped_pixels).
-fn apply_crop(
+/// Apply transform (rotation + flips) and crop in a single pass.
+///
+/// The GPU pipeline works as follows:
+/// 1. Transform shader rotates content via UV remapping (buffer stays same size)
+///    - Uses aspect ratio correction to prevent distortion
+///    - Rotation is continuous (any angle in radians)
+/// 2. Crop shader samples from the (visually rotated) buffer
+///
+/// So crop coordinates are normalized to SOURCE buffer dimensions, but they
+/// describe a region in the visually-rotated content. We need to:
+/// 1. For each output pixel, compute the crop quad sample position
+/// 2. That position is in the "rotated content" space (still normalized 0-1)
+/// 3. Apply inverse rotation (with aspect correction) to map back to original source
+/// 4. Apply flips
+/// 5. Sample from the source image with bilinear interpolation
+///
+/// Returns (output_width, output_height, result_pixels).
+fn apply_transform_and_crop(
     src: &[f32],
     src_w: usize,
     src_h: usize,
     crop: &CropQuad,
+    transform: &TransformParams,
 ) -> (usize, usize, Vec<f32>) {
+    // Output dimensions are computed from crop quad applied to SOURCE dimensions
+    // (matching the GPU pipeline behavior)
     let (out_w, out_h) = compute_crop_dimensions(crop, src_w, src_h);
+
+    // Convert rotation from degrees to radians (matching GPU pipeline)
+    let rotation_rad = transform.rotation * std::f32::consts::PI / 180.0;
+    let cos_a = rotation_rad.cos();
+    let sin_a = rotation_rad.sin();
+    
+    // Aspect ratio for aspect-correct rotation (matching GPU transform shader)
+    let aspect = src_w as f32 / src_h as f32;
 
     let sw = src_w as f32;
     let sh = src_h as f32;
@@ -186,19 +218,54 @@ fn apply_crop(
         for out_x in 0..out_w {
             let u = out_x as f32 / (out_w - 1).max(1) as f32;
 
-            // Bilinear interpolation within the quad (same as GPU shader)
-            // top = lerp(tl, tr, u)
-            // bottom = lerp(bl, br, u)
-            // result = lerp(top, bottom, v)
-            let top_x = crop.tl.x * (1.0 - u) + crop.tr.x * u;
-            let top_y = crop.tl.y * (1.0 - u) + crop.tr.y * u;
-            let bot_x = crop.bl.x * (1.0 - u) + crop.br.x * u;
-            let bot_y = crop.bl.y * (1.0 - u) + crop.br.y * u;
+            // Apply flips to the UV coordinates (flips affect the output, so we
+            // flip the sampling coordinates)
+            let u_flipped = if transform.flip_h { 1.0 - u } else { u };
+            let v_flipped = if transform.flip_v { 1.0 - v } else { v };
 
-            let src_x = (top_x * (1.0 - v) + bot_x * v) * sw;
-            let src_y = (top_y * (1.0 - v) + bot_y * v) * sh;
+            // Bilinear interpolation within the crop quad gives us a point in
+            // the source buffer's normalized coordinate space [0,1]×[0,1].
+            // But this point describes where to sample from the ROTATED content.
+            let top_x = crop.tl.x * (1.0 - u_flipped) + crop.tr.x * u_flipped;
+            let top_y = crop.tl.y * (1.0 - u_flipped) + crop.tr.y * u_flipped;
+            let bot_x = crop.bl.x * (1.0 - u_flipped) + crop.br.x * u_flipped;
+            let bot_y = crop.bl.y * (1.0 - u_flipped) + crop.br.y * u_flipped;
 
-            let pixel = sample_bilinear(src, src_w, src_h, src_x, src_y);
+            let crop_x = top_x * (1.0 - v_flipped) + bot_x * v_flipped;
+            let crop_y = top_y * (1.0 - v_flipped) + bot_y * v_flipped;
+
+            // The crop coordinates describe a position in the intermediate
+            // "rotated view" buffer. To find where in the ORIGINAL source this
+            // came from, we apply the SAME forward transform that the GPU uses.
+            //
+            // GPU transform.wgsl (forward transform - given output UV, find source UV):
+            //   centered = output_uv - 0.5
+            //   correctedX = centered.x * aspect
+            //   source_centered.x = correctedX * cos(θ) - centered.y * sin(θ)
+            //   source_centered.y = correctedX * sin(θ) + centered.y * cos(θ)
+            //   source_uv.x = source_centered.x / aspect + 0.5
+            //   source_uv.y = source_centered.y + 0.5
+            //
+            // This is NOT an inverse - the GPU shader already computes the
+            // source position given an output position. We replicate that here.
+            
+            let centered_x = crop_x - 0.5;
+            let centered_y = crop_y - 0.5;
+            let corrected_x = centered_x * aspect;
+            
+            // Forward rotation (same as GPU shader)
+            let source_centered_x = corrected_x * cos_a - centered_y * sin_a;
+            let source_centered_y = corrected_x * sin_a + centered_y * cos_a;
+            
+            // Convert back to UV space
+            let src_norm_x = (source_centered_x / aspect) + 0.5;
+            let src_norm_y = source_centered_y + 0.5;
+
+            // Convert normalized source coordinates to pixel coordinates
+            let src_px_x = src_norm_x * sw;
+            let src_px_y = src_norm_y * sh;
+
+            let pixel = sample_bilinear(src, src_w, src_h, src_px_x, src_px_y);
 
             let dst_idx = (out_y * out_w + out_x) * 3;
             dst[dst_idx] = pixel[0];
@@ -208,6 +275,17 @@ fn apply_crop(
     }
 
     (out_w, out_h, dst)
+}
+
+/// Full-image "identity" crop quad — all corners at image boundaries.
+fn full_image_crop() -> CropQuad {
+    use crate::process::Point2D;
+    CropQuad {
+        tl: Point2D { x: 0.0, y: 0.0 },
+        tr: Point2D { x: 1.0, y: 0.0 },
+        br: Point2D { x: 1.0, y: 1.0 },
+        bl: Point2D { x: 0.0, y: 1.0 },
+    }
 }
 
 // ─── Ordered dithering helpers ────────────────────────────────────────────────
@@ -421,12 +499,17 @@ fn inner_export_native(
     // ── Process through the CPU pipeline ─────────────────────────────────────
     process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
 
-    // ── Apply crop if specified ──────────────────────────────────────────────
-    let (final_w, final_h, rgb_f32) = if let Some(crop) = &edit.crop_quad {
-        apply_crop(&rgb_f32, final_w, final_h, crop)
-    } else {
-        (final_w, final_h, rgb_f32)
-    };
+    // ── Apply transform (rotation + flips) and crop in a single pass ─────────
+    // This combined operation correctly handles the fact that crop coordinates
+    // are defined in the visually-rotated space, matching the GPU pipeline.
+    let crop = edit.crop_quad.as_ref().cloned().unwrap_or_else(full_image_crop);
+    let (final_w, final_h, rgb_f32) = apply_transform_and_crop(
+        &rgb_f32,
+        final_w,
+        final_h,
+        &crop,
+        &edit.transform,
+    );
 
     // ── Convert f32 [0,1] sRGB → u8 [0,255] with ordered dithering ─────────
     // Uses an 8×8 Bayer matrix to break up banding in smooth gradients
