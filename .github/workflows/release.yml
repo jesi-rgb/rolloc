@@ -64,8 +64,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Roloc ${{ github.ref_name }}'
-          releaseBody: 'See the assets below to download and install Roloc for your platform.'
+          releaseName: 'Rolloc ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download and install Rolloc for your platform.'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
