@@ -113,6 +113,21 @@ export type FilmType = 'C41' | 'BW' | 'E6';
  *   Applies a logistic characteristic curve that simulates photographic paper.
  */
 export interface InversionParams {
+	/**
+	 * Auto-levels mode. When enabled, computes per-channel shadow floors
+	 * based on the first populated histogram bin (like Photoshop's Levels
+	 * "clip shadows to first data" technique). This provides automatic
+	 * white-balance and exposure correction as a baseline.
+	 */
+	autoLevels: boolean;
+
+	/**
+	 * Auto-exposure mode. When enabled, automatically adjusts density based
+	 * on the image's median luminance to target middle gray. Dark images get
+	 * brightened, bright images get darkened.
+	 */
+	autoExposure: boolean;
+
 	/** Pivot point (0–1) — controls "exposure" / density shift. Default 0.5. */
 	density: number;
 	/** Sigmoid contrast slope — equivalent to paper "grade". Default 2.0. */
@@ -337,6 +352,8 @@ const identityMatrix: Matrix3x3 = [
 ];
 
 export const DEFAULT_INVERSION_PARAMS: InversionParams = {
+	autoLevels:       true,
+	autoExposure:     true,
 	density:          1.0,
 	grade:            2.5,
 	cmyCyan:          0.0,

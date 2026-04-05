@@ -110,6 +110,20 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 const ANALYSIS_BUFFER = 0.10;
 
 /**
+ * Number of histogram bins for auto-levels shadow floor computation.
+ * Higher = more precise detection of the first populated bin.
+ */
+const AUTO_LEVELS_BINS = 256;
+
+/**
+ * Cumulative percentage threshold for auto-levels.
+ * We find the bin where this percentage of total pixels have been seen.
+ * Using 0.1% (0.001) means we ignore the darkest 0.1% as outliers.
+ * This is more aggressive than pure "first populated bin" which would be ~0%.
+ */
+const AUTO_LEVELS_CUMULATIVE_PERCENT = 0.001;
+
+/**
  * Per-channel log-density floor/ceil for the normalization shader.
  * The normalization pass does: normalized = (log10(pixel) - floor) / (ceil - floor)
  * For C-41 negatives: floor ≈ 0.5th percentile, ceil ≈ 99.5th percentile.
@@ -118,6 +132,86 @@ const ANALYSIS_BUFFER = 0.10;
 export interface LogPercentiles {
 	floors: [number, number, number];
 	ceils:  [number, number, number];
+	/**
+	 * Auto-exposure correction in density units.
+	 * Positive = image is dark, needs brightening (reduce density).
+	 * Negative = image is bright, needs darkening (increase density).
+	 * Computed from the median luminance relative to middle gray.
+	 */
+	autoExposure: number;
+}
+
+/**
+ * Compute per-channel histogram-based floors AND ceils for auto-levels mode.
+ *
+ * This implements the "Levels" technique from Photoshop: for each channel,
+ * build a histogram of log-density values and find where the "real" data 
+ * begins AND ends, ignoring sparse outliers at both edges.
+ *
+ * The technique removes color casts and improves exposure automatically because
+ * each channel is independently stretched to use the full range. For film 
+ * negatives, this means the orange mask is removed and the image is well-exposed.
+ *
+ * @param rLog - Array of log10 red channel values
+ * @param gLog - Array of log10 green channel values
+ * @param bLog - Array of log10 blue channel values
+ * @param filmType - Film type (affects floor/ceil interpretation for E6)
+ * @returns Object with per-channel floors and ceils
+ */
+function computeAutoLevelsFloorsAndCeils(
+	rLog: number[],
+	gLog: number[],
+	bLog: number[],
+	filmType: FilmType,
+): { floors: [number, number, number]; ceils: [number, number, number] } {
+	if (rLog.length === 0) {
+		return {
+			floors: [-1, -1, -1],
+			ceils: [0, 0, 0],
+		};
+	}
+
+	const isE6 = filmType === 'E6';
+
+	/**
+	 * Find the floor and ceil values for a single channel using cumulative histogram.
+	 * Floor: where AUTO_LEVELS_CUMULATIVE_PERCENT of pixels are below
+	 * Ceil: where (1 - AUTO_LEVELS_CUMULATIVE_PERCENT) of pixels are below
+	 */
+	function findHistogramBounds(values: number[], channelName: string): { floor: number; ceil: number } {
+		if (values.length === 0) return { floor: -1, ceil: 0 };
+
+		// Sort values for percentile calculation
+		const sorted = values.slice().sort((a, b) => a - b);
+		
+		// Find floor (low percentile) and ceil (high percentile)
+		const lowIdx = Math.floor(sorted.length * AUTO_LEVELS_CUMULATIVE_PERCENT);
+		const highIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
+		
+		const floor = sorted[Math.max(0, lowIdx)];
+		const ceil = sorted[Math.min(sorted.length - 1, highIdx)];
+
+		console.debug(`[autoLevels] ${channelName}: range=[${sorted[0].toFixed(3)}, ${sorted[sorted.length-1].toFixed(3)}], floor=${floor.toFixed(4)} (@${lowIdx}), ceil=${ceil.toFixed(4)} (@${highIdx})`);
+		
+		return { floor, ceil };
+	}
+
+	const rBounds = findHistogramBounds(rLog, 'R');
+	const gBounds = findHistogramBounds(gLog, 'G');
+	const bBounds = findHistogramBounds(bLog, 'B');
+
+	// For E6 (positive/slide film), swap floor and ceil semantics
+	if (isE6) {
+		return {
+			floors: [rBounds.ceil, gBounds.ceil, bBounds.ceil],
+			ceils: [rBounds.floor, gBounds.floor, bBounds.floor],
+		};
+	}
+
+	return {
+		floors: [rBounds.floor, gBounds.floor, bBounds.floor],
+		ceils: [rBounds.ceil, gBounds.ceil, bBounds.ceil],
+	};
 }
 
 /**
@@ -131,6 +225,9 @@ export interface LogPercentiles {
  * before the log transform — this is essential for the negative path where the
  * GPU applies the cam→sRGB matrix before the normalization shader.
  *
+ * When `autoLevels` is true, uses histogram-based floor computation instead of
+ * percentiles for the shadow input level (like Photoshop's Levels auto-adjust).
+ *
  * Downsamples by `stride` to keep it fast for large images (default: every 8th pixel).
  */
 function computeLogPercentilesFromF32(
@@ -140,6 +237,7 @@ function computeLogPercentilesFromF32(
 	stride: number = 8,
 	colorMatrix?: Matrix3x3,
 	filmType: FilmType = 'C41',
+	autoLevels: boolean = false,
 ): LogPercentiles {
 	const LOG10_E = 0.43429448190325183;
 	const eps = 1e-6;
@@ -209,37 +307,105 @@ function computeLogPercentilesFromF32(
 	// negpy: C41/BW use p_low=0.001, p_high=99.999
 	//        E6 uses p_low=99.999, p_high=0.001
 	const isE6 = filmType === 'E6';
-	const pLow  = isE6 ? 99.999 : 0.001;
 	const pHigh = isE6 ? 0.001  : 99.999;
 
-	// Floors: find the pLow percentile of mean luminance, select pixels
-	// at or below (C41/BW) or above (E6) that threshold, and average their
-	// per-channel log values.  This matches negpy's analyze_log_exposure_bounds()
-	// which uses the mean of the darkest pixels rather than a raw per-channel
-	// percentile.
-	const darkThreshold = percentile(meanLog, pLow);
-	let floorR = 0, floorG = 0, floorB = 0, darkCount = 0;
-	for (let i = 0; i < meanLog.length; i++) {
-		// E6 inverts the comparison: >= instead of <=
-		const isDark = isE6 ? (meanLog[i] >= darkThreshold) : (meanLog[i] <= darkThreshold);
-		if (isDark) {
-			floorR += rLog[i];
-			floorG += gLog[i];
-			floorB += bLog[i];
-			darkCount++;
+	// Compute floors and ceils using either auto-levels or percentile method
+	let floors: [number, number, number];
+	let ceils: [number, number, number];
+	
+	if (autoLevels) {
+		// Auto-levels: each channel finds its own floor AND ceil independently.
+		// This is key for removing color casts - channels are stretched independently.
+		const bounds = computeAutoLevelsFloorsAndCeils(rLog, gLog, bLog, filmType);
+		floors = bounds.floors;
+		ceils = bounds.ceils;
+		console.debug('[autoLevels ON] per-channel floors:', floors.map(f => f.toFixed(4)));
+		console.debug('[autoLevels ON] per-channel ceils:', ceils.map(c => c.toFixed(4)));
+	} else {
+		// Original negpy method: use low percentile of mean luminance to find
+		// the darkest pixels, then average their per-channel values.
+		// All channels use floors from the SAME set of pixels (darkest by average).
+		const pLow = isE6 ? 99.999 : 0.001;
+		const darkThreshold = percentile(meanLog, pLow);
+		let floorR = 0, floorG = 0, floorB = 0, darkCount = 0;
+		for (let i = 0; i < meanLog.length; i++) {
+			// E6 inverts the comparison: >= instead of <=
+			const isDark = isE6 ? (meanLog[i] >= darkThreshold) : (meanLog[i] <= darkThreshold);
+			if (isDark) {
+				floorR += rLog[i];
+				floorG += gLog[i];
+				floorB += bLog[i];
+				darkCount++;
+			}
 		}
-	}
-	const floors: [number, number, number] = darkCount > 0
-		? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
-		: [percentile(rLog, pLow), percentile(gLog, pLow), percentile(bLog, pLow)];
-
-	return {
-		floors,
-		ceils: [
+		floors = darkCount > 0
+			? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
+			: [percentile(rLog, pLow), percentile(gLog, pLow), percentile(bLog, pLow)];
+		
+		// Ceils use standard per-channel percentile
+		ceils = [
 			percentile(rLog, pHigh),
 			percentile(gLog, pHigh),
 			percentile(bLog, pHigh),
-		],
+		];
+		console.debug('[autoLevels OFF] darkest-pixels floors:', floors.map(f => f.toFixed(4)), `(${darkCount} pixels)`);
+		console.debug('[autoLevels OFF] percentile ceils:', ceils.map(c => c.toFixed(4)));
+	}
+
+	console.debug('[normalization] floor-ceil delta per channel:', 
+		[(ceils[0] - floors[0]).toFixed(4), (ceils[1] - floors[1]).toFixed(4), (ceils[2] - floors[2]).toFixed(4)]);
+
+	// ── Auto-exposure calculation ────────────────────────────────────────────
+	// Compute how far the median luminance is from middle gray (0.5 in normalized space).
+	// After normalization, values are mapped from [floor, ceil] to [0, 1].
+	// We want the median to land around 0.5 for a well-exposed image.
+	//
+	// For each channel, find where the median sits in the normalized range:
+	//   normalizedMedian = (median - floor) / (ceil - floor)
+	// Then compute the average across channels.
+	//
+	// If normalizedMedian < 0.5, image is dark → positive autoExposure (brighten)
+	// If normalizedMedian > 0.5, image is bright → negative autoExposure (darken)
+	//
+	// The density slider works inversely: higher density = darker image.
+	// So autoExposure = (0.5 - normalizedMedian) * scale
+	
+	const medianR = percentile(rLog, 50);
+	const medianG = percentile(gLog, 50);
+	const medianB = percentile(bLog, 50);
+	
+	// Normalize medians to [0, 1] based on floors and ceils
+	const rangeR = ceils[0] - floors[0];
+	const rangeG = ceils[1] - floors[1];
+	const rangeB = ceils[2] - floors[2];
+	
+	const normMedianR = rangeR > 0.001 ? (medianR - floors[0]) / rangeR : 0.5;
+	const normMedianG = rangeG > 0.001 ? (medianG - floors[1]) / rangeG : 0.5;
+	const normMedianB = rangeB > 0.001 ? (medianB - floors[2]) / rangeB : 0.5;
+	
+	// Use luminance-weighted average (human eye is most sensitive to green)
+	const avgNormMedian = 0.2126 * normMedianR + 0.7152 * normMedianG + 0.0722 * normMedianB;
+	
+	// Target is 0.5 (middle gray in normalized space).
+	// Scale factor converts the 0-1 deviation to density units.
+	// A deviation of 0.5 (completely dark) should give ~2-3 density units adjustment.
+	//
+	// For NEGATIVES: high normalized median = bright negative = dark positive output.
+	// So we INVERT the sign: (avgNormMedian - TARGET) instead of (TARGET - avgNormMedian).
+	// When median > 0.5 (negative is bright, output is dark), we get positive autoExposure,
+	// which will be SUBTRACTED from density, making the output brighter.
+	const TARGET_MEDIAN = 0.5;
+	const EXPOSURE_SCALE = 4.0;  // How aggressively to correct
+	const autoExposure = (avgNormMedian - TARGET_MEDIAN) * EXPOSURE_SCALE;
+	
+	console.debug('[autoExposure] medians (normalized):', 
+		`R=${normMedianR.toFixed(3)}, G=${normMedianG.toFixed(3)}, B=${normMedianB.toFixed(3)}, avg=${avgNormMedian.toFixed(3)}`);
+	console.debug('[autoExposure] correction:', autoExposure.toFixed(3), 'density units');
+
+	return {
+		floors,
+		ceils,
+		autoExposure,
 	};
 }
 
@@ -251,6 +417,7 @@ function computeLogPercentilesFromF32(
  * `width` and `height` are used to apply the analysis buffer crop.
  * `colorMatrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
  * `filmType` — controls percentile logic (E6 inverts floor/ceil selection).
+ * `autoLevels` — when true, uses histogram-based floors instead of percentiles.
  */
 function computeLogPercentilesFromU16(
 	pixels: Uint16Array,
@@ -259,6 +426,7 @@ function computeLogPercentilesFromU16(
 	stride: number = 8,
 	colorMatrix?: Matrix3x3,
 	filmType: FilmType = 'C41',
+	autoLevels: boolean = false,
 ): LogPercentiles {
 	// Normalise u16 → [0,1] float and reuse the float percentile path.
 	// Do NOT truncate to the first N pixels — that produces a biased sample
@@ -268,7 +436,7 @@ function computeLogPercentilesFromU16(
 	for (let i = 0; i < pixels.length; i++) {
 		f32[i] = pixels[i] / 65535.0;
 	}
-	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix, filmType);
+	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix, filmType, autoLevels);
 }
 
 /**
@@ -546,17 +714,23 @@ function makeNormalizationUniforms(
  *
  * Note: gamma is applied here as pow(transmittance, 1/2.2) matching negpy.
  * The tonecurve pass skips sRGB encode on the negpy path (skipSrgb flag).
+ *
+ * @param autoExposureAdj - Auto-exposure correction in density units (added to density).
  */
 function makeHDCurveUniforms(
 	device: GPUDevice,
 	inv: InversionParams,
+	autoExposureAdj: number = 0,
 ): GPUBuffer {
 	// Pivot and slope match NegPy's PhotometricProcessor formula:
 	//   exposure_shift = 0.01 + (density * DENSITY_MULTIPLIER)
 	//   pivot          = 1.0 - exposure_shift
 	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
 	// At defaults (density=1.0, grade=2.5): pivot=0.84, slope=5.375.
-	const pivot = 1.0 - (0.01 + inv.density * DENSITY_MULTIPLIER);
+	//
+	// Auto-exposure: subtract from density to brighten (positive autoExposureAdj = dark image = needs less density).
+	const effectiveDensity = inv.density - autoExposureAdj;
+	const pivot = 1.0 - (0.01 + effectiveDensity * DENSITY_MULTIPLIER);
 	const slope = 1.0 + inv.grade * GRADE_MULTIPLIER;
 
 	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
@@ -993,7 +1167,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// Pass 3: tonecurve      — intermediateC (or B)  → outputTexture
 
 			const normBuf = makeNormalizationUniforms(device, logPerc, edit.inversionParams.filmType);
-			const hdBuf   = makeHDCurveUniforms(device, edit.inversionParams);
+			
+			// Apply auto-exposure correction if enabled
+			const autoExposureAdj = edit.inversionParams.autoExposure ? logPerc.autoExposure : 0;
+			const hdBuf = makeHDCurveUniforms(device, edit.inversionParams, autoExposureAdj);
 			toClean.push(normBuf, hdBuf);
 
 			// Normalization: camera-native linear → normalized log-density
@@ -1337,7 +1514,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			const f32 = await bitmapToF32Pixels(bitmap);
-			logPerc = computeLogPercentilesFromF32(f32, w, h, 8, undefined, edit.inversionParams.filmType);
+			logPerc = computeLogPercentilesFromF32(
+				f32, w, h, 8, undefined,
+				edit.inversionParams.filmType,
+				edit.inversionParams.autoLevels,
+			);
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -1360,7 +1541,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(pixels, w, h, 8, undefined, edit.inversionParams.filmType);
+				logPerc = computeLogPercentilesFromU16(
+					pixels, w, h, 8, undefined,
+					edit.inversionParams.filmType,
+					edit.inversionParams.autoLevels,
+				);
 				lastLogPerc = logPerc;
 			}
 		} else {

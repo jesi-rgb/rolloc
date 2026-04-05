@@ -24,6 +24,8 @@
 	// ─── Local reactive copies (untrack to avoid "only captures initial value" warning) ───
 
 	let filmType = $state<FilmType>(untrack(() => value.filmType));
+	let autoLevels = $state(untrack(() => value.autoLevels));
+	let autoExposure = $state(untrack(() => value.autoExposure));
 	let e6Normalize = $state(untrack(() => value.e6Normalize));
 	let density = $state(untrack(() => value.density));
 	let grade = $state(untrack(() => value.grade));
@@ -53,6 +55,8 @@
 		// Deliberately reading reactive `value` to react to prop changes,
 		// then writing local copies — acceptable pattern per AGENTS.md.
 		filmType = value.filmType;
+		autoLevels = value.autoLevels;
+		autoExposure = value.autoExposure;
 		e6Normalize = value.e6Normalize;
 		density = value.density;
 		grade = value.grade;
@@ -82,6 +86,8 @@
 	function currentParams(): InversionParams {
 		return {
 			filmType,
+			autoLevels,
+			autoExposure,
 			e6Normalize,
 			density,
 			grade,
@@ -121,6 +127,8 @@
 	function reset(): void {
 		const d = DEFAULT_INVERSION_PARAMS;
 		filmType = d.filmType;
+		autoLevels = d.autoLevels;
+		autoExposure = d.autoExposure;
 		e6Normalize = d.e6Normalize;
 		density = d.density;
 		grade = d.grade;
@@ -150,6 +158,8 @@
 
 	const isDefault = $derived(
 		filmType === DEFAULT_INVERSION_PARAMS.filmType &&
+			autoLevels === DEFAULT_INVERSION_PARAMS.autoLevels &&
+			autoExposure === DEFAULT_INVERSION_PARAMS.autoExposure &&
 			e6Normalize === DEFAULT_INVERSION_PARAMS.e6Normalize &&
 			density === DEFAULT_INVERSION_PARAMS.density &&
 			grade === DEFAULT_INVERSION_PARAMS.grade &&
@@ -230,6 +240,34 @@
 				Auto-normalize (percentile stretch)
 			</label>
 		{/if}
+		<label
+			class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
+		>
+			<input
+				type="checkbox"
+				checked={autoLevels}
+				onchange={(e) => {
+					autoLevels = e.currentTarget.checked;
+					commit();
+				}}
+				class="accent-accent"
+			/>
+			Auto-levels (histogram black point)
+		</label>
+		<label
+			class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
+		>
+			<input
+				type="checkbox"
+				checked={autoExposure}
+				onchange={(e) => {
+					autoExposure = e.currentTarget.checked;
+					commit();
+				}}
+				class="accent-accent"
+			/>
+			Auto-exposure (target middle gray)
+		</label>
 	</section>
 
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
