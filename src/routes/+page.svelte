@@ -137,7 +137,7 @@
 		</div>
 	</nav>
 
-	<main class="flex-1 px-l py-xl max-w-5xl mx-auto">
+	<main class="flex-1 w-full px-l py-xl max-w-5xl mx-auto">
 		{#if loading}
 			<p class="text-content-muted">Loading…</p>
 		{:else if activeTab === "rolls"}
@@ -273,9 +273,7 @@
 						: "y"}
 				</h1>
 
-				<ul
-					class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-base"
-				>
+				<ul class="flex flex-col gap-base">
 					{#each libraries as library (library.id)}
 						<li
 							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
