@@ -13,14 +13,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS ARM (Apple Silicon) - primary
           - platform: macos-latest
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg,updater
+          # macOS Intel
           - platform: macos-latest
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg,updater
+          # Linux - AppImage only (universal format)
           - platform: ubuntu-22.04
-            args: ''
+            args: --bundles appimage,updater
+          # Windows
           - platform: windows-latest
-            args: ''
+            args: --bundles msi,nsis,updater
 
     runs-on: ${{ matrix.platform }}
 
