@@ -540,9 +540,9 @@ function makeNormalizationUniforms(
  *   shadows          : f32        @ 104
  *   highlights       : f32        @ 108
  *   dMax             : f32        @ 112
- *   _pad0            : f32        @ 116
- *   _pad1            : f32        @ 120
- *   _pad2            : f32        @ 124
+ *   vibrance         : f32        @ 116
+ *   saturation       : f32        @ 120
+ *   _pad0            : f32        @ 124
  *
  * Note: gamma is applied here as pow(transmittance, 1/2.2) matching negpy.
  * The tonecurve pass skips sRGB encode on the negpy path (skipSrgb flag).
@@ -622,9 +622,9 @@ function makeHDCurveUniforms(
 	floatView[26] = inv.shadows;      // shadows @ 104
 	floatView[27] = inv.highlights;   // highlights @ 108
 	floatView[28] = D_MAX;            // dMax @ 112
-	floatView[29] = 0.0;              // _pad0 @ 116
-	floatView[30] = 0.0;              // _pad1 @ 120
-	floatView[31] = 0.0;              // _pad2 @ 124
+	floatView[29] = inv.vibrance;     // vibrance @ 116
+	floatView[30] = inv.saturation;   // saturation @ 120
+	floatView[31] = 0.0;              // _pad0 @ 124
 
 	device.queue.writeBuffer(buffer, 0, data);
 	return buffer;

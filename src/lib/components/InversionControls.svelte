@@ -45,6 +45,8 @@
 	let shoulderWidth = $state(untrack(() => value.shoulderWidth));
 	let shoulderHardness = $state(untrack(() => value.shoulderHardness));
 	let claheStrength = $state(untrack(() => value.claheStrength));
+	let vibrance = $state(untrack(() => value.vibrance));
+	let saturation = $state(untrack(() => value.saturation));
 
 	// Re-sync when parent swaps to a different frame / roll
 	$effect(() => {
@@ -72,6 +74,8 @@
 		shoulderWidth = value.shoulderWidth;
 		shoulderHardness = value.shoulderHardness;
 		claheStrength = value.claheStrength;
+		vibrance = value.vibrance;
+		saturation = value.saturation;
 	});
 
 	/** Build the current params object. */
@@ -99,6 +103,8 @@
 			shoulderWidth,
 			shoulderHardness,
 			claheStrength,
+			vibrance,
+			saturation,
 		};
 	}
 
@@ -136,6 +142,8 @@
 		shoulderWidth = d.shoulderWidth;
 		shoulderHardness = d.shoulderHardness;
 		claheStrength = d.claheStrength;
+		vibrance = d.vibrance;
+		saturation = d.saturation;
 		// Reset is a discrete action — commit immediately so it persists + adds to history.
 		commit();
 	}
@@ -162,7 +170,9 @@
 			shoulder === DEFAULT_INVERSION_PARAMS.shoulder &&
 			shoulderWidth === DEFAULT_INVERSION_PARAMS.shoulderWidth &&
 			shoulderHardness === DEFAULT_INVERSION_PARAMS.shoulderHardness &&
-			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength,
+			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength &&
+			vibrance === DEFAULT_INVERSION_PARAMS.vibrance &&
+			saturation === DEFAULT_INVERSION_PARAMS.saturation,
 	);
 </script>
 
@@ -629,6 +639,47 @@
 					emit();
 				}}
 				oncommit={commit}
+			/>
+		</div>
+	</section>
+
+	<!-- ── Color (Vibrance & Saturation) ──────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Color
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-vibrance"
+				label="Vibrance"
+				min={-1}
+				max={1}
+				step={0.01}
+				value={vibrance}
+				defaultValue={DEFAULT_INVERSION_PARAMS.vibrance}
+				onchange={(v) => {
+					vibrance = v;
+					emit();
+				}}
+				oncommit={commit}
+				signed
+			/>
+			<LabeledRange
+				id="inv-saturation"
+				label="Saturation"
+				min={-1}
+				max={1}
+				step={0.01}
+				value={saturation}
+				defaultValue={DEFAULT_INVERSION_PARAMS.saturation}
+				onchange={(v) => {
+					saturation = v;
+					emit();
+				}}
+				oncommit={commit}
+				signed
 			/>
 		</div>
 	</section>

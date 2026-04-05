@@ -43,9 +43,9 @@
  *   shadows       : f32         @ 104                →  4 bytes
  *   highlights    : f32         @ 108                →  4 bytes
  *   dMax          : f32         @ 112                →  4 bytes
- *   _pad0         : f32         @ 116                →  4 bytes
- *   _pad1         : f32         @ 120                →  4 bytes
- *   _pad2         : f32         @ 124                →  4 bytes
+ *   vibrance      : f32         @ 116                →  4 bytes
+ *   saturation    : f32         @ 120                →  4 bytes
+ *   _pad0         : f32         @ 124                →  4 bytes
  *   struct size = 128 bytes
  */
 
@@ -69,9 +69,9 @@ struct HDCurveUniforms {
 	shadows          : f32,
 	highlights       : f32,
 	dMax             : f32,
+	vibrance         : f32,
+	saturation       : f32,
 	_pad0            : f32,
-	_pad1            : f32,
-	_pad2            : f32,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -177,6 +177,41 @@ fn hd_channel(
 	return clamp(pow(max(transmittance, 0.0), 1.0 / 2.2), 0.0, 1.0);
 }
 
+/// Apply vibrance and saturation adjustments.
+/// Vibrance is "intelligent" saturation that protects already-saturated colors.
+/// Both are applied in the linear/perceptual domain after H&D curve.
+fn apply_vibrance_saturation(rgb: vec3<f32>, vibrance: f32, saturation: f32) -> vec3<f32> {
+	// Compute luminance for desaturation reference
+	let lum = LUMA_R * rgb.r + LUMA_G * rgb.g + LUMA_B * rgb.b;
+	let gray = vec3<f32>(lum, lum, lum);
+	
+	// Saturation: uniform blend toward/away from grayscale
+	// saturation = 0: no change, +1: double saturation, -1: grayscale
+	let sat_factor = 1.0 + saturation;
+	var result = mix(gray, rgb, sat_factor);
+	
+	// Vibrance: saturation that protects already-saturated colors
+	// Compute saturation level (0 = gray, 1 = fully saturated)
+	let max_c = max(max(result.r, result.g), result.b);
+	let min_c = min(min(result.r, result.g), result.b);
+	let chroma = max_c - min_c;
+	// Avoid division by zero for very dark/bright pixels
+	let sat_level = select(chroma / max(max_c, 0.001), 0.0, max_c < 0.001);
+	
+	// Vibrance factor: stronger effect on less-saturated pixels
+	// When sat_level is low (desaturated), apply full vibrance
+	// When sat_level is high (saturated), apply less vibrance
+	let vib_strength = vibrance * (1.0 - sat_level);
+	let vib_factor = 1.0 + vib_strength;
+	
+	// Recompute luminance after saturation adjustment
+	let lum2 = LUMA_R * result.r + LUMA_G * result.g + LUMA_B * result.b;
+	let gray2 = vec3<f32>(lum2, lum2, lum2);
+	result = mix(gray2, result, vib_factor);
+	
+	return clamp(result, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let color = textureSample(uTexture, uSampler, in.uv).rgb;
@@ -203,12 +238,19 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		u.shadows, u.highlights, u.dMax,
 	);
 
+	var out_rgb = vec3<f32>(r, g, b);
+
 	// B&W mode: convert to luminance (Rec. 709) and output as grayscale
 	// This matches negpy's get_luminance() applied post-curve
 	if (u.filmType == 1u) {
-		let lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
+		let lum = LUMA_R * out_rgb.r + LUMA_G * out_rgb.g + LUMA_B * out_rgb.b;
 		return vec4<f32>(lum, lum, lum, 1.0);
 	}
 
-	return vec4<f32>(r, g, b, 1.0);
+	// Apply vibrance and saturation (skip for B&W)
+	if (u.vibrance != 0.0 || u.saturation != 0.0) {
+		out_rgb = apply_vibrance_saturation(out_rgb, u.vibrance, u.saturation);
+	}
+
+	return vec4<f32>(out_rgb, 1.0);
 }

@@ -156,6 +156,12 @@ export interface InversionParams {
 	/** CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default. */
 	claheStrength: number;
 
+	// ── Color adjustments ─────────────────────────────────────────────────────
+	/** Vibrance: intelligent saturation that protects already-saturated colors. [-1, +1] */
+	vibrance: number;
+	/** Saturation: uniform saturation adjustment. [-1, +1] */
+	saturation: number;
+
 	// ── Film type and E6-specific settings ────────────────────────────────────
 	/**
 	 * Film processing mode.
@@ -351,6 +357,8 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	shoulderWidth:    2.5,
 	shoulderHardness: 1.0,
 	claheStrength:    0.25,
+	vibrance:         0.0,
+	saturation:       0.0,
 	filmType:         'C41',
 	e6Normalize:      true,
 };
