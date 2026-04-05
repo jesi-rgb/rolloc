@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { pickDirectory } from '$lib/fs/directory';
 	import { createRoll } from '$lib/db/rolls';
-	import type { Roll } from '$lib/types';
+	import type { Roll, FilmType } from '$lib/types';
+	import ColorFilmButton from './ColorFilmButton.svelte';
+	import BlackWhiteFilmButton from './BlackWhiteFilmButton.svelte';
+	import SlideFilmButton from './SlideFilmButton.svelte';
+
+	/** Film type options for the selector. 'mixed' means leave default per-frame. */
+	type FilmTypeOption = FilmType | 'mixed';
 
 	interface Props {
 		onCreated: (roll: Roll) => void;
@@ -14,6 +20,7 @@
 	let filmStock = $state('');
 	let camera    = $state('');
 	let notes     = $state('');
+	let filmType  = $state<FilmTypeOption>('C41');
 	let dirPath   = $state<string | null>(null);
 	let dirName   = $state('');
 	let busy      = $state(false);
@@ -44,7 +51,14 @@
 		busy  = true;
 		error = '';
 		try {
-			const roll = await createRoll({ label: label.trim(), filmStock, camera, notes, path: dirPath });
+			const roll = await createRoll({
+				label: label.trim(),
+				filmStock,
+				camera,
+				notes,
+				path: dirPath,
+				filmType: filmType === 'mixed' ? undefined : filmType,
+			});
 			onCreated(roll);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -140,6 +154,47 @@
 					       focus:outline-none focus:border-primary transition resize-none"
 				></textarea>
 			</label>
+
+			<!-- Film type selector -->
+			<div class="block">
+				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Film type</span>
+				<div class="flex gap-sm mt-1">
+					<ColorFilmButton
+						selected={filmType === 'C41'}
+						onclick={() => { filmType = 'C41'; }}
+					/>
+					<BlackWhiteFilmButton
+						selected={filmType === 'BW'}
+						onclick={() => { filmType = 'BW'; }}
+					/>
+					<SlideFilmButton
+						selected={filmType === 'E6'}
+						onclick={() => { filmType = 'E6'; }}
+					/>
+					<!-- Mixed: neutral styling -->
+					<button
+						type="button"
+						onclick={() => { filmType = 'mixed'; }}
+						class="flex-1 h-12 text-sm font-bold rounded overflow-hidden transition-all
+							{filmType === 'mixed'
+							? 'bg-content text-base ring-2 ring-white ring-offset-2 ring-offset-base-muted scale-105'
+							: 'bg-base-subtle text-content-subtle opacity-60 hover:opacity-100'}"
+					>
+						Mixed
+					</button>
+				</div>
+				<p class="text-xs text-content-subtle mt-1">
+					{#if filmType === 'mixed'}
+						Each frame defaults to C-41 — adjust individually later.
+					{:else if filmType === 'E6'}
+						Slide/reversal film — no inversion needed.
+					{:else if filmType === 'BW'}
+						Black & white negative.
+					{:else}
+						Color negative film (default).
+					{/if}
+				</p>
+			</div>
 		</div>
 
 		{#if error}

@@ -32,12 +32,15 @@ const ANALYSIS_BUFFER: f32 = 0.10;
 
 /// Generate a JPEG thumbnail for the file at `path`.
 ///
-/// - `path`    — absolute path to the source image.
-/// - `max_px`  — maximum pixel count on the long edge (e.g. 300 for thumbs,
-///               1200 for previews).
-/// - `quality` — JPEG quality 1–100 (e.g. 88).
-/// - `invert`  — if true, apply NegPy film-negative inversion (for film scans);
-///               if false, output a straight downsample (for digital photos).
+/// - `path`      — absolute path to the source image.
+/// - `max_px`    — maximum pixel count on the long edge (e.g. 300 for thumbs,
+///                 1200 for previews).
+/// - `quality`   — JPEG quality 1–100 (e.g. 88).
+/// - `film_type` — film processing mode:
+///                 - "C41" — color negative (apply inversion + orange mask removal)
+///                 - "BW"  — black & white negative (apply inversion + desaturate)
+///                 - "E6"  — slide/reversal (no inversion, just normalize)
+///                 - "none" or empty — no processing (for digital photos)
 ///
 /// Returns raw JPEG bytes as a binary `Response` (no base64 overhead).
 #[tauri::command]
@@ -45,10 +48,10 @@ pub async fn generate_thumb(
     path: String,
     max_px: u32,
     quality: u8,
-    invert: bool,
+    film_type: String,
 ) -> Result<Response, String> {
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        inner_generate(path, max_px, quality, invert)
+        inner_generate(path, max_px, quality, &film_type)
     })
     .await
     .map_err(|e| format!("task panicked: {:?}", e))??;
@@ -312,9 +315,90 @@ pub fn apply_quick_inversion(img: &mut image::RgbImage) {
     }
 }
 
+/// Apply B&W film negative inversion to an RGB8 image.
+///
+/// Same as C41 inversion but converts to grayscale after inversion.
+/// Uses luminance weights (Rec. 709) for the grayscale conversion.
+pub fn apply_bw_inversion(img: &mut image::RgbImage) {
+    // First apply the standard inversion
+    apply_quick_inversion(img);
+    
+    // Then convert to grayscale using luminance weights
+    for p in img.pixels_mut() {
+        let luma = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).round() as u8;
+        p[0] = luma;
+        p[1] = luma;
+        p[2] = luma;
+    }
+}
+
+/// Apply E6 slide film normalization (no inversion) to an RGB8 image.
+///
+/// Slide film is already positive — just apply auto levels normalization
+/// without the inversion step.
+pub fn apply_e6_normalize(img: &mut image::RgbImage) {
+    let (width, height) = img.dimensions();
+    let width = width as usize;
+    let height = height as usize;
+    let pixel_count = width * height;
+
+    if pixel_count < 100 {
+        return;
+    }
+
+    // Convert to f32 linear
+    let mut pixels: Vec<f32> = Vec::with_capacity(pixel_count * 3);
+    for p in img.pixels() {
+        pixels.push((p[0] as f32 / 255.0).powf(2.2));
+        pixels.push((p[1] as f32 / 255.0).powf(2.2));
+        pixels.push((p[2] as f32 / 255.0).powf(2.2));
+    }
+
+    // Compute percentiles for normalization
+    let perc = compute_log_percentiles(&pixels, width, height);
+    let log10_e: f32 = std::f32::consts::LOG10_E;
+    let eps: f32 = 1e-6;
+
+    // Normalize without inverting — stretch to full range
+    for chunk in pixels.chunks_mut(3) {
+        let r = chunk[0];
+        let g = chunk[1];
+        let b = chunk[2];
+
+        let lr = r.max(eps).ln() * log10_e;
+        let lg = g.max(eps).ln() * log10_e;
+        let lb = b.max(eps).ln() * log10_e;
+
+        let safe_delta = |f: f32, c: f32| -> f32 {
+            let d = c - f;
+            let abs_d = d.abs().max(eps);
+            d.signum() * abs_d
+        };
+
+        // Normalize but don't invert — floor becomes 0, ceil becomes 1
+        let nr = ((lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0])).clamp(0.0, 1.0);
+        let ng = ((lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1])).clamp(0.0, 1.0);
+        let nb = ((lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2])).clamp(0.0, 1.0);
+
+        // For E6, we DON'T invert — the normalized value IS the output
+        // Apply gamma correction (1/2.2) for display
+        chunk[0] = nr.powf(1.0 / 2.2);
+        chunk[1] = ng.powf(1.0 / 2.2);
+        chunk[2] = nb.powf(1.0 / 2.2);
+    }
+
+    // Write back
+    for (i, p) in img.pixels_mut().enumerate() {
+        let idx = i * 3;
+        p[0] = (pixels[idx] * 255.0).round() as u8;
+        p[1] = (pixels[idx + 1] * 255.0).round() as u8;
+        p[2] = (pixels[idx + 2] * 255.0).round() as u8;
+    }
+}
+
 // ─── Core logic ───────────────────────────────────────────────────────────────
 
-fn inner_generate(path: String, max_px: u32, quality: u8, invert: bool) -> Result<Vec<u8>, String> {
+fn inner_generate(path: String, max_px: u32, quality: u8, film_type: &str) -> Result<Vec<u8>, String> {
     // ── Decode ────────────────────────────────────────────────────────────────
     let img = image::open(&path).map_err(|e| format!("decode failed: {e}"))?;
 
@@ -333,15 +417,30 @@ fn inner_generate(path: String, max_px: u32, quality: u8, invert: bool) -> Resul
         img.resize(max_px, max_px, FilterType::Triangle)
     };
 
-    // ── Optional inversion (film negative → positive preview) ─────────────────
-    // Only apply for film negative scans (rolls). Digital library images
-    // should be output as-is.
-    let rgb = if invert {
-        let mut rgb = thumb.to_rgb8();
-        apply_quick_inversion(&mut rgb);
-        DynamicImage::from(rgb)
-    } else {
-        thumb
+    // ── Film processing based on type ─────────────────────────────────────────
+    let rgb = match film_type {
+        "C41" => {
+            // Color negative — full inversion + orange mask removal
+            let mut rgb = thumb.to_rgb8();
+            apply_quick_inversion(&mut rgb);
+            DynamicImage::from(rgb)
+        }
+        "BW" => {
+            // B&W negative — inversion + grayscale conversion
+            let mut rgb = thumb.to_rgb8();
+            apply_bw_inversion(&mut rgb);
+            DynamicImage::from(rgb)
+        }
+        "E6" => {
+            // Slide/reversal — no inversion, just normalize
+            let mut rgb = thumb.to_rgb8();
+            apply_e6_normalize(&mut rgb);
+            DynamicImage::from(rgb)
+        }
+        _ => {
+            // "none" or empty — no processing (digital photos / libraries)
+            thumb
+        }
     };
 
     // ── JPEG encode ───────────────────────────────────────────────────────────

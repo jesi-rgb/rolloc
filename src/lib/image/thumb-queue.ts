@@ -23,6 +23,7 @@ import { thumbCache } from './thumb-cache';
 import { thumbURL } from '$lib/fs/opfs';
 import { getThumbURL } from './thumbgen';
 import { join } from '@tauri-apps/api/path';
+import type { FilmType } from '$lib/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,8 +34,8 @@ interface QueueEntry {
 	/** Absolute path to the source file (preferred — no file bytes in JS heap). */
 	absolutePath: string;
 	priority: ThumbPriority;
-	/** If true, apply NegPy film-negative inversion (for rolls). */
-	invert: boolean;
+	/** Film processing mode for rolls. Null/undefined for libraries. */
+	filmType: FilmType | null;
 	resolve: (url: string) => void;
 	reject: (err: unknown) => void;
 }
@@ -105,7 +106,7 @@ function dequeueNext(): QueueEntry | undefined {
 }
 
 async function processEntry(entry: QueueEntry): Promise<void> {
-	const { imageId, absolutePath, invert, resolve, reject } = entry;
+	const { imageId, absolutePath, filmType, resolve, reject } = entry;
 	try {
 		// Layer 2: OPFS cache hit
 		const cachedUrl = await thumbURL(imageId);
@@ -123,7 +124,7 @@ async function processEntry(entry: QueueEntry): Promise<void> {
 		// Layer 3: generate from source (native Tauri path preferred)
 		thumbQueueProgress.generating++;
 		notifyProgress();
-		const url = await getThumbURL(imageId, { absolutePath }, invert);
+		const url = await getThumbURL(imageId, { absolutePath }, filmType);
 		thumbCache.set(imageId, url);
 		if (!_countedAsCached.has(imageId)) {
 			_countedAsCached.add(imageId);
@@ -165,14 +166,17 @@ function maybeSpawnWorker(): void {
  * @param imageId      Unique image identifier.
  * @param absolutePath Absolute filesystem path to the source image.
  * @param priority     "high" for viewport-visible items, "low" for prefetch.
- * @param invert       If true, apply NegPy film-negative inversion (for rolls).
- *                     If false (default), output a straight downsample (for libraries).
+ * @param filmType     Film processing mode for rolls:
+ *                     - 'C41' — color negative (inversion + orange mask removal)
+ *                     - 'BW'  — B&W negative (inversion + grayscale)
+ *                     - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                     - null/undefined — no processing (for libraries)
  */
 export function requestThumb(
 	imageId: string,
 	absolutePath: string,
 	priority: ThumbPriority = 'high',
-	invert: boolean = false,
+	filmType: FilmType | null = null,
 ): Promise<string> {
 	// Layer 1: module-level cache — synchronous
 	const cached = thumbCache.get(imageId);
@@ -185,7 +189,7 @@ export function requestThumb(
 	if (existing) return existing;
 
 	const promise = new Promise<string>((resolve, reject) => {
-		queue.push({ imageId, absolutePath, priority, invert, resolve, reject });
+		queue.push({ imageId, absolutePath, priority, filmType, resolve, reject });
 		// Only increment total if this ID was not pre-counted by initThumbQueueForLibrary.
 		if (!_initialisedIds.has(imageId)) {
 			thumbQueueProgress.total++;
@@ -278,15 +282,18 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
  * Safe to call multiple times — `requestThumb` deduplicates in-flight requests
  * and the module-level cache prevents redundant work.
  *
- * @param images  Array of `{ id, relativePath }` — the library images.
- * @param dirPath Absolute directory path.
- * @param invert  If true, apply NegPy film-negative inversion (for rolls).
- *                If false (default), output a straight downsample (for libraries).
+ * @param images   Array of `{ id, relativePath, filmType? }` — the images.
+ * @param dirPath  Absolute directory path.
+ * @param filmType Default film processing mode for all images (can be overridden per-image).
+ *                 - 'C41' — color negative (inversion + orange mask removal)
+ *                 - 'BW'  — B&W negative (inversion + grayscale)
+ *                 - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                 - null/undefined — no processing (for libraries)
  */
 export async function prefetchThumbs(
-	images: Array<{ id: string; relativePath: string }>,
+	images: Array<{ id: string; relativePath: string; filmType?: FilmType | null }>,
 	dirPath: string,
-	invert: boolean = false,
+	filmType: FilmType | null = null,
 ): Promise<void> {
 	const READ_CONCURRENCY = 4;
 
@@ -303,7 +310,8 @@ export async function prefetchThumbs(
 
 				try {
 					const absolutePath = await join(dirPath, image.relativePath);
-					void requestThumb(image.id, absolutePath, 'low', invert);
+					// Per-image filmType overrides the default if provided
+					void requestThumb(image.id, absolutePath, 'low', image.filmType ?? filmType);
 				} catch (err) {
 					console.error(`[prefetchThumbs] Failed to build path for ${image.relativePath}:`, err);
 				}

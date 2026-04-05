@@ -13,7 +13,8 @@
 	import { page } from "$app/state";
 	import { getRoll, getRollPath } from "$lib/db/rolls";
 	import { getFrames, putFrame } from "$lib/db/idb";
-	import type { Roll, Frame, FrameFlag } from "$lib/types";
+	import type { Roll, Frame, FrameFlag, FilmType } from "$lib/types";
+	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
@@ -81,12 +82,15 @@
 		// Kick off background generation for all frames immediately.
 		// Uses the worker pool so it runs off the main thread; high-priority
 		// requests from IntersectionObserver (FrameThumb) will jump the queue.
-		// Pass invert=true since rolls contain film negatives.
+		// Pass each frame's film type for correct processing.
 		if (dirPath && frames.length > 0) {
 			void prefetchThumbs(
-				frames.map((f) => ({ id: f.id, relativePath: f.filename })),
+				frames.map((f) => ({
+					id: f.id,
+					relativePath: f.filename,
+					filmType: f.frameEdit.inversionParams?.filmType ?? DEFAULT_INVERSION_PARAMS.filmType,
+				})),
 				dirPath,
-				true,
 			);
 		}
 	});

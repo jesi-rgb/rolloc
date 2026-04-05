@@ -29,6 +29,7 @@ import {
 } from '$lib/image/exif-orientation';
 import { isRawExtension } from '$lib/fs/directory';
 import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
+import type { FilmType } from '$lib/types';
 
 export const THUMB_SIZE   = 300;
 export const PREVIEW_SIZE = 1200;
@@ -50,15 +51,22 @@ function isTauri(): boolean {
  *
  * @param absolutePath Absolute path to the source image.
  * @param maxPx        Maximum pixel count on the long edge.
- * @param invert       If true, apply NegPy film-negative inversion (for rolls).
- *                     If false, output a straight downsample (for libraries).
+ * @param filmType     Film processing mode:
+ *                     - 'C41' — color negative (inversion + orange mask removal)
+ *                     - 'BW'  — B&W negative (inversion + grayscale)
+ *                     - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                     - undefined/null — no processing (for libraries)
  */
-async function generateThumbNative(absolutePath: string, maxPx: number, invert: boolean): Promise<Blob> {
+async function generateThumbNative(
+	absolutePath: string,
+	maxPx: number,
+	filmType?: FilmType | null,
+): Promise<Blob> {
 	const buf = await invoke<ArrayBuffer>('generate_thumb', {
-		path:    absolutePath,
+		path:     absolutePath,
 		maxPx,
-		quality: Math.round(JPEG_QUALITY * 100),
-		invert,
+		quality:  Math.round(JPEG_QUALITY * 100),
+		filmType: filmType ?? '',
 	});
 	return new Blob([buf], { type: 'image/jpeg' });
 }
@@ -265,15 +273,18 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
  * cross the IPC boundary.  Falls back to blob-based generation when a file
  * is provided instead.
  *
- * @param frameId Unique identifier for the frame/image.
- * @param source  Path or File to the source image.
- * @param invert  If true, apply NegPy film-negative inversion (for rolls).
- *                If false (default), output a straight downsample (for libraries).
+ * @param frameId  Unique identifier for the frame/image.
+ * @param source   Path or File to the source image.
+ * @param filmType Film processing mode:
+ *                 - 'C41' — color negative (inversion + orange mask removal)
+ *                 - 'BW'  — B&W negative (inversion + grayscale)
+ *                 - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                 - undefined/null — no processing (for libraries)
  */
 export async function ensureThumb(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
-	invert: boolean = false,
+	filmType?: FilmType | null,
 ): Promise<Blob> {
 	const existing = await readThumb(frameId);
 	if (existing) return existing;
@@ -284,7 +295,7 @@ export async function ensureThumb(
 		if (isRawExtension(source.absolutePath)) {
 			blob = await generateRawThumbNative(source.absolutePath, THUMB_SIZE);
 		} else {
-			blob = await generateThumbNative(source.absolutePath, THUMB_SIZE, invert);
+			blob = await generateThumbNative(source.absolutePath, THUMB_SIZE, filmType);
 		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
@@ -299,15 +310,18 @@ export async function ensureThumb(
  * Generates and caches a full preview for a frame.
  * No-ops if a preview is already cached.
  *
- * @param frameId Unique identifier for the frame/image.
- * @param source  Path or File to the source image.
- * @param invert  If true, apply NegPy film-negative inversion (for rolls).
- *                If false (default), output a straight downsample (for libraries).
+ * @param frameId  Unique identifier for the frame/image.
+ * @param source   Path or File to the source image.
+ * @param filmType Film processing mode:
+ *                 - 'C41' — color negative (inversion + orange mask removal)
+ *                 - 'BW'  — B&W negative (inversion + grayscale)
+ *                 - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                 - undefined/null — no processing (for libraries)
  */
 export async function ensurePreview(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
-	invert: boolean = false,
+	filmType?: FilmType | null,
 ): Promise<Blob> {
 	const existing = await readPreview(frameId);
 	if (existing) return existing;
@@ -318,7 +332,7 @@ export async function ensurePreview(
 		if (isRawExtension(source.absolutePath)) {
 			blob = await generateRawThumbNative(source.absolutePath, PREVIEW_SIZE);
 		} else {
-			blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE, invert);
+			blob = await generateThumbNative(source.absolutePath, PREVIEW_SIZE, filmType);
 		}
 	} else {
 		const file = 'file' in source ? source.file : (() => { throw new Error('no source'); })();
@@ -334,17 +348,20 @@ export async function ensurePreview(
  * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
  *
- * @param frameId Unique identifier for the frame/image.
- * @param source  Path or File to the source image.
- * @param invert  If true, apply NegPy film-negative inversion (for rolls).
- *                If false (default), output a straight downsample (for libraries).
+ * @param frameId  Unique identifier for the frame/image.
+ * @param source   Path or File to the source image.
+ * @param filmType Film processing mode:
+ *                 - 'C41' — color negative (inversion + orange mask removal)
+ *                 - 'BW'  — B&W negative (inversion + grayscale)
+ *                 - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                 - undefined/null — no processing (for libraries)
  */
 export async function getThumbURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
-	invert: boolean = false,
+	filmType?: FilmType | null,
 ): Promise<string> {
-	const blob = await ensureThumb(frameId, source, invert);
+	const blob = await ensureThumb(frameId, source, filmType);
 	return URL.createObjectURL(blob);
 }
 
@@ -353,17 +370,20 @@ export async function getThumbURL(
  * Accepts either an absolute path (preferred, native Tauri) or a File object.
  * Caller must call URL.revokeObjectURL() when done.
  *
- * @param frameId Unique identifier for the frame/image.
- * @param source  Path or File to the source image.
- * @param invert  If true, apply NegPy film-negative inversion (for rolls).
- *                If false (default), output a straight downsample (for libraries).
+ * @param frameId  Unique identifier for the frame/image.
+ * @param source   Path or File to the source image.
+ * @param filmType Film processing mode:
+ *                 - 'C41' — color negative (inversion + orange mask removal)
+ *                 - 'BW'  — B&W negative (inversion + grayscale)
+ *                 - 'E6'  — slide/reversal (normalize only, no inversion)
+ *                 - undefined/null — no processing (for libraries)
  */
 export async function getPreviewURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
-	invert: boolean = false,
+	filmType?: FilmType | null,
 ): Promise<string> {
-	const blob = await ensurePreview(frameId, source, invert);
+	const blob = await ensurePreview(frameId, source, filmType);
 	return URL.createObjectURL(blob);
 }
 

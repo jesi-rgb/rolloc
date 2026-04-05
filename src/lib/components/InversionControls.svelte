@@ -3,6 +3,9 @@
 	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
+	import ColorFilmButton from "./ColorFilmButton.svelte";
+	import BlackWhiteFilmButton from "./BlackWhiteFilmButton.svelte";
+	import SlideFilmButton from "./SlideFilmButton.svelte";
 
 	interface Props {
 		value: InversionParams;
@@ -178,46 +181,28 @@
 		>
 			Film type
 		</h4>
-		<div class="flex gap-xs">
-			<button
-				type="button"
+		<div class="flex gap-sm">
+			<ColorFilmButton
+				selected={filmType === "C41"}
 				onclick={() => {
 					filmType = "C41";
 					commit();
 				}}
-				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
-					{filmType === 'C41'
-					? 'bg-accent text-white'
-					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
-			>
-				C-41
-			</button>
-			<button
-				type="button"
+			/>
+			<BlackWhiteFilmButton
+				selected={filmType === "BW"}
 				onclick={() => {
 					filmType = "BW";
 					commit();
 				}}
-				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
-					{filmType === 'BW'
-					? 'bg-accent text-white'
-					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
-			>
-				B&W
-			</button>
-			<button
-				type="button"
+			/>
+			<SlideFilmButton
+				selected={filmType === "E6"}
 				onclick={() => {
 					filmType = "E6";
 					commit();
 				}}
-				class="flex-1 px-sm py-xs text-xs font-medium rounded transition
-					{filmType === 'E6'
-					? 'bg-accent text-white'
-					: 'bg-base-subtle text-content-subtle hover:bg-base-emphasis hover:text-content'}"
-			>
-				E-6
-			</button>
+			/>
 		</div>
 		{#if filmType === "E6"}
 			<label

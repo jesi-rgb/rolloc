@@ -9,7 +9,8 @@
 	import { StarIcon } from "phosphor-svelte";
 	import { requestThumb } from "$lib/image/thumb-queue";
 	import { join } from "@tauri-apps/api/path";
-	import type { Frame } from "$lib/types";
+	import type { Frame, FilmType } from "$lib/types";
+	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
 
 	interface Props {
 		frame: Frame;
@@ -19,6 +20,15 @@
 	}
 
 	let { frame, dirPath, selected = false, onSelect }: Props = $props();
+
+	/**
+	 * Get the film type for this frame.
+	 * Uses the frame's inversionParams if set, otherwise defaults to C41.
+	 */
+	function getFilmType(): FilmType {
+		return frame.frameEdit.inversionParams?.filmType
+			?? DEFAULT_INVERSION_PARAMS.filmType;
+	}
 
 	type ThumbStatus = "idle" | "loading" | "ready" | "error";
 	let status = $state<ThumbStatus>("idle");
@@ -57,8 +67,8 @@
 			const absolutePath = await join(dirPath, frame.filename);
 			// requestThumb routes through the worker pool + LRU cache.
 			// The cache owns the object URL — do NOT revoke it here.
-			// Pass invert=true since rolls contain film negatives.
-			const objUrl = await requestThumb(frame.id, absolutePath, "high", true);
+			// Pass the frame's film type for correct processing.
+			const objUrl = await requestThumb(frame.id, absolutePath, "high", getFilmType());
 			url = objUrl;
 			status = "ready";
 		} catch {
