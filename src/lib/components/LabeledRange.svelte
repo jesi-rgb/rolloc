@@ -139,21 +139,26 @@
 		height: 0.5rem;
 		border-radius: 9999px;
 		background-color: var(--thumb-color, var(--primary));
-		box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+		/* Stroke behind via box-shadow (expands outward) */
+		box-shadow: 0 0 0 0 var(--color-base);
 		/* Center thumb on track */
 		margin-top: calc((0.5rem - 0.5rem) / 2);
 		cursor: pointer;
-		/* Smooth scale transitions */
-		transition: transform 150ms ease-out;
+		/* Smooth transitions */
+		transition:
+			transform 150ms ease-out,
+			box-shadow 150ms ease-out;
 		transform: scale(1);
 	}
 
 	.range-track:hover::-webkit-slider-thumb {
 		transform: scale(1.15);
+		box-shadow: 0 0 0 3px var(--color-base);
 	}
 
 	.range-track:active::-webkit-slider-thumb {
-		transform: scale(0.95);
+		transform: scale(1.15);
+		box-shadow: 0 0 0 3px var(--color-base);
 	}
 
 	/* Firefox */
@@ -169,19 +174,24 @@
 		height: 0.5rem;
 		border-radius: 9999px;
 		background-color: var(--thumb-color, var(--primary));
-		box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5);
+		/* Stroke behind via box-shadow (expands outward) */
+		box-shadow: 0 0 0 0 var(--color-base);
 		border: none;
 		cursor: pointer;
-		/* Smooth scale transitions */
-		transition: transform 150ms ease-out;
+		/* Smooth transitions */
+		transition:
+			transform 150ms ease-out,
+			box-shadow 150ms ease-out;
 		transform: scale(1);
 	}
 
 	.range-track:hover::-moz-range-thumb {
 		transform: scale(1.15);
+		box-shadow: 0 0 0 3px var(--color-base);
 	}
 
 	.range-track:active::-moz-range-thumb {
-		transform: scale(0.95);
+		transform: scale(1.15);
+		box-shadow: 0 0 0 3px var(--color-base);
 	}
 </style>
