@@ -96,6 +96,8 @@
 	/** Original image dimensions (before any transforms). */
 	let originalWidth = $state(1);
 	let originalHeight = $state(1);
+	/** Histogram data from the last render (for curves editor visualization). */
+	let currentHistogram = $state<import('$lib/image/pipeline').ChannelHistograms | null>(null);
 
 	// ─── Pipeline init (once, on mount) ───────────────────────────────────────
 
@@ -376,7 +378,10 @@
 				"[frame] renderFrame: RAW path, byteLength =",
 				currentRawBuffer.byteLength,
 			);
-			pipeline.renderRaw(edit, currentRawBuffer).catch((err: unknown) => {
+			pipeline.renderRaw(edit, currentRawBuffer).then(() => {
+				// Capture histogram from lastLogPerc after render completes
+				currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+			}).catch((err: unknown) => {
 				console.error("[frame] renderRaw error:", err);
 				renderError = err instanceof Error ? err.message : String(err);
 			});
@@ -387,7 +392,10 @@
 				"x",
 				currentBitmap.height,
 			);
-			pipeline.render(edit, currentBitmap).catch((err: unknown) => {
+			pipeline.render(edit, currentBitmap).then(() => {
+				// Capture histogram from lastLogPerc after render completes
+				currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+			}).catch((err: unknown) => {
 				console.error("[frame] render error:", err);
 				renderError = err instanceof Error ? err.message : String(err);
 			});
@@ -1255,8 +1263,11 @@
 		<div
 			class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
 		>
-			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping -->
-			<div class="relative">
+			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
+			     w-full h-full + max-w-fit max-h-fit ensures the wrapper takes the full available
+			     space while shrinking to fit the canvas, allowing max-w-full/max-h-full on the
+			     canvas to reference the actual container dimensions. -->
+			<div class="relative w-full h-full max-w-fit max-h-fit flex items-center justify-center">
 				<canvas
 					bind:this={canvasEl}
 					onclick={handleWbPickerClick}
@@ -1558,6 +1569,7 @@
 							b={effectiveRGBCurves[2]}
 							onChange={onCurveChange}
 							onCommit={onCurveCommit}
+							histogram={currentHistogram}
 						/>
 					</section>
 

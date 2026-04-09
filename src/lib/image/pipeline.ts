@@ -124,6 +124,195 @@ const AUTO_LEVELS_BINS = 256;
 const AUTO_LEVELS_CUMULATIVE_PERCENT = 0.001;
 
 /**
+ * Number of bins for histogram valley detection.
+ */
+const VALLEY_HISTOGRAM_BINS = 256;
+
+/**
+ * Fraction of peak count to consider as "valley" threshold.
+ * When scanning backward from the rebate spike, we look for bins
+ * where the count drops below this fraction of the peak.
+ * Lower = more conservative (only very clear valleys trigger).
+ */
+const VALLEY_THRESHOLD = 0.02;
+
+/**
+ * Minimum fraction of total pixels that must be in the bright region
+ * for us to consider it a rebate spike worth detecting.
+ * If less than this, we assume no rebate and use percentile fallback.
+ * Higher = more conservative (needs more obvious rebate).
+ */
+const REBATE_MIN_FRACTION = 0.05;
+
+/**
+ * The rebate peak must be this many times larger than the median bin count
+ * in the image region to be considered a true rebate spike.
+ * This prevents false positives from normal highlight distributions.
+ */
+const REBATE_PEAK_RATIO = 3.0;
+
+/**
+ * Result from histogram valley detection.
+ */
+interface ValleyResult {
+	/** The log-density value at the detected valley (use as white point). */
+	valleyValue: number;
+	/** The log-density value at the peak (rebate region). */
+	peakValue: number;
+	/** Whether a significant rebate spike was detected. */
+	rebateDetected: boolean;
+}
+
+/**
+ * Find the "valley" in a histogram — the point where the rebate spike ends
+ * and actual image data begins.
+ *
+ * For film negatives, the rebate (orange border) appears as a massive spike
+ * at the bright end of the histogram. The actual image data forms a separate
+ * distribution with a valley between it and the rebate.
+ *
+ * This function scans from the bright end looking for where the spike "ends"
+ * by detecting either:
+ * 1. A significant drop in bin count (below VALLEY_THRESHOLD * peakCount)
+ * 2. A local minimum (bin count lower than both neighbors)
+ *
+ * The detection is conservative — it only triggers when there's a clear,
+ * obvious rebate spike that's significantly larger than normal image data.
+ *
+ * @param values - Array of log-density values for one channel
+ * @param channelName - Channel name for debug logging
+ * @returns Valley detection result with value and metadata
+ */
+function findHistogramValley(
+	values: number[],
+	channelName: string,
+): ValleyResult {
+	if (values.length === 0) {
+		return { valleyValue: 0, peakValue: 0, rebateDetected: false };
+	}
+
+	// Get range from sorted values
+	const sorted = values.slice().sort((a, b) => a - b);
+	const minVal = sorted[0];
+	const maxVal = sorted[sorted.length - 1];
+	const range = maxVal - minVal;
+
+	// Fallback percentile value (99.9th)
+	const fallbackIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
+	const fallbackValue = sorted[Math.min(sorted.length - 1, fallbackIdx)];
+
+	if (range < 0.001) {
+		return { valleyValue: fallbackValue, peakValue: fallbackValue, rebateDetected: false };
+	}
+
+	// Build histogram
+	const numBins = VALLEY_HISTOGRAM_BINS;
+	const binWidth = range / numBins;
+	const histogram = new Uint32Array(numBins);
+
+	for (const v of values) {
+		const bin = Math.min(numBins - 1, Math.floor((v - minVal) / binWidth));
+		histogram[bin]++;
+	}
+
+	// Compute median bin count for the lower 75% (image region, not rebate)
+	const imageRegionEnd = Math.floor(numBins * 0.75);
+	const imageRegionBins = Array.from(histogram.slice(0, imageRegionEnd)).sort((a, b) => a - b);
+	const medianImageBinCount = imageRegionBins[Math.floor(imageRegionBins.length / 2)];
+
+	// Find the peak in the upper portion (likely rebate).
+	// Look at the top 15% of the histogram range (more focused on the extreme).
+	const searchStart = Math.floor(numBins * 0.85);
+	let peakBin = searchStart;
+	let peakCount = histogram[searchStart];
+
+	for (let i = searchStart; i < numBins; i++) {
+		if (histogram[i] > peakCount) {
+			peakCount = histogram[i];
+			peakBin = i;
+		}
+	}
+
+	const totalPixels = values.length;
+	const peakValue = minVal + (peakBin + 0.5) * binWidth;
+
+	// Check if there's a significant rebate spike using multiple criteria:
+	// 1. Peak must contain at least REBATE_MIN_FRACTION of total pixels
+	// 2. Peak must be REBATE_PEAK_RATIO times larger than median image bin
+	const hasEnoughPixels = peakCount >= totalPixels * REBATE_MIN_FRACTION;
+	const isSignificantSpike = peakCount > medianImageBinCount * REBATE_PEAK_RATIO;
+
+	if (!hasEnoughPixels || !isSignificantSpike) {
+		console.debug(
+			`[valley] ${channelName}: no rebate spike ` +
+			`(peak=${peakCount}, needed=${Math.floor(totalPixels * REBATE_MIN_FRACTION)} pixels, ` +
+			`ratio=${(peakCount / Math.max(1, medianImageBinCount)).toFixed(1)}x, needed=${REBATE_PEAK_RATIO}x)`
+		);
+		return { valleyValue: fallbackValue, peakValue, rebateDetected: false };
+	}
+
+	// Scan backward from the peak looking for the valley.
+	// Valley = where count drops below threshold * peakCount, OR a local minimum.
+	const threshold = peakCount * VALLEY_THRESHOLD;
+	let valleyBin = peakBin;
+	let foundValley = false;
+
+	for (let i = peakBin - 1; i >= 1; i--) {
+		// Check for significant drop below threshold
+		if (histogram[i] < threshold) {
+			valleyBin = i;
+			foundValley = true;
+			break;
+		}
+		// Check for local minimum (count lower than both neighbors)
+		// This catches cases where there's a clear dip between distributions
+		if (histogram[i] < histogram[i - 1] && histogram[i] < histogram[i + 1]) {
+			// Verify it's actually a meaningful minimum (not just noise)
+			// Must be significantly lower than the peak
+			if (histogram[i] < peakCount * 0.1) {
+				valleyBin = i;
+				foundValley = true;
+				break;
+			}
+		}
+	}
+
+	if (!foundValley) {
+		// No valley found — rebate and image data may overlap
+		// Don't filter anything, fall back to percentile
+		console.debug(`[valley] ${channelName}: rebate detected but no clear valley, using percentile fallback`);
+		return { valleyValue: fallbackValue, peakValue, rebateDetected: false };
+	}
+
+	const valleyValue = minVal + (valleyBin + 0.5) * binWidth;
+
+	console.debug(
+		`[valley] ${channelName}: peak@bin${peakBin}(${peakValue.toFixed(4)}, n=${peakCount}), ` +
+		`valley@bin${valleyBin}(${valleyValue.toFixed(4)}), range=[${minVal.toFixed(4)}, ${maxVal.toFixed(4)}], ` +
+		`peakRatio=${(peakCount / Math.max(1, medianImageBinCount)).toFixed(1)}x`
+	);
+
+	return { valleyValue, peakValue, rebateDetected: true };
+}
+
+/**
+ * Per-channel histogram data for visualization.
+ * Each array contains bin counts normalized to [0, 1] where 1 = max bin count.
+ * The histograms are computed in log-density space, then mapped to normalized
+ * [0, 1] output space for display in the curves editor.
+ */
+export interface ChannelHistograms {
+	/** Red channel histogram bins (256 values, normalized 0-1). */
+	r: Float32Array;
+	/** Green channel histogram bins (256 values, normalized 0-1). */
+	g: Float32Array;
+	/** Blue channel histogram bins (256 values, normalized 0-1). */
+	b: Float32Array;
+	/** Luminance histogram bins (256 values, normalized 0-1). */
+	luma: Float32Array;
+}
+
+/**
  * Per-channel log-density floor/ceil for the normalization shader.
  * The normalization pass does: normalized = (log10(pixel) - floor) / (ceil - floor)
  * For C-41 negatives: floor ≈ 0.5th percentile, ceil ≈ 99.5th percentile.
@@ -139,18 +328,28 @@ export interface LogPercentiles {
 	 * Computed from the median luminance relative to middle gray.
 	 */
 	autoExposure: number;
+	/**
+	 * Per-channel histograms for visualization in the curves editor.
+	 * Values are in normalized output space [0, 1] after floor/ceil mapping.
+	 */
+	histograms?: ChannelHistograms;
 }
 
 /**
  * Compute per-channel histogram-based floors AND ceils for auto-levels mode.
  *
- * This implements the "Levels" technique from Photoshop: for each channel,
- * build a histogram of log-density values and find where the "real" data 
- * begins AND ends, ignoring sparse outliers at both edges.
+ * This implements an enhanced "Levels" technique inspired by Photoshop:
+ * - **Floors (black point)**: Standard percentile-based detection (0.1%)
+ * - **Ceils (white point)**: Percentile computed AFTER excluding rebate pixels
  *
- * The technique removes color casts and improves exposure automatically because
- * each channel is independently stretched to use the full range. For film 
- * negatives, this means the orange mask is removed and the image is well-exposed.
+ * For film negatives, the rebate (orange border) creates a massive spike at the
+ * bright end of the histogram. We detect the "valley" between image data and
+ * rebate, then compute the white point percentile only on pixels BELOW the valley
+ * (i.e., actual image content, excluding the rebate).
+ *
+ * This removes color casts and improves exposure automatically because each
+ * channel is independently stretched to use the full range, with the rebate
+ * properly excluded from the calculation.
  *
  * @param rLog - Array of log10 red channel values
  * @param gLog - Array of log10 green channel values
@@ -174,43 +373,82 @@ function computeAutoLevelsFloorsAndCeils(
 	const isE6 = filmType === 'E6';
 
 	/**
-	 * Find the floor and ceil values for a single channel using cumulative histogram.
-	 * Floor: where AUTO_LEVELS_CUMULATIVE_PERCENT of pixels are below
-	 * Ceil: where (1 - AUTO_LEVELS_CUMULATIVE_PERCENT) of pixels are below
+	 * Find the floor value for a single channel using low percentile.
+	 * Floor: where AUTO_LEVELS_CUMULATIVE_PERCENT of pixels are below (0.1%)
 	 */
-	function findHistogramBounds(values: number[], channelName: string): { floor: number; ceil: number } {
-		if (values.length === 0) return { floor: -1, ceil: 0 };
+	function findFloor(values: number[], channelName: string): number {
+		if (values.length === 0) return -1;
 
-		// Sort values for percentile calculation
 		const sorted = values.slice().sort((a, b) => a - b);
-		
-		// Find floor (low percentile) and ceil (high percentile)
 		const lowIdx = Math.floor(sorted.length * AUTO_LEVELS_CUMULATIVE_PERCENT);
-		const highIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
-		
 		const floor = sorted[Math.max(0, lowIdx)];
-		const ceil = sorted[Math.min(sorted.length - 1, highIdx)];
 
-		console.debug(`[autoLevels] ${channelName}: range=[${sorted[0].toFixed(3)}, ${sorted[sorted.length-1].toFixed(3)}], floor=${floor.toFixed(4)} (@${lowIdx}), ceil=${ceil.toFixed(4)} (@${highIdx})`);
-		
-		return { floor, ceil };
+		console.debug(`[autoLevels] ${channelName} floor: ${floor.toFixed(4)} (@${lowIdx}/${sorted.length})`);
+		return floor;
 	}
 
-	const rBounds = findHistogramBounds(rLog, 'R');
-	const gBounds = findHistogramBounds(gLog, 'G');
-	const bBounds = findHistogramBounds(bLog, 'B');
+	/**
+	 * Find the ceil value for a single channel, excluding rebate pixels.
+	 * 
+	 * 1. Detect the valley (boundary between image and rebate)
+	 * 2. Filter out pixels above the valley (rebate)
+	 * 3. Compute the high percentile on remaining pixels (actual image content)
+	 */
+	function findCeilExcludingRebate(values: number[], channelName: string): number {
+		if (values.length === 0) return 0;
+
+		// Detect valley to find rebate boundary
+		const valley = findHistogramValley(values, channelName);
+
+		let filteredValues: number[];
+		if (valley.rebateDetected) {
+			// Filter out pixels above the valley (rebate region)
+			filteredValues = values.filter(v => v <= valley.valleyValue);
+			console.debug(`[autoLevels] ${channelName}: filtered ${values.length - filteredValues.length} rebate pixels (${((values.length - filteredValues.length) / values.length * 100).toFixed(1)}%)`);
+		} else {
+			// No rebate detected, use all pixels
+			filteredValues = values;
+		}
+
+		if (filteredValues.length === 0) {
+			// Edge case: all pixels were filtered (shouldn't happen)
+			console.warn(`[autoLevels] ${channelName}: all pixels filtered as rebate, falling back`);
+			filteredValues = values;
+		}
+
+		// Compute high percentile on the filtered (non-rebate) pixels
+		const sorted = filteredValues.slice().sort((a, b) => a - b);
+		const highIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
+		const ceil = sorted[Math.min(sorted.length - 1, highIdx)];
+
+		console.debug(`[autoLevels] ${channelName} ceil: ${ceil.toFixed(4)} (@${highIdx}/${sorted.length} after rebate exclusion)`);
+		return ceil;
+	}
+
+	// Compute floors using percentile method
+	const rFloor = findFloor(rLog, 'R');
+	const gFloor = findFloor(gLog, 'G');
+	const bFloor = findFloor(bLog, 'B');
+
+	// Compute ceils using percentile AFTER excluding rebate pixels
+	const rCeil = findCeilExcludingRebate(rLog, 'R');
+	const gCeil = findCeilExcludingRebate(gLog, 'G');
+	const bCeil = findCeilExcludingRebate(bLog, 'B');
 
 	// For E6 (positive/slide film), swap floor and ceil semantics
+	// E6 has dark rebate (unexposed film base) instead of bright orange rebate
 	if (isE6) {
+		// For E6, the rebate is at the DARK end, so we'd need inverse logic
+		// For now, just swap the computed values (may need refinement for E6)
 		return {
-			floors: [rBounds.ceil, gBounds.ceil, bBounds.ceil],
-			ceils: [rBounds.floor, gBounds.floor, bBounds.floor],
+			floors: [rCeil, gCeil, bCeil],
+			ceils: [rFloor, gFloor, bFloor],
 		};
 	}
 
 	return {
-		floors: [rBounds.floor, gBounds.floor, bBounds.floor],
-		ceils: [rBounds.ceil, gBounds.ceil, bBounds.ceil],
+		floors: [rFloor, gFloor, bFloor],
+		ceils: [rCeil, gCeil, bCeil],
 	};
 }
 
@@ -402,10 +640,66 @@ function computeLogPercentilesFromF32(
 		`R=${normMedianR.toFixed(3)}, G=${normMedianG.toFixed(3)}, B=${normMedianB.toFixed(3)}, avg=${avgNormMedian.toFixed(3)}`);
 	console.debug('[autoExposure] correction:', autoExposure.toFixed(3), 'density units');
 
+	// ── Build histograms for visualization ───────────────────────────────────
+	// Histograms are computed in normalized output space [0, 1] after floor/ceil mapping.
+	// This shows what the image will look like after the normalization pass.
+	const HIST_BINS = 256;
+	const histR = new Uint32Array(HIST_BINS);
+	const histG = new Uint32Array(HIST_BINS);
+	const histB = new Uint32Array(HIST_BINS);
+	const histLuma = new Uint32Array(HIST_BINS);
+
+	for (let i = 0; i < rLog.length; i++) {
+		// Normalize log values to [0, 1] using floors and ceils
+		const normR = rangeR > 0.001 ? (rLog[i] - floors[0]) / rangeR : 0.5;
+		const normG = rangeG > 0.001 ? (gLog[i] - floors[1]) / rangeG : 0.5;
+		const normB = rangeB > 0.001 ? (bLog[i] - floors[2]) / rangeB : 0.5;
+		
+		// Clamp to [0, 1] and map to bin index
+		const binR = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normR)) * (HIST_BINS - 1))));
+		const binG = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normG)) * (HIST_BINS - 1))));
+		const binB = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normB)) * (HIST_BINS - 1))));
+		
+		histR[binR]++;
+		histG[binG]++;
+		histB[binB]++;
+		
+		// Luminance using standard weights
+		const luma = 0.2126 * normR + 0.7152 * normG + 0.0722 * normB;
+		const binLuma = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, luma)) * (HIST_BINS - 1))));
+		histLuma[binLuma]++;
+	}
+
+	// Normalize histograms to [0, 1] range (relative to max bin count)
+	// Use a logarithmic scale to make small peaks visible alongside large ones
+	function normalizeHistogram(hist: Uint32Array): Float32Array {
+		const result = new Float32Array(HIST_BINS);
+		let maxCount = 0;
+		for (let i = 0; i < HIST_BINS; i++) {
+			if (hist[i] > maxCount) maxCount = hist[i];
+		}
+		if (maxCount > 0) {
+			// Use log scale: log(1 + count) / log(1 + maxCount)
+			const logMax = Math.log(1 + maxCount);
+			for (let i = 0; i < HIST_BINS; i++) {
+				result[i] = Math.log(1 + hist[i]) / logMax;
+			}
+		}
+		return result;
+	}
+
+	const histograms: ChannelHistograms = {
+		r: normalizeHistogram(histR),
+		g: normalizeHistogram(histG),
+		b: normalizeHistogram(histB),
+		luma: normalizeHistogram(histLuma),
+	};
+
 	return {
 		floors,
 		ceils,
 		autoExposure,
+		histograms,
 	};
 }
 
