@@ -130,21 +130,26 @@ function sobelEdgeDetect(
 // ─── Hough Transform ──────────────────────────────────────────────────────────
 
 interface HoughResult {
-	accumulator: Uint32Array;
+	accumulator: Float32Array;  // Changed to float for weighted votes
 	thetas: Float32Array;  // Actual theta values in radians
 	numTheta: number;
 	numRho: number;
 	rhoMax: number;
+	width: number;
+	height: number;
 }
 
 /**
- * Hough Transform for line detection.
+ * Hough Transform for line detection with position weighting.
  *
  * Line parameterization: ρ = x·cos(θ) + y·sin(θ)
  * where θ is the angle of the line's normal vector from the x-axis.
  *
  * For a horizontal line (normal points up), θ = 90° (π/2)
  * For a vertical line (normal points right), θ = 0°
+ *
+ * Position weighting: pixels in the middle third (vertically) of the image
+ * get higher weight, as horizons typically appear there.
  */
 function houghTransform(
 	magnitude: Float32Array,
@@ -153,29 +158,24 @@ function houghTransform(
 	threshold: number,
 	angleRange: number,
 ): HoughResult {
-	// θ resolution: 1° steps
-	const thetaStep = Math.PI / 180;
+	// θ resolution: 0.5° steps for better precision
+	const thetaStep = 0.5 * Math.PI / 180;
 	
 	// We want to detect lines that are nearly horizontal or nearly vertical.
 	// Horizontal lines: θ near 90° (normal points up/down)
 	// Vertical lines: θ near 0° or 180° (normal points left/right)
-	//
-	// Build array of thetas to test:
-	// - Around 90° ± angleRange for horizontal
-	// - Around 0° ± angleRange for vertical
-	// - Around 180° ± angleRange for vertical (same as 0° but opposite rho sign)
 	
 	const thetas: number[] = [];
 	
-	// Horizontal range: 90° - range to 90° + range
-	for (let deg = 90 - angleRange; deg <= 90 + angleRange; deg++) {
+	// Horizontal range: 90° - range to 90° + range (0.5° steps)
+	for (let deg = 90 - angleRange; deg <= 90 + angleRange; deg += 0.5) {
 		thetas.push(deg * Math.PI / 180);
 	}
 	
-	// Vertical range: 0° to range, and 180° - range to 180°
-	for (let deg = -angleRange; deg <= angleRange; deg++) {
+	// Vertical range: -range to +range (0.5° steps)
+	for (let deg = -angleRange; deg <= angleRange; deg += 0.5) {
 		const theta = deg * Math.PI / 180;
-		// Avoid duplicates (0° is included in both ranges potentially)
+		// Avoid duplicates
 		if (!thetas.some(t => Math.abs(t - theta) < 0.001)) {
 			thetas.push(theta);
 		}
@@ -189,7 +189,8 @@ function houghTransform(
 	const rhoStep = 1;
 	const numRho = Math.ceil(2 * rhoMax / rhoStep) + 1;
 
-	const accumulator = new Uint32Array(numTheta * numRho);
+	// Use Float32Array for weighted accumulator
+	const accumulator = new Float32Array(numTheta * numRho);
 
 	// Precompute sin/cos
 	const cosTable = new Float32Array(numTheta);
@@ -199,11 +200,31 @@ function houghTransform(
 		sinTable[ti] = Math.sin(thetaArray[ti]);
 	}
 
-	// Vote for each edge pixel
+	// Vote for each edge pixel with position-based weighting
 	for (let y = 0; y < height; y++) {
+		// Weight based on vertical position:
+		// - Middle third of image gets weight 1.0 (horizon zone)
+		// - Top/bottom get reduced weight
+		const yNorm = y / height;  // 0 to 1
+		let posWeight: number;
+		if (yNorm >= 0.25 && yNorm <= 0.75) {
+			// Middle half - full weight
+			posWeight = 1.0;
+		} else if (yNorm < 0.25) {
+			// Top quarter - reduced (sky, usually not horizon)
+			posWeight = 0.5 + 2 * yNorm;  // 0.5 at top, 1.0 at 0.25
+		} else {
+			// Bottom quarter - reduced (foreground)
+			posWeight = 0.5 + 2 * (1 - yNorm);  // 1.0 at 0.75, 0.5 at bottom
+		}
+
 		for (let x = 0; x < width; x++) {
 			const idx = y * width + x;
 			if (magnitude[idx] < threshold) continue;
+
+			// Weight by edge magnitude (stronger edges = more confident)
+			const magWeight = magnitude[idx] / threshold;  // >= 1.0
+			const weight = posWeight * Math.min(magWeight, 3.0);  // Cap at 3x
 
 			// Vote for all theta values
 			for (let ti = 0; ti < numTheta; ti++) {
@@ -212,13 +233,13 @@ function houghTransform(
 				const ri = Math.round((rho + rhoMax) / rhoStep);
 
 				if (ri >= 0 && ri < numRho) {
-					accumulator[ti * numRho + ri]++;
+					accumulator[ti * numRho + ri] += weight;
 				}
 			}
 		}
 	}
 
-	return { accumulator, thetas: thetaArray, numTheta, numRho, rhoMax };
+	return { accumulator, thetas: thetaArray, numTheta, numRho, rhoMax, width, height };
 }
 
 interface Peak {
@@ -227,16 +248,19 @@ interface Peak {
 	rho: number;        // Distance from origin
 	votes: number;
 	type: 'horizontal' | 'vertical';
+	/** Score combining votes with position preference (for sorting). */
+	score: number;
 }
 
 /**
  * Find peaks in the Hough accumulator with non-maximum suppression.
+ * Applies additional scoring to prefer lines passing through the middle of the image.
  */
 function findPeaks(
 	hough: HoughResult,
 	maxPeaks: number,
 ): Peak[] {
-	const { accumulator, thetas, numTheta, numRho, rhoMax } = hough;
+	const { accumulator, thetas, numTheta, numRho, rhoMax, width, height } = hough;
 	const peaks: Peak[] = [];
 
 	// Find global max for relative thresholding
@@ -247,17 +271,17 @@ function findPeaks(
 
 	if (globalMax === 0) return [];
 
-	// Minimum votes to consider (15% of global max)
-	const minVotes = globalMax * 0.15;
+	// Minimum votes to consider (10% of global max)
+	const minVotes = globalMax * 0.10;
 
-	// Suppression window size
-	const thetaWindow = 5;  // ±5 bins
-	const rhoWindow = 15;   // ±15 pixels
+	// Suppression window size (with 0.5° steps, need larger theta window)
+	const thetaWindow = 10;  // ±10 bins = ±5°
+	const rhoWindow = 20;    // ±20 pixels
 
 	const suppressed = new Set<number>();
 
 	// Find peaks iteratively
-	while (peaks.length < maxPeaks * 2) {
+	while (peaks.length < maxPeaks * 3) {  // Get extra candidates
 		let bestIdx = -1;
 		let bestVotes = minVotes;
 
@@ -287,7 +311,41 @@ function findPeaks(
 		const type: 'horizontal' | 'vertical' = 
 			(normalizedDeg > 45 && normalizedDeg < 135) ? 'horizontal' : 'vertical';
 
-		peaks.push({ theta, thetaDeg, rho, votes: bestVotes, type });
+		// Calculate where this line crosses the center of the image (x = width/2)
+		// and score based on how close that y-intercept is to the middle
+		const cosT = Math.cos(theta);
+		const sinT = Math.sin(theta);
+		
+		let positionScore = 1.0;
+		if (type === 'horizontal' && Math.abs(sinT) > 0.1) {
+			// For horizontal lines, find y at x = width/2
+			const yAtCenter = (rho - (width / 2) * cosT) / sinT;
+			const yNorm = yAtCenter / height;  // 0 to 1
+			// Score peaks if y is in the middle 60% of the image
+			if (yNorm >= 0.2 && yNorm <= 0.8) {
+				// Boost lines in the "horizon zone"
+				const distFromMiddle = Math.abs(yNorm - 0.5);
+				positionScore = 1.5 - distFromMiddle;  // 1.5 at center, 1.2 at edges of zone
+			} else {
+				// Penalize lines near very top or bottom
+				positionScore = 0.5;
+			}
+		}
+
+		// Also boost lines that are closer to perfectly horizontal/vertical
+		// (deviation from 90° for horizontal, deviation from 0° for vertical)
+		let angleScore = 1.0;
+		if (type === 'horizontal') {
+			const devFrom90 = Math.abs(normalizedDeg - 90);
+			angleScore = 1.0 + (20 - Math.min(devFrom90, 20)) / 40;  // 1.0 to 1.5
+		} else {
+			const devFrom0 = Math.min(normalizedDeg, 180 - normalizedDeg);
+			angleScore = 1.0 + (20 - Math.min(devFrom0, 20)) / 40;
+		}
+
+		const score = bestVotes * positionScore * angleScore;
+
+		peaks.push({ theta, thetaDeg, rho, votes: bestVotes, type, score });
 
 		// Suppress neighborhood
 		for (let dti = -thetaWindow; dti <= thetaWindow; dti++) {
@@ -301,11 +359,12 @@ function findPeaks(
 		}
 	}
 
-	// Balance: return top candidates from each type
+	// Sort by score (not just votes) and return top candidates from each type
 	const horizontal = peaks.filter(p => p.type === 'horizontal')
-		.sort((a, b) => b.votes - a.votes)
+		.sort((a, b) => b.score - a.score)
 		.slice(0, maxPeaks);
 	const vertical = peaks.filter(p => p.type === 'vertical')
+		.sort((a, b) => b.score - a.score)
 		.sort((a, b) => b.votes - a.votes)
 		.slice(0, maxPeaks);
 
@@ -513,7 +572,7 @@ export function detectHorizonCandidates(
 	}
 
 	// 8. Convert peaks to candidates
-	const maxVotes = Math.max(...peaks.map(p => p.votes));
+	const maxScore = Math.max(...peaks.map(p => p.score));
 	const candidates: HorizonCandidate[] = [];
 	
 	for (const peak of peaks) {
@@ -535,7 +594,8 @@ export function detectHorizonCandidates(
 			type: peak.type,
 			thetaDeg: peak.thetaDeg.toFixed(1),
 			rho: peak.rho.toFixed(1),
-			votes: peak.votes,
+			votes: peak.votes.toFixed(0),
+			score: peak.score.toFixed(0),
 			angle: angle.toFixed(2),
 			line: {
 				x1: line.x1.toFixed(3),
@@ -548,7 +608,7 @@ export function detectHorizonCandidates(
 		candidates.push({
 			angle,
 			line,
-			confidence: peak.votes / maxVotes,
+			confidence: peak.score / maxScore,
 			type: peak.type,
 		});
 	}
