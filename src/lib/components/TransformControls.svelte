@@ -16,9 +16,13 @@
 		onCommit?: (p: TransformParams) => void;
 		/** Called when fine rotation dragging starts/ends. Useful for showing alignment grid. */
 		onFineRotateDrag?: (dragging: boolean) => void;
+		/** Called when user clicks the Auto button to detect horizon lines. */
+		onAutoStraighten?: () => void;
+		/** Whether horizon detection is currently in progress. */
+		detectingHorizon?: boolean;
 	}
 
-	let { value, onChange, onCommit, onFineRotateDrag }: Props = $props();
+	let { value, onChange, onCommit, onFineRotateDrag, onAutoStraighten, detectingHorizon = false }: Props = $props();
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
 
@@ -192,20 +196,54 @@
 	</div>
 
 	<!-- ── Fine rotation slider ─────────────────────────────────────────────── -->
-	<LabeledRange
-		id="transform-fine-rotation"
-		label="Fine"
-		min={-45}
-		max={45}
-		step={0.1}
-		value={fineValue}
-		defaultValue={0}
-		onchange={onFineChange}
-		oncommit={commit}
-		ondragstart={() => onFineRotateDrag?.(true)}
-		ondragend={() => onFineRotateDrag?.(false)}
-		signed
-	/>
+	<div class="flex items-center gap-xs">
+		<div class="flex-1">
+			<LabeledRange
+				id="transform-fine-rotation"
+				label="Fine"
+				min={-45}
+				max={45}
+				step={0.1}
+				value={fineValue}
+				defaultValue={0}
+				onchange={onFineChange}
+				oncommit={commit}
+				ondragstart={() => onFineRotateDrag?.(true)}
+				ondragend={() => onFineRotateDrag?.(false)}
+				signed
+			/>
+		</div>
+		{#if onAutoStraighten}
+			<button
+				onclick={onAutoStraighten}
+				disabled={detectingHorizon}
+				title="Detect horizon/vertical lines for auto-straighten"
+				aria-label="Auto straighten"
+				class="px-2 py-1 rounded border text-xs transition shrink-0
+				       border-base-subtle text-content-muted
+				       hover:border-content-muted hover:text-content
+				       disabled:opacity-50 disabled:cursor-wait"
+			>
+				{#if detectingHorizon}
+					<svg
+						class="animate-spin"
+						xmlns="http://www.w3.org/2000/svg"
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						aria-hidden="true"
+					>
+						<path d="M21 12a9 9 0 1 1-6.219-8.56" />
+					</svg>
+				{:else}
+					Auto
+				{/if}
+			</button>
+		{/if}
+	</div>
 
 	<!-- ── Flip buttons ─────────────────────────────────────────────────────── -->
 	<div class="flex items-center gap-sm">
