@@ -261,9 +261,36 @@
 		return lines;
 	});
 
-	// ─── Handle radius (responsive to canvas size) ────────────────────────────
+	// ─── Corner handle size (responsive to canvas size) ──────────────────────
 
-	const handleRadius = $derived(Math.max(8, Math.min(12, canvasWidth / 60)));
+	/** Length of each corner bracket arm in pixels. */
+	const cornerSize = $derived(Math.max(16, Math.min(32, canvasWidth / 25)));
+	/** Stroke width for corner brackets. */
+	const cornerStroke = $derived(Math.max(2, Math.min(4, canvasWidth / 200)));
+	/** Hit area padding around the corner for easier grabbing. */
+	const hitPadding = 12;
+
+	/** Generate the path for an L-shaped corner bracket. */
+	function cornerPath(
+		corner: Corner,
+		pos: { x: number; y: number },
+	): string {
+		const s = cornerSize;
+		switch (corner) {
+			case "tl":
+				// └ rotated: horizontal goes right, vertical goes down
+				return `M ${pos.x},${pos.y + s} L ${pos.x},${pos.y} L ${pos.x + s},${pos.y}`;
+			case "tr":
+				// ┘ rotated: horizontal goes left, vertical goes down
+				return `M ${pos.x - s},${pos.y} L ${pos.x},${pos.y} L ${pos.x},${pos.y + s}`;
+			case "br":
+				// ┐ rotated: horizontal goes left, vertical goes up
+				return `M ${pos.x},${pos.y - s} L ${pos.x},${pos.y} L ${pos.x - s},${pos.y}`;
+			case "bl":
+				// ┌ rotated: horizontal goes right, vertical goes up
+				return `M ${pos.x + s},${pos.y} L ${pos.x},${pos.y} L ${pos.x},${pos.y - s}`;
+		}
+	}
 </script>
 
 {#if hasMetrics}
@@ -312,18 +339,34 @@
 			class="pointer-events-none"
 		/>
 
-		<!-- Corner handles -->
+		<!-- Corner handles (L-shaped brackets) -->
 		{#each [{ corner: "tl" as Corner, pos: tlPx }, { corner: "tr" as Corner, pos: trPx }, { corner: "br" as Corner, pos: brPx }, { corner: "bl" as Corner, pos: blPx }] as { corner, pos } (corner)}
-			<circle
-				cx={pos.x}
-				cy={pos.y}
-				r={handleRadius}
-				fill="white"
-				stroke="rgba(0,0,0,0.8)"
-				stroke-width="2"
-				class="cursor-grab hover:fill-primary transition-colors"
+			<!-- Invisible hit area for easier grabbing -->
+			<rect
+				x={pos.x - hitPadding}
+				y={pos.y - hitPadding}
+				width={hitPadding * 2}
+				height={hitPadding * 2}
+				fill="transparent"
 				style="cursor: {dragging === corner ? 'grabbing' : 'grab'};"
 				onpointerdown={startDrag(corner)}
+			/>
+			<!-- L-shaped corner bracket with shadow for visibility -->
+			<path
+				d={cornerPath(corner, pos)}
+				fill="none"
+				stroke="rgba(0,0,0,0.6)"
+				stroke-width={cornerStroke + 2}
+				stroke-linecap="square"
+				class="pointer-events-none"
+			/>
+			<path
+				d={cornerPath(corner, pos)}
+				fill="none"
+				stroke="white"
+				stroke-width={cornerStroke}
+				stroke-linecap="square"
+				class="pointer-events-none"
 			/>
 		{/each}
 	</svg>
