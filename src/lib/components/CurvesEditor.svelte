@@ -1,12 +1,16 @@
 <script lang="ts">
 	/**
-	 * SVG-based Bezier tone curve editor.
+	 * SVG-based Bezier tone curve editor with histogram visualization.
 	 *
 	 * Renders up to 4 channels: global (white), R, G, B.
 	 * Control points are draggable within the unit square.
 	 * Emits onChange with the updated CurvePoints on every drag commit.
+	 * 
+	 * When histogram data is provided, renders a per-channel histogram
+	 * behind the curve, showing the distribution of pixel values.
 	 */
 	import type { CurvePoints, CurvePoint } from '$lib/types';
+	import type { ChannelHistograms } from '$lib/image/pipeline';
 	import { buildLUT } from '$lib/image/curves';
 	import { untrack } from 'svelte';
 
@@ -26,9 +30,14 @@
 		 * Falls back to `onChange` if not provided (backwards-compatible).
 		 */
 		onCommit?: (channel: Channel, curve: CurvePoints) => void;
+		/**
+		 * Optional histogram data for visualization.
+		 * When provided, renders per-channel histograms behind the curve.
+		 */
+		histogram?: ChannelHistograms | null;
 	}
 
-	let { global: globalCurve, r, g, b, onChange, onCommit }: Props = $props();
+	let { global: globalCurve, r, g, b, onChange, onCommit, histogram = null }: Props = $props();
 
 	/** Emit a commit (drag-end or discrete edit). Falls back to onChange if onCommit not set. */
 	function commit(channel: Channel, curve: CurvePoints): void {
@@ -159,6 +168,44 @@
 		{ key: 'g',      label: 'G'   },
 		{ key: 'b',      label: 'B'   },
 	];
+
+	/**
+	 * Build an SVG path for the histogram of the current channel.
+	 * Returns a filled area path from bottom-left, up through the histogram bars, to bottom-right.
+	 */
+	const histogramPath = $derived.by(() => {
+		if (!histogram) return '';
+		
+		// Select the appropriate histogram data for the active channel
+		let data: Float32Array | undefined;
+		switch (activeChannel) {
+			case 'r': data = histogram.r; break;
+			case 'g': data = histogram.g; break;
+			case 'b': data = histogram.b; break;
+			case 'global': data = histogram.luma; break;
+		}
+		
+		if (!data || data.length === 0) return '';
+		
+		const binCount = data.length;
+		const binWidth = SIZE / binCount;
+		
+		// Start at bottom-left
+		let d = `M0,${SIZE}`;
+		
+		// Draw histogram bars as a continuous area
+		for (let i = 0; i < binCount; i++) {
+			const x = (i / binCount) * SIZE;
+			const height = data[i] * SIZE * 0.8; // Scale to 80% of height max
+			const y = SIZE - height;
+			d += ` L${x.toFixed(1)},${y.toFixed(1)}`;
+		}
+		
+		// Close path at bottom-right
+		d += ` L${SIZE},${SIZE} Z`;
+		
+		return d;
+	});
 </script>
 
 <div class="flex flex-col gap-sm">
@@ -211,6 +258,16 @@
 				stroke="currentColor" stroke-width="0.5" class="text-base-subtle" opacity="0.5"
 			/>
 		{/each}
+
+		<!-- Histogram (rendered behind the curve) -->
+		{#if histogramPath}
+			<path
+				d={histogramPath}
+				fill={CHANNEL_COLORS[activeChannel]}
+				fill-opacity="0.15"
+				stroke="none"
+			/>
+		{/if}
 
 		<!-- Identity diagonal -->
 		<line x1="0" y1={SIZE} x2={SIZE} y2="0"
