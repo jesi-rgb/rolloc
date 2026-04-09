@@ -636,12 +636,22 @@
 	function onHorizonApply(): void {
 		if (selectedHorizonIndex === null) return;
 
-		// Commit the current rotation
-		onTransformCommit(effectiveTransform);
+		const candidate = horizonCandidates[selectedHorizonIndex];
+		if (!candidate) return;
 
-		// Clear horizon mode
+		// Calculate the final rotation to commit
+		const finalRotation = preHorizonRotation + candidate.angle;
+		const finalTransform: TransformParams = {
+			...effectiveTransform,
+			rotation: finalRotation,
+		};
+
+		// Clear horizon mode first (so effectiveTransform doesn't change during commit)
 		horizonCandidates = [];
 		selectedHorizonIndex = null;
+
+		// Commit the transform with the calculated rotation
+		onTransformCommit(finalTransform);
 	}
 
 	/**
