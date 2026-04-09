@@ -1383,8 +1383,11 @@
 		<div
 			class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
 		>
-			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping -->
-			<div class="relative">
+			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
+			     w-full h-full + max-w-fit max-h-fit ensures the wrapper takes the full available
+			     space while shrinking to fit the canvas, allowing max-w-full/max-h-full on the
+			     canvas to reference the actual container dimensions. -->
+			<div class="relative w-full h-full max-w-fit max-h-fit flex items-center justify-center">
 				<canvas
 					bind:this={canvasEl}
 					onclick={handleWbPickerClick}
