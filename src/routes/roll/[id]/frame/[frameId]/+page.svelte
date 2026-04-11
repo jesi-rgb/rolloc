@@ -96,6 +96,8 @@
 	/** Original image dimensions (before any transforms). */
 	let originalWidth = $state(1);
 	let originalHeight = $state(1);
+	/** Histogram data from the last render (for curves editor visualization). */
+	let currentHistogram = $state<import('$lib/image/pipeline').ChannelHistograms | null>(null);
 
 	// ─── Pipeline init (once, on mount) ───────────────────────────────────────
 
@@ -376,7 +378,10 @@
 				"[frame] renderFrame: RAW path, byteLength =",
 				currentRawBuffer.byteLength,
 			);
-			pipeline.renderRaw(edit, currentRawBuffer).catch((err: unknown) => {
+			pipeline.renderRaw(edit, currentRawBuffer).then(() => {
+				// Capture histogram from lastLogPerc after render completes
+				currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+			}).catch((err: unknown) => {
 				console.error("[frame] renderRaw error:", err);
 				renderError = err instanceof Error ? err.message : String(err);
 			});
@@ -387,7 +392,10 @@
 				"x",
 				currentBitmap.height,
 			);
-			pipeline.render(edit, currentBitmap).catch((err: unknown) => {
+			pipeline.render(edit, currentBitmap).then(() => {
+				// Capture histogram from lastLogPerc after render completes
+				currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+			}).catch((err: unknown) => {
 				console.error("[frame] render error:", err);
 				renderError = err instanceof Error ? err.message : String(err);
 			});
@@ -1561,6 +1569,7 @@
 							b={effectiveRGBCurves[2]}
 							onChange={onCurveChange}
 							onCommit={onCurveCommit}
+							histogram={currentHistogram}
 						/>
 					</section>
 
