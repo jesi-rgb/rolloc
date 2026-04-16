@@ -1391,7 +1391,7 @@
 		<div
 			class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
 		>
-			<!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
+			<!-- Canvas container: flip transforms applied via CSS, rotation + zoom via GPU UV remapping.
 			     w-full h-full + max-w-fit max-h-fit ensures the wrapper takes the full available
 			     space while shrinking to fit the canvas, allowing max-w-full/max-h-full on the
 			     canvas to reference the actual container dimensions. -->
@@ -1399,14 +1399,14 @@
 				<canvas
 					bind:this={canvasEl}
 					onclick={handleWbPickerClick}
-					class="max-w-full max-h-full object-contain rounded shadow-lg"
+					class="max-w-full max-h-full object-contain shadow-lg rounded"
 					style="display: block; cursor: {wbPickerActive
 						? 'crosshair'
 						: cropModeActive
 							? 'crosshair'
 							: 'default'}; transform: {effectiveTransform.flipH || effectiveTransform.flipV
-					? `scale(${effectiveTransform.flipH ? -1 : 1}, ${effectiveTransform.flipV ? -1 : 1})`
-					: 'none'};"
+						? `scale(${effectiveTransform.flipH ? -1 : 1}, ${effectiveTransform.flipV ? -1 : 1})`
+						: 'none'};"
 				></canvas>
 
 				<!-- Crop overlay (inside transform wrapper so it rotates with canvas) -->

@@ -29,12 +29,14 @@
 	let rotation = $state(untrack(() => value.rotation));
 	let flipH = $state(untrack(() => value.flipH));
 	let flipV = $state(untrack(() => value.flipV));
+	let zoom = $state(untrack(() => value.zoom ?? 1));
 
 	// Re-sync when parent swaps to a different frame
 	$effect(() => {
 		rotation = value.rotation;
 		flipH = value.flipH;
 		flipV = value.flipV;
+		zoom = value.zoom ?? 1;
 	});
 
 	/** Build the current params object. */
@@ -43,6 +45,7 @@
 			rotation,
 			flipH,
 			flipV,
+			zoom,
 		};
 	}
 
@@ -85,6 +88,7 @@
 		rotation = d.rotation;
 		flipH = d.flipH;
 		flipV = d.flipV;
+		zoom = d.zoom;
 		commit();
 	}
 
@@ -105,7 +109,8 @@
 	const isDefault = $derived(
 		rotation === DEFAULT_TRANSFORM.rotation &&
 			flipH === DEFAULT_TRANSFORM.flipH &&
-			flipV === DEFAULT_TRANSFORM.flipV,
+			flipV === DEFAULT_TRANSFORM.flipV &&
+			zoom === DEFAULT_TRANSFORM.zoom,
 	);
 
 	/**
@@ -127,11 +132,20 @@
 		rotation = nearest90 + fine;
 		emit();
 	}
+
+	/**
+	 * Handle zoom slider change.
+	 * Zoom crops in from center — values 1.0 (no zoom) to 3.0 (3x zoom).
+	 */
+	function onZoomChange(z: number): void {
+		zoom = z;
+		emit();
+	}
 </script>
 
 <!--
 	TransformControls
-	Rotation (90° buttons + fine slider) and flip controls.
+	Rotation (90° buttons + fine slider), flip, and zoom controls.
 -->
 
 <div class="flex flex-col gap-sm">
@@ -307,6 +321,19 @@
 			</button>
 		</div>
 	</div>
+
+	<!-- ── Zoom slider ──────────────────────────────────────────────────────── -->
+	<LabeledRange
+		id="transform-zoom"
+		label="Zoom"
+		min={1}
+		max={3}
+		step={0.01}
+		value={zoom}
+		defaultValue={1}
+		onchange={onZoomChange}
+		oncommit={commit}
+	/>
 
 	<!-- ── Reset ────────────────────────────────────────────────────────────── -->
 	{#if !isDefault}

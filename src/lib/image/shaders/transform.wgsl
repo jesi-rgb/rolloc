@@ -1,8 +1,10 @@
 /**
- * Transform pass — applies rotation to the image by remapping UV coordinates.
+ * Transform pass — applies rotation and zoom to the image by remapping UV coordinates.
  *
  * Rotation is a single continuous value (in radians) with aspect ratio correction.
  * The 90° buttons simply add/subtract 90° to this value — no special handling needed.
+ *
+ * Zoom scales from center — values > 1.0 crop in (e.g., 2.0 = 2x zoom, shows center 50%).
  *
  * Flips are handled via CSS on the canvas element, not in this shader.
  */
@@ -17,9 +19,10 @@ struct TransformUniforms {
 	// Aspect ratio of the source texture (width/height)
 	// Needed for correct rotation without distortion
 	sourceAspect : f32,
+	// Zoom factor (1.0 = no zoom, 2.0 = 2x zoom / crop in)
+	zoom : f32,
 	// Padding to 16 bytes (std140 alignment)
 	_pad0 : f32,
-	_pad1 : f32,
 }
 
 struct VertIn {
@@ -45,8 +48,13 @@ fn vs_main(in : VertIn) -> VertOut {
 
 @fragment
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
-	// Center UV around (0,0) for rotation
+	// Center UV around (0,0) for rotation and zoom
 	var uv = in.uv - vec2<f32>(0.5, 0.5);
+	
+	// Apply zoom (scale UVs — larger zoom = smaller UV range = crop in)
+	if (uTransform.zoom != 1.0) {
+		uv = uv / uTransform.zoom;
+	}
 	
 	// Apply rotation with aspect ratio correction
 	// This prevents distortion on non-square images

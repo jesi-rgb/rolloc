@@ -171,21 +171,23 @@ fn sample_bilinear(src: &[f32], src_w: usize, src_h: usize, x: f32, y: f32) -> [
     result
 }
 
-/// Apply transform (rotation + flips) and crop in a single pass.
+/// Apply transform (rotation, zoom, flips) and crop in a single pass.
 ///
 /// The GPU pipeline works as follows:
-/// 1. Transform shader rotates content via UV remapping (buffer stays same size)
+/// 1. Transform shader rotates/zooms content via UV remapping (buffer stays same size)
 ///    - Uses aspect ratio correction to prevent distortion
 ///    - Rotation is continuous (any angle in radians)
-/// 2. Crop shader samples from the (visually rotated) buffer
+///    - Zoom scales from center (>1.0 = crop in)
+/// 2. Crop shader samples from the (visually transformed) buffer
 ///
 /// So crop coordinates are normalized to SOURCE buffer dimensions, but they
-/// describe a region in the visually-rotated content. We need to:
+/// describe a region in the visually-transformed content. We need to:
 /// 1. For each output pixel, compute the crop quad sample position
-/// 2. That position is in the "rotated content" space (still normalized 0-1)
-/// 3. Apply inverse rotation (with aspect correction) to map back to original source
-/// 4. Apply flips
-/// 5. Sample from the source image with bilinear interpolation
+/// 2. That position is in the "transformed content" space (still normalized 0-1)
+/// 3. Apply zoom (scale from center)
+/// 4. Apply inverse rotation (with aspect correction) to map back to original source
+/// 5. Apply flips
+/// 6. Sample from the source image with bilinear interpolation
 ///
 /// Returns (output_width, output_height, result_pixels).
 fn apply_transform_and_crop(
@@ -203,6 +205,9 @@ fn apply_transform_and_crop(
     let rotation_rad = transform.rotation * std::f32::consts::PI / 180.0;
     let cos_a = rotation_rad.cos();
     let sin_a = rotation_rad.sin();
+    
+    // Zoom factor (default to 1.0 if not set)
+    let zoom = if transform.zoom > 0.0 { transform.zoom } else { 1.0 };
     
     // Aspect ratio for aspect-correct rotation (matching GPU transform shader)
     let aspect = src_w as f32 / src_h as f32;
@@ -225,7 +230,7 @@ fn apply_transform_and_crop(
 
             // Bilinear interpolation within the crop quad gives us a point in
             // the source buffer's normalized coordinate space [0,1]×[0,1].
-            // But this point describes where to sample from the ROTATED content.
+            // But this point describes where to sample from the TRANSFORMED content.
             let top_x = crop.tl.x * (1.0 - u_flipped) + crop.tr.x * u_flipped;
             let top_y = crop.tl.y * (1.0 - u_flipped) + crop.tr.y * u_flipped;
             let bot_x = crop.bl.x * (1.0 - u_flipped) + crop.br.x * u_flipped;
@@ -235,11 +240,12 @@ fn apply_transform_and_crop(
             let crop_y = top_y * (1.0 - v_flipped) + bot_y * v_flipped;
 
             // The crop coordinates describe a position in the intermediate
-            // "rotated view" buffer. To find where in the ORIGINAL source this
+            // "transformed view" buffer. To find where in the ORIGINAL source this
             // came from, we apply the SAME forward transform that the GPU uses.
             //
             // GPU transform.wgsl (forward transform - given output UV, find source UV):
             //   centered = output_uv - 0.5
+            //   centered = centered / zoom   (zoom crops in from center)
             //   correctedX = centered.x * aspect
             //   source_centered.x = correctedX * cos(θ) - centered.y * sin(θ)
             //   source_centered.y = correctedX * sin(θ) + centered.y * cos(θ)
@@ -251,11 +257,16 @@ fn apply_transform_and_crop(
             
             let centered_x = crop_x - 0.5;
             let centered_y = crop_y - 0.5;
-            let corrected_x = centered_x * aspect;
+            
+            // Apply zoom (divide by zoom factor to scale UV coordinates)
+            let zoomed_x = centered_x / zoom;
+            let zoomed_y = centered_y / zoom;
+            
+            let corrected_x = zoomed_x * aspect;
             
             // Forward rotation (same as GPU shader)
-            let source_centered_x = corrected_x * cos_a - centered_y * sin_a;
-            let source_centered_y = corrected_x * sin_a + centered_y * cos_a;
+            let source_centered_x = corrected_x * cos_a - zoomed_y * sin_a;
+            let source_centered_y = corrected_x * sin_a + zoomed_y * cos_a;
             
             // Convert back to UV space
             let src_norm_x = (source_centered_x / aspect) + 0.5;

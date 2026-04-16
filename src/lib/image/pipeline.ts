@@ -1101,11 +1101,12 @@ function makeHDCurveUniforms(
 // ─── Transform uniform builder ────────────────────────────────────────────────
 
 /**
- * Check if the GPU transform (rotation) is effectively a no-op.
+ * Check if the GPU transform (rotation, zoom) is effectively a no-op.
  * Note: Flips are not considered here since they're handled via CSS.
  */
 function isIdentityTransform(t: TransformParams): boolean {
-	return Math.abs(t.rotation) < 0.001;
+	const zoom = t.zoom ?? 1;
+	return Math.abs(t.rotation) < 0.001 && Math.abs(zoom - 1) < 0.001;
 }
 
 // ─── Crop uniform builder ─────────────────────────────────────────────────────
@@ -1135,15 +1136,15 @@ function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
  * TransformUniforms layout (total 16 bytes):
  *   rotation     : f32   @ 0   (radians)
  *   outputAspect : f32   @ 4   (width/height of output texture)
- *   _pad0        : f32   @ 8
- *   _pad1        : f32   @ 12
+ *   zoom         : f32   @ 8   (1.0 = no zoom, 2.0 = 2x zoom)
+ *   _pad0        : f32   @ 12
  */
 function makeTransformUniforms(device: GPUDevice, t: TransformParams, outputAspect: number): GPUBuffer {
 	const data = new Float32Array([
 		(t.rotation * Math.PI) / 180, // Convert degrees to radians
 		outputAspect,                  // For aspect-correct rotation
+		t.zoom ?? 1,                   // Zoom factor (default 1.0 = no zoom)
 		0,                             // _pad0
-		0,                             // _pad1
 	]);
 	return makeUniformBuffer(device, data);
 }

@@ -53,7 +53,7 @@ pub struct CropQuad {
     pub bl: Point2D,
 }
 
-/// Transform parameters: rotation and flips.
+/// Transform parameters: rotation, zoom, and flips.
 /// Mirrors `TransformParams` from types.ts.
 #[derive(serde::Deserialize, Debug, Clone, Copy, Default)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +64,13 @@ pub struct TransformParams {
     pub flip_h: bool,
     /// Vertical flip.
     pub flip_v: bool,
+    /// Zoom factor (1.0 = no zoom, 2.0 = 2x zoom / crop in from center).
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+}
+
+fn default_zoom() -> f32 {
+    1.0
 }
 
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.

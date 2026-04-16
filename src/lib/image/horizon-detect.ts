@@ -44,7 +44,7 @@ const DEFAULT_OPTIONS: Required<DetectionOptions> = {
 	edgeThreshold: 0.1,
 	maxCandidates: 3,
 	angleRange: 15,
-	minConfidence: 0.5,
+	minConfidence: 0.3,
 };
 
 // ─── Image Processing Helpers ─────────────────────────────────────────────────
@@ -163,18 +163,18 @@ function houghTransform(
 ): HoughResult {
 	// θ resolution: 0.5° steps for better precision
 	const thetaStep = 0.5 * Math.PI / 180;
-	
+
 	// We want to detect lines that are nearly horizontal or nearly vertical.
 	// Horizontal lines: θ near 90° (normal points up/down)
 	// Vertical lines: θ near 0° or 180° (normal points left/right)
-	
+
 	const thetas: number[] = [];
-	
+
 	// Horizontal range: 90° - range to 90° + range (0.5° steps)
 	for (let deg = 90 - angleRange; deg <= 90 + angleRange; deg += 0.5) {
 		thetas.push(deg * Math.PI / 180);
 	}
-	
+
 	// Vertical range: -range to +range (0.5° steps)
 	for (let deg = -angleRange; deg <= angleRange; deg += 0.5) {
 		const theta = deg * Math.PI / 180;
@@ -183,10 +183,10 @@ function houghTransform(
 			thetas.push(theta);
 		}
 	}
-	
+
 	const numTheta = thetas.length;
 	const thetaArray = new Float32Array(thetas);
-	
+
 	// ρ can range from -diagonal to +diagonal
 	const rhoMax = Math.sqrt(width * width + height * height);
 	const rhoStep = 1;
@@ -311,14 +311,14 @@ function findPeaks(
 		// θ near 90° → horizontal line
 		// θ near 0° or 180° → vertical line
 		const normalizedDeg = ((thetaDeg % 180) + 180) % 180;  // Normalize to [0, 180)
-		const type: 'horizontal' | 'vertical' = 
+		const type: 'horizontal' | 'vertical' =
 			(normalizedDeg > 45 && normalizedDeg < 135) ? 'horizontal' : 'vertical';
 
 		// Calculate where this line crosses the center of the image (x = width/2)
 		// and score based on how close that y-intercept is to the middle
 		const cosT = Math.cos(theta);
 		const sinT = Math.sin(theta);
-		
+
 		let positionScore = 1.0;
 		if (type === 'horizontal' && Math.abs(sinT) > 0.1) {
 			// For horizontal lines, find y at x = width/2
@@ -476,13 +476,13 @@ function calculateStraightenAngle(
 	// Ensure consistent direction: always measure from left to right
 	let dx = line.x2 - line.x1;
 	let dy = line.y2 - line.y1;
-	
+
 	// If line goes right-to-left, flip it
 	if (dx < 0) {
 		dx = -dx;
 		dy = -dy;
 	}
-	
+
 	// Angle from horizontal: positive = slopes up-right, negative = slopes down-right
 	const lineAngleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
 
@@ -583,7 +583,7 @@ export function detectHorizonCandidates(
 	// 8. Convert peaks to candidates
 	const maxScore = Math.max(...peaks.map(p => p.score));
 	const candidates: HorizonCandidate[] = [];
-	
+
 	for (const peak of peaks) {
 		const line = peakToLine(peak.theta, peak.rho, width, height);
 		if (!line) {
@@ -592,7 +592,7 @@ export function detectHorizonCandidates(
 		}
 
 		const angle = calculateStraightenAngle(line, peak.type);
-		
+
 		// Skip if angle is too extreme (likely noise)
 		if (Math.abs(angle) > opts.angleRange) {
 			console.log('[horizon] Skipping peak with extreme angle:', angle, peak);
@@ -633,7 +633,7 @@ export function detectHorizonCandidates(
 			console.log('[horizon] Skipping low-confidence candidate:', c.confidence.toFixed(2), c.type, c.angle.toFixed(1));
 			continue;
 		}
-		
+
 		// Skip near-duplicate angles (within 1°)
 		const isDuplicate = filtered.some(
 			f => f.type === c.type && Math.abs(f.angle - c.angle) < 1.0,
@@ -641,18 +641,18 @@ export function detectHorizonCandidates(
 		if (isDuplicate) {
 			continue;
 		}
-		
+
 		filtered.push(c);
 	}
 
 	console.log('[horizon] Returning', filtered.length, 'candidates after filtering');
-	
+
 	// Return nothing if we don't have confident results
 	if (filtered.length === 0) {
 		console.log('[horizon] No confident candidates found');
 		return [];
 	}
-	
+
 	return filtered.slice(0, opts.maxCandidates);
 }
 
