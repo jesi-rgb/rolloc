@@ -31,17 +31,20 @@ export interface DetectionOptions {
 	maxDimension?: number;
 	/** Edge magnitude threshold as fraction of max (default: 0.1). */
 	edgeThreshold?: number;
-	/** Max number of candidates to return (default: 5). */
+	/** Max number of candidates to return (default: 3). */
 	maxCandidates?: number;
-	/** Angle range in degrees to search around horizontal/vertical (default: 20). */
+	/** Angle range in degrees to search around horizontal/vertical (default: 15). */
 	angleRange?: number;
+	/** Minimum confidence threshold (0-1) to include a candidate (default: 0.5). */
+	minConfidence?: number;
 }
 
 const DEFAULT_OPTIONS: Required<DetectionOptions> = {
 	maxDimension: 400,
 	edgeThreshold: 0.1,
-	maxCandidates: 5,
-	angleRange: 20,
+	maxCandidates: 3,
+	angleRange: 15,
+	minConfidence: 0.5,
 };
 
 // ─── Image Processing Helpers ─────────────────────────────────────────────────
@@ -454,41 +457,47 @@ function peakToLine(
  *
  * Returns the angle in degrees to rotate the image so the line becomes
  * perfectly horizontal (for horizontal type) or vertical (for vertical type).
- * Positive = clockwise rotation.
+ * Positive = clockwise rotation in the UI.
+ *
+ * Convention: We measure the line's angle from horizontal.
+ * - A line sloping DOWN from left to right has NEGATIVE angle (e.g., -3°)
+ * - A line sloping UP from left to right has POSITIVE angle (e.g., +3°)
+ *
+ * To straighten:
+ * - If line is at -3° (slopes down-right), rotate image +3° clockwise
+ * - If line is at +3° (slopes up-right), rotate image -3° counter-clockwise
+ *
+ * So: rotation = +lineAngle (not negative!)
  */
 function calculateStraightenAngle(
 	line: { x1: number; y1: number; x2: number; y2: number },
 	type: 'horizontal' | 'vertical',
 ): number {
-	const dx = line.x2 - line.x1;
-	const dy = line.y2 - line.y1;
+	// Ensure consistent direction: always measure from left to right
+	let dx = line.x2 - line.x1;
+	let dy = line.y2 - line.y1;
 	
-	// Angle of the line from horizontal (in degrees)
-	// atan2(dy, dx) gives angle in radians from -π to +π
-	const lineAngleRad = Math.atan2(dy, dx);
-	const lineAngleDeg = lineAngleRad * (180 / Math.PI);
+	// If line goes right-to-left, flip it
+	if (dx < 0) {
+		dx = -dx;
+		dy = -dy;
+	}
+	
+	// Angle from horizontal: positive = slopes up-right, negative = slopes down-right
+	const lineAngleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
 
 	if (type === 'horizontal') {
-		// The line should be at 0° (horizontal)
-		// If line is at +5°, we need to rotate -5° to straighten
-		// Normalize angle to [-90, +90] range (a line at 170° is same as -10°)
-		let deviation = lineAngleDeg;
-		while (deviation > 90) deviation -= 180;
-		while (deviation < -90) deviation += 180;
-		return -deviation;
+		// To make line horizontal, rotate by the line's angle
+		// (rotating the image clockwise when line slopes down-right)
+		return lineAngleDeg;
 	} else {
-		// The line should be at 90° (vertical)
-		// If line is at 85°, we need to rotate +5° to make it 90°
-		// Normalize to find deviation from vertical (±90°)
-		let deviation = lineAngleDeg;
-		// Bring into [-90, 90] range first
-		while (deviation > 90) deviation -= 180;
-		while (deviation < -90) deviation += 180;
-		// Now deviation is angle from horizontal; deviation from vertical is (90 - |deviation|) with sign
-		if (deviation >= 0) {
-			return -(deviation - 90);  // e.g., 85° → rotate +5°
+		// For vertical lines, we want to make them exactly vertical (90°)
+		// Line angle from horizontal is near ±90°
+		// Deviation from vertical = lineAngle - 90 (or lineAngle + 90 if negative)
+		if (lineAngleDeg >= 0) {
+			return lineAngleDeg - 90;
 		} else {
-			return -(-90 - deviation);  // e.g., -85° → rotate -5°
+			return lineAngleDeg + 90;
 		}
 	}
 }
@@ -616,18 +625,34 @@ export function detectHorizonCandidates(
 	// Sort by confidence (highest first)
 	candidates.sort((a, b) => b.confidence - a.confidence);
 
-	// Filter out near-duplicate angles (within 0.5°)
+	// Filter: remove low-confidence candidates and near-duplicates
 	const filtered: HorizonCandidate[] = [];
 	for (const c of candidates) {
-		const isDuplicate = filtered.some(
-			f => f.type === c.type && Math.abs(f.angle - c.angle) < 0.5,
-		);
-		if (!isDuplicate) {
-			filtered.push(c);
+		// Skip low-confidence candidates
+		if (c.confidence < opts.minConfidence) {
+			console.log('[horizon] Skipping low-confidence candidate:', c.confidence.toFixed(2), c.type, c.angle.toFixed(1));
+			continue;
 		}
+		
+		// Skip near-duplicate angles (within 1°)
+		const isDuplicate = filtered.some(
+			f => f.type === c.type && Math.abs(f.angle - c.angle) < 1.0,
+		);
+		if (isDuplicate) {
+			continue;
+		}
+		
+		filtered.push(c);
 	}
 
 	console.log('[horizon] Returning', filtered.length, 'candidates after filtering');
+	
+	// Return nothing if we don't have confident results
+	if (filtered.length === 0) {
+		console.log('[horizon] No confident candidates found');
+		return [];
+	}
+	
 	return filtered.slice(0, opts.maxCandidates);
 }
 
