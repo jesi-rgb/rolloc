@@ -52,7 +52,10 @@
   import InversionControls from "$lib/components/InversionControls.svelte";
   import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
   import CropOverlay from "$lib/components/CropOverlay.svelte";
+  import HorizonOverlay from "$lib/components/HorizonOverlay.svelte";
   import TransformControls from "$lib/components/TransformControls.svelte";
+  import { detectHorizonCandidates, createImageData } from "$lib/image/horizon-detect";
+  import type { HorizonCandidate } from "$lib/image/horizon-detect";
   import { ArrowFatUpIcon } from "phosphor-svelte";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
@@ -869,6 +872,127 @@
     }, 500);
   }
 
+  // ─── Horizon detection mode ───────────────────────────────────────────────
+  //
+  // Auto-straighten workflow:
+  // 1. User clicks "Auto" button in TransformControls
+  // 2. We read canvas pixels and run Hough line detection
+  // 3. Show detected lines as overlay for user to select
+  // 4. User clicks a line to select it (preview updates rotation)
+  // 5. User clicks Apply → commit rotation, or Cancel → revert
+
+  /** Whether horizon detection is running. */
+  let detectingHorizon = $state(false);
+
+  /** Detected horizon/vertical line candidates. */
+  let horizonCandidates = $state<HorizonCandidate[]>([]);
+
+  /** Currently selected candidate index (for preview). */
+  let selectedHorizonIndex = $state<number | null>(null);
+
+  /** Rotation value before horizon detection started (for cancel/revert). */
+  let preHorizonRotation = $state<number>(0);
+
+  /** Whether the horizon overlay is active (showing candidates). */
+  const horizonModeActive = $derived(horizonCandidates.length > 0);
+
+  /**
+   * Start horizon detection: read canvas pixels and find lines.
+   */
+  async function startHorizonDetection(): Promise<void> {
+    if (!pipeline || !canvasEl) return;
+
+    detectingHorizon = true;
+
+    try {
+      // Read current canvas pixels
+      const w = pipeline.lastOutputWidth;
+      const h = pipeline.lastOutputHeight;
+      const pixels = await pipeline.readPixels(0, 0, w, h);
+
+      if (!pixels) {
+        console.error('[horizon] Failed to read pixels from canvas');
+        return;
+      }
+
+      // Create ImageData and run detection
+      const imageData = createImageData(pixels, w, h);
+      const candidates = detectHorizonCandidates(imageData);
+
+      if (candidates.length === 0) {
+        console.log('[horizon] No lines detected');
+        // Do nothing — user just sees no overlay
+        return;
+      }
+
+      console.log('[horizon] Found', candidates.length, 'candidates');
+
+      // Store pre-detection rotation for revert on cancel
+      preHorizonRotation = effectiveTransform.rotation;
+
+      // Set candidates and auto-select the first (highest confidence)
+      horizonCandidates = candidates;
+      selectedHorizonIndex = 0;
+
+      // Preview the first candidate's rotation
+      applyHorizonPreview(0);
+    } finally {
+      detectingHorizon = false;
+    }
+  }
+
+  /**
+   * Preview a horizon candidate by applying its rotation.
+   */
+  function applyHorizonPreview(index: number): void {
+    const candidate = horizonCandidates[index];
+    if (!candidate) return;
+
+    // Apply the rotation adjustment (additive to current fine rotation base)
+    const newRotation = preHorizonRotation + candidate.angle;
+    onTransformChange({ ...effectiveTransform, rotation: newRotation });
+  }
+
+  /**
+   * Called when user selects a horizon candidate.
+   */
+  function onHorizonSelect(index: number): void {
+    selectedHorizonIndex = index;
+    applyHorizonPreview(index);
+  }
+
+  /**
+   * Called when user clicks Apply — commit the selected rotation.
+   */
+  function onHorizonApply(): void {
+    if (selectedHorizonIndex === null) return;
+
+    // Compute the rotation from the selected candidate
+    const candidate = horizonCandidates[selectedHorizonIndex];
+    if (!candidate) return;
+
+    const newRotation = preHorizonRotation + candidate.angle;
+
+    // Commit the transform with the new rotation
+    onTransformCommit({ ...effectiveTransform, rotation: newRotation });
+
+    // Clear horizon mode
+    horizonCandidates = [];
+    selectedHorizonIndex = null;
+  }
+
+  /**
+   * Called when user cancels horizon mode — revert rotation.
+   */
+  function onHorizonCancel(): void {
+    // Revert to pre-detection rotation
+    onTransformChange({ ...effectiveTransform, rotation: preHorizonRotation });
+
+    // Clear horizon mode
+    horizonCandidates = [];
+    selectedHorizonIndex = null;
+  }
+
   // ─── Export ────────────────────────────────────────────────────────────────
 
   let exporting = $state(false);
@@ -1139,7 +1263,9 @@
         break;
       case "Escape":
         e.preventDefault();
-        if (cropModeActive) {
+        if (horizonModeActive) {
+          onHorizonCancel();
+        } else if (cropModeActive) {
           cancelCrop();
         } else if (wbPickerActive) {
           cancelWbPicker();
@@ -1294,6 +1420,18 @@
             value={effectiveCropQuad}
             onChange={onCropChange}
             {fineRotating}
+          />
+        {/if}
+
+        <!-- Horizon detection overlay -->
+        {#if horizonModeActive && canvasEl}
+          <HorizonOverlay
+            canvas={canvasEl}
+            candidates={horizonCandidates}
+            selectedIndex={selectedHorizonIndex}
+            onSelect={onHorizonSelect}
+            onApply={onHorizonApply}
+            onCancel={onHorizonCancel}
           />
         {/if}
       </div>
@@ -1477,6 +1615,8 @@
               onChange={onTransformChange}
               onCommit={onTransformCommit}
               onFineRotateDrag={(dragging) => (fineRotating = dragging)}
+              onAutoStraighten={startHorizonDetection}
+              {detectingHorizon}
             />
           </section>
 
