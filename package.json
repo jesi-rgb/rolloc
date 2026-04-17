@@ -16,6 +16,7 @@
 		"tauri:dev": "tauri dev",
 		"tauri:build": "tauri build",
 		"tauri:dmg": "./scripts/build-dmg.sh",
+		"tag": "./scripts/tag.sh",
 		"db:start": "docker compose up",
 		"db:push": "drizzle-kit push",
 		"db:generate": "drizzle-kit generate",
