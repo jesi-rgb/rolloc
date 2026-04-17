@@ -16,21 +16,27 @@
 		onCommit?: (p: TransformParams) => void;
 		/** Called when fine rotation dragging starts/ends. Useful for showing alignment grid. */
 		onFineRotateDrag?: (dragging: boolean) => void;
+		/** Called when user clicks the Auto button to detect horizon lines. */
+		onAutoStraighten?: () => void;
+		/** Whether horizon detection is currently in progress. */
+		detectingHorizon?: boolean;
 	}
 
-	let { value, onChange, onCommit, onFineRotateDrag }: Props = $props();
+	let { value, onChange, onCommit, onFineRotateDrag, onAutoStraighten, detectingHorizon = false }: Props = $props();
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
 
 	let rotation = $state(untrack(() => value.rotation));
 	let flipH = $state(untrack(() => value.flipH));
 	let flipV = $state(untrack(() => value.flipV));
+	let zoom = $state(untrack(() => value.zoom ?? 1));
 
 	// Re-sync when parent swaps to a different frame
 	$effect(() => {
 		rotation = value.rotation;
 		flipH = value.flipH;
 		flipV = value.flipV;
+		zoom = value.zoom ?? 1;
 	});
 
 	/** Build the current params object. */
@@ -39,6 +45,7 @@
 			rotation,
 			flipH,
 			flipV,
+			zoom,
 		};
 	}
 
@@ -81,6 +88,7 @@
 		rotation = d.rotation;
 		flipH = d.flipH;
 		flipV = d.flipV;
+		zoom = d.zoom;
 		commit();
 	}
 
@@ -101,7 +109,8 @@
 	const isDefault = $derived(
 		rotation === DEFAULT_TRANSFORM.rotation &&
 			flipH === DEFAULT_TRANSFORM.flipH &&
-			flipV === DEFAULT_TRANSFORM.flipV,
+			flipV === DEFAULT_TRANSFORM.flipV &&
+			zoom === DEFAULT_TRANSFORM.zoom,
 	);
 
 	/**
@@ -123,11 +132,20 @@
 		rotation = nearest90 + fine;
 		emit();
 	}
+
+	/**
+	 * Handle zoom slider change.
+	 * Zoom crops in from center — values 1.0 (no zoom) to 3.0 (3x zoom).
+	 */
+	function onZoomChange(z: number): void {
+		zoom = z;
+		emit();
+	}
 </script>
 
 <!--
 	TransformControls
-	Rotation (90° buttons + fine slider) and flip controls.
+	Rotation (90° buttons + fine slider), flip, and zoom controls.
 -->
 
 <div class="flex flex-col gap-sm">
@@ -192,20 +210,54 @@
 	</div>
 
 	<!-- ── Fine rotation slider ─────────────────────────────────────────────── -->
-	<LabeledRange
-		id="transform-fine-rotation"
-		label="Fine"
-		min={-45}
-		max={45}
-		step={0.1}
-		value={fineValue}
-		defaultValue={0}
-		onchange={onFineChange}
-		oncommit={commit}
-		ondragstart={() => onFineRotateDrag?.(true)}
-		ondragend={() => onFineRotateDrag?.(false)}
-		signed
-	/>
+	<div class="flex items-center gap-xs">
+		<div class="flex-1">
+			<LabeledRange
+				id="transform-fine-rotation"
+				label="Fine"
+				min={-45}
+				max={45}
+				step={0.1}
+				value={fineValue}
+				defaultValue={0}
+				onchange={onFineChange}
+				oncommit={commit}
+				ondragstart={() => onFineRotateDrag?.(true)}
+				ondragend={() => onFineRotateDrag?.(false)}
+				signed
+			/>
+		</div>
+		{#if onAutoStraighten}
+			<button
+				onclick={onAutoStraighten}
+				disabled={detectingHorizon}
+				title="Detect horizon/vertical lines for auto-straighten"
+				aria-label="Auto straighten"
+				class="px-2 py-1 rounded border text-xs transition shrink-0
+				       border-base-subtle text-content-muted
+				       hover:border-content-muted hover:text-content
+				       disabled:opacity-50 disabled:cursor-wait"
+			>
+				{#if detectingHorizon}
+					<svg
+						class="animate-spin"
+						xmlns="http://www.w3.org/2000/svg"
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						aria-hidden="true"
+					>
+						<path d="M21 12a9 9 0 1 1-6.219-8.56" />
+					</svg>
+				{:else}
+					Auto
+				{/if}
+			</button>
+		{/if}
+	</div>
 
 	<!-- ── Flip buttons ─────────────────────────────────────────────────────── -->
 	<div class="flex items-center gap-sm">
@@ -269,6 +321,19 @@
 			</button>
 		</div>
 	</div>
+
+	<!-- ── Zoom slider ──────────────────────────────────────────────────────── -->
+	<LabeledRange
+		id="transform-zoom"
+		label="Zoom"
+		min={1}
+		max={3}
+		step={0.01}
+		value={zoom}
+		defaultValue={1}
+		onchange={onZoomChange}
+		oncommit={commit}
+	/>
 
 	<!-- ── Reset ────────────────────────────────────────────────────────────── -->
 	{#if !isDefault}

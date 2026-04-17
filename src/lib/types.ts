@@ -53,12 +53,19 @@ export interface TransformParams {
 	flipH: boolean;
 	/** Vertical flip. Applied via CSS. */
 	flipV: boolean;
+	/**
+	 * Zoom factor (1.0 = no zoom, 2.0 = 2x zoom).
+	 * Zooms from center, effectively cropping in.
+	 * Range: 1.0 to 3.0. Applied via CSS scale transform.
+	 */
+	zoom: number;
 }
 
 export const DEFAULT_TRANSFORM: TransformParams = {
 	rotation: 0,
 	flipH: false,
 	flipV: false,
+	zoom: 1,
 };
 
 // ─── Color / Curve primitives ─────────────────────────────────────────────────
