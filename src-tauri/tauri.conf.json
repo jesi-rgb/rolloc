@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Rolloc",
-  "version": "0.1.0",
+  "version": "0.2.6",
   "identifier": "com.rolloc.app",
   "build": {
     "frontendDist": "../build",

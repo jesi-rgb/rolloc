@@ -51,6 +51,30 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
+      - name: Sync version from Git tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting version to $VERSION"
+          
+          # Update tauri.conf.json
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+          else
+            sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+          fi
+          
+          # Update Cargo.toml (only the package version, not dependency versions)
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' "0,/^version = /s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          else
+            sed -i "0,/^version = /s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          fi
+          
+          echo "Updated versions:"
+          grep '"version"' src-tauri/tauri.conf.json
+          grep '^version' src-tauri/Cargo.toml | head -1
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
