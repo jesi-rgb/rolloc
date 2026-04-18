@@ -31,6 +31,9 @@ import toneCurveWGSL        from './shaders/tonecurve.wgsl?raw';
 import ingestRawWGSL        from './shaders/ingest_raw.wgsl?raw';
 import normalizationWGSL    from './shaders/normalization.wgsl?raw';
 import hdCurveWGSL          from './shaders/hd_curve.wgsl?raw';
+import glowWGSL             from './shaders/glow.wgsl?raw';
+import downsampleWGSL       from './shaders/downsample.wgsl?raw';
+import glowBlendWGSL        from './shaders/glow_blend.wgsl?raw';
 import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
 import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
 import blitWGSL             from './shaders/blit.wgsl?raw';
@@ -1098,6 +1101,22 @@ function makeHDCurveUniforms(
 	return buffer;
 }
 
+// ─── Glow uniform builder ─────────────────────────────────────────────────────
+
+/**
+ * Build the glow pass uniform buffer.
+ *
+ * GlowUniforms layout (total 16 bytes):
+ *   glow_amount : f32  @ 0
+ *   _pad0       : f32  @ 4
+ *   _pad1       : f32  @ 8
+ *   _pad2       : f32  @ 12
+ */
+function makeGlowUniforms(device: GPUDevice, glowAmount: number): GPUBuffer {
+	const data = new Float32Array([glowAmount, 0, 0, 0]);
+	return makeUniformBuffer(device, data);
+}
+
 // ─── Transform uniform builder ────────────────────────────────────────────────
 
 /**
@@ -1226,6 +1245,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const invertModule        = device.createShaderModule({ code: invertWGSL });
 	const normalizationModule = device.createShaderModule({ code: normalizationWGSL });
 	const hdCurveModule       = device.createShaderModule({ code: hdCurveWGSL });
+	const glowModule          = device.createShaderModule({ code: glowWGSL });
+	const downsampleModule    = device.createShaderModule({ code: downsampleWGSL });
+	const glowBlendModule     = device.createShaderModule({ code: glowBlendWGSL });
 	const claheHistModule     = device.createShaderModule({ code: claheHistogramWGSL });
 	const claheRemapModule    = device.createShaderModule({ code: claheRemapWGSL });
 	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
@@ -1248,6 +1270,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const invertPipeline        = makeRenderPipeline(invertModule,         'rgba16float');
 	const normalizationPipeline = makeRenderPipeline(normalizationModule,  'rgba16float');
 	const hdCurvePipeline       = makeRenderPipeline(hdCurveModule,        'rgba16float');
+	const glowPipeline          = makeRenderPipeline(glowModule,           'rgba16float');
+	const downsamplePipeline    = makeRenderPipeline(downsampleModule,     'rgba16float');
+	const glowBlendPipeline     = makeRenderPipeline(glowBlendModule,      'rgba16float');
 	const colorMatrixPipeline   = makeRenderPipeline(colorMatrixModule,    'rgba16float');
 	/**
 	 * Tone curve renders to `rgba16float` for maximum precision.
@@ -1300,6 +1325,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let intermediateC: GPUTexture | null = null;
 	/** Fourth intermediate: CLAHE remap output (between H&D curve and tonecurve). */
 	let intermediateD: GPUTexture | null = null;
+	/** Fifth intermediate: glow blend output (full resolution). */
+	let intermediateE: GPUTexture | null = null;
+	/** Downsampled texture for glow (1/4 resolution). */
+	let glowDownsampleTex: GPUTexture | null = null;
+	/** Glow blur output (1/4 resolution). */
+	let glowBlurTex: GPUTexture | null = null;
 	/**
 	 * Storage buffer for CLAHE CDF data.
 	 * Size: CLAHE_TILES_X * CLAHE_TILES_Y * CLAHE_NUM_BINS * 4 bytes (f32).
@@ -1455,11 +1486,12 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// post-H&D gamma-encoded data produces incorrect color mixing,
 			// causing a magenta tint).
 			//
-			// Pass 1: normalization  — sourceTexture  → intermediateA
-			// Pass 2: hd_curve       — intermediateA  → intermediateB
-			// Pass 2.5: clahe_histogram — compute: intermediateB → claheCdfBuffer
-			// Pass 2.6: clahe_remap    — fragment: intermediateB + CDF → intermediateC
-			// Pass 3: tonecurve      — intermediateC (or B)  → outputTexture
+			// Pass 1: normalization    — sourceTexture  → intermediateA
+			// Pass 2: hd_curve         — intermediateA  → intermediateB
+			// Pass 2.25: glow          — intermediateB  → intermediateE (if glow > 0)
+			// Pass 2.5: clahe_histogram — compute: intermediateE/B → claheCdfBuffer
+			// Pass 2.6: clahe_remap    — fragment: intermediateE/B + CDF → intermediateC
+			// Pass 3: tonecurve        — intermediateC/E/B  → outputTexture
 
 			const normBuf = makeNormalizationUniforms(device, logPerc, edit.inversionParams.filmType);
 			
@@ -1495,6 +1527,57 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// No color matrix in the negative path — per-channel log
 			// normalization already handles color separation (matching negpy).
 
+			// ── Glow pass (skip when amount is zero) ─────────────────────────
+			// Glow applies highlight bloom effect after H&D curve.
+			// Uses downsampled processing for performance:
+			//   1. Downsample H&D output to 1/4 res → glowDownsampleTex
+			//   2. Extract highlights + blur at 1/4 res → glowBlurTex
+			//   3. Blend upsampled glow onto full-res H&D output → intermediateE
+			const glowAmount = edit.inversionParams.glow ?? 0;
+			let postGlowTexture: GPUTexture;
+			
+			if (glowAmount > 0 && intermediateE && glowDownsampleTex && glowBlurTex) {
+				// Step 1: Downsample H&D output to 1/4 resolution
+				const downsampleBG = device.createBindGroup({
+					layout: downsamplePipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: sampler },
+						{ binding: 1, resource: intermediateB!.createView() },
+					],
+				});
+				drawFullscreenTriangle(encoder, downsamplePipeline, downsampleBG, glowDownsampleTex.createView());
+
+				// Step 2: Extract highlights + blur at low resolution (fast!)
+				const glowBG = device.createBindGroup({
+					layout: glowPipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: sampler },
+						{ binding: 1, resource: glowDownsampleTex.createView() },
+					],
+				});
+				drawFullscreenTriangle(encoder, glowPipeline, glowBG, glowBlurTex.createView());
+
+				// Step 3: Blend upsampled glow onto full-res original
+				const glowBlendBuf = makeGlowUniforms(device, glowAmount);
+				toClean.push(glowBlendBuf);
+
+				const glowBlendBG = device.createBindGroup({
+					layout: glowBlendPipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: sampler },
+						{ binding: 1, resource: intermediateB!.createView() },  // Original full-res
+						{ binding: 2, resource: glowBlurTex.createView() },     // Upsampled via bilinear
+						{ binding: 3, resource: { buffer: glowBlendBuf } },
+					],
+				});
+				drawFullscreenTriangle(encoder, glowBlendPipeline, glowBlendBG, intermediateE.createView());
+
+				postGlowTexture = intermediateE;
+			} else {
+				// Glow disabled — continue with H&D output
+				postGlowTexture = intermediateB!;
+			}
+
 			// ── CLAHE passes (skip when strength is zero) ────────────────────
 			const claheStrength = edit.inversionParams.claheStrength;
 			if (claheStrength > 0 && claheCdfBuffer) {
@@ -1527,7 +1610,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				const claheHistBG = device.createBindGroup({
 					layout: claheHistPipeline.getBindGroupLayout(0),
 					entries: [
-						{ binding: 0, resource: intermediateB!.createView() },
+						{ binding: 0, resource: postGlowTexture.createView() },
 						{ binding: 1, resource: { buffer: claheHistUnifBuf } },
 						{ binding: 2, resource: { buffer: claheCdfBuffer } },
 					],
@@ -1561,7 +1644,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 					layout: claheRemapPipeline.getBindGroupLayout(0),
 					entries: [
 						{ binding: 0, resource: sampler },
-						{ binding: 1, resource: intermediateB!.createView() },
+						{ binding: 1, resource: postGlowTexture.createView() },
 						{ binding: 2, resource: { buffer: claheRemapUnifBuf } },
 						{ binding: 3, resource: { buffer: claheCdfBuffer } },
 					],
@@ -1571,8 +1654,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 				beforeToneCurve = intermediateC!.createView();
 			} else {
-				// CLAHE disabled — feed H&D output directly to tonecurve.
-				beforeToneCurve = intermediateB!.createView();
+				// CLAHE disabled — feed glow output (or H&D output) to tonecurve.
+				beforeToneCurve = postGlowTexture.createView();
 			}
 		} else {
 			// ── Positive / pass-through path ──────────────────────────────────
@@ -1749,6 +1832,17 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// CLAHE needs intermediateD (remap output) + CDF storage buffer.
 			intermediateD?.destroy();
 			intermediateD = createRGBA16Texture(device, srcW, srcH);
+			// Glow blend output (full resolution).
+			intermediateE?.destroy();
+			intermediateE = createRGBA16Texture(device, srcW, srcH);
+			// Glow downsampled textures (1/4 resolution).
+			const glowW = Math.max(1, Math.floor(srcW / 4));
+			const glowH = Math.max(1, Math.floor(srcH / 4));
+			glowDownsampleTex?.destroy();
+			glowDownsampleTex = createRGBA16Texture(device, glowW, glowH);
+			glowBlurTex?.destroy();
+			glowBlurTex = createRGBA16Texture(device, glowW, glowH);
+			// CLAHE CDF storage buffer.
 			claheCdfBuffer?.destroy();
 			const cdfSize = CLAHE_TILES_X * CLAHE_TILES_Y * CLAHE_NUM_BINS * 4; // f32
 			claheCdfBuffer = device.createBuffer({
@@ -1929,6 +2023,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		intermediateB?.destroy();
 		intermediateC?.destroy();
 		intermediateD?.destroy();
+		intermediateE?.destroy();
+		glowDownsampleTex?.destroy();
+		glowBlurTex?.destroy();
 		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
 		preTransformTexture?.destroy();
