@@ -998,6 +998,8 @@
   let exporting = $state(false);
   let exportError = $state<string | null>(null);
   let exportSuccess = $state(false);
+  /** Export scale factor: 0.25, 0.5, or 1 (default). */
+  let exportScale = $state<0.25 | 0.5 | 1>(1);
 
   /**
    * Export the current frame as a full-quality JPEG.
@@ -1027,7 +1029,9 @@
       const stem = (
         await basename(currentFrame.filename).catch(() => currentFrame.filename)
       ).replace(/\.[^.]+$/, "");
-      const defaultFileName = `${stem}_export.jpg`;
+      const sizeSuffix =
+        exportScale === 0.25 ? "_sm" : exportScale === 0.5 ? "_md" : "";
+      const defaultFileName = `${stem}${sizeSuffix}.jpg`;
 
       // ── Open native Save As dialog ─────────────────────────────────
       const savePath = await saveDialog({
@@ -1066,6 +1070,7 @@
           logPerc,
           skipWb: currentRoll.rollEdit.invert,
           quality: 95,
+          scale: exportScale,
         });
       } else {
         // ── JPEG/TIFF path: GPU readback ───────────────────────────
@@ -1724,6 +1729,46 @@
             >
               Export
             </h3>
+
+            <!-- Scale selector (joined button group) -->
+            <div class="flex mb-sm" role="radiogroup" aria-label="Export scale">
+              <button
+                type="button"
+                onclick={() => (exportScale = 0.25)}
+                aria-pressed={exportScale === 0.25}
+                class="flex-1 px-sm py-xs text-xs font-medium transition
+                       border border-r-0 rounded-l
+                       {exportScale === 0.25
+                  ? 'bg-primary/15 border-primary text-primary'
+                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+              >
+                0.25x
+              </button>
+              <button
+                type="button"
+                onclick={() => (exportScale = 0.5)}
+                aria-pressed={exportScale === 0.5}
+                class="flex-1 px-sm py-xs text-xs font-medium transition
+                       border border-r-0
+                       {exportScale === 0.5
+                  ? 'bg-primary/15 border-primary text-primary'
+                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+              >
+                0.5x
+              </button>
+              <button
+                type="button"
+                onclick={() => (exportScale = 1)}
+                aria-pressed={exportScale === 1}
+                class="flex-1 px-sm py-xs text-xs font-medium transition
+                       border rounded-r
+                       {exportScale === 1
+                  ? 'bg-primary/15 border-primary text-primary'
+                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+              >
+                1x
+              </button>
+            </div>
 
             <button
               onclick={exportFrame}

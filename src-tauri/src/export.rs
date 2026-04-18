@@ -299,6 +299,41 @@ fn full_image_crop() -> CropQuad {
     }
 }
 
+// ─── Downscaling helpers ──────────────────────────────────────────────────────
+
+/// Downscale an f32 RGB image using bilinear interpolation.
+/// This produces smoother results than nearest-neighbor for the
+/// aggressive downscales (0.25x, 0.5x) used in export.
+fn downscale_bilinear(
+    src: &[f32],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<f32> {
+    let mut dst = vec![0.0_f32; dst_w * dst_h * 3];
+
+    let scale_x = src_w as f32 / dst_w as f32;
+    let scale_y = src_h as f32 / dst_h as f32;
+
+    for dst_y in 0..dst_h {
+        // Map destination center to source coordinate
+        let src_y = (dst_y as f32 + 0.5) * scale_y - 0.5;
+
+        for dst_x in 0..dst_w {
+            let src_x = (dst_x as f32 + 0.5) * scale_x - 0.5;
+            let pixel = sample_bilinear(src, src_w, src_h, src_x, src_y);
+
+            let dst_idx = (dst_y * dst_w + dst_x) * 3;
+            dst[dst_idx] = pixel[0];
+            dst[dst_idx + 1] = pixel[1];
+            dst[dst_idx + 2] = pixel[2];
+        }
+    }
+
+    dst
+}
+
 // ─── Ordered dithering helpers ────────────────────────────────────────────────
 
 /// Compute an 8×8 Bayer matrix threshold for position (x, y).
@@ -335,6 +370,7 @@ fn f32_to_u8_dithered(v: f32, dither: f32) -> u8 {
 ///                   When null/None, percentiles are recomputed from the full-res data.
 /// - `skip_wb`     — when true (film inversion), skip as-shot WB during decode.
 /// - `quality`     — JPEG quality 1–100.
+/// - `scale`       — output scale factor (0.25, 0.5, or 1.0). Defaults to 1.0 if omitted.
 #[tauri::command]
 pub async fn export_native(
     source_path: String,
@@ -343,6 +379,7 @@ pub async fn export_native(
     log_perc: Option<LogPercentiles>,
     skip_wb: Option<bool>,
     quality: u8,
+    scale: Option<f32>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         inner_export_native(
@@ -352,6 +389,7 @@ pub async fn export_native(
             log_perc.as_ref(),
             skip_wb.unwrap_or(false),
             quality,
+            scale.unwrap_or(1.0),
         )
     })
     .await
@@ -365,7 +403,14 @@ fn inner_export_native(
     log_perc: Option<&LogPercentiles>,
     skip_wb: bool,
     quality: u8,
+    scale: f32,
 ) -> Result<(), String> {
+    // Validate scale factor — must be one of the supported values.
+    let scale = if scale <= 0.0 || scale > 1.0 {
+        1.0_f32
+    } else {
+        scale
+    };
     // ── Decode RAW at full resolution (no max_px cap) ────────────────────────
     let raw = rawler::decode_file(source_path)
         .map_err(|e| format!("RAW decode failed: {e}"))?;
@@ -521,6 +566,21 @@ fn inner_export_native(
         &crop,
         &edit.transform,
     );
+
+    // ── Downscale if scale < 1.0 ─────────────────────────────────────────────
+    // Compute scaled dimensions, then use bilinear downsampling to reduce size.
+    let (final_w, final_h, rgb_f32) = if scale < 1.0 {
+        let scaled_w = ((final_w as f32 * scale).round() as usize).max(1);
+        let scaled_h = ((final_h as f32 * scale).round() as usize).max(1);
+        eprintln!(
+            "DEBUG export: scaling {}x{} -> {}x{} (scale={})",
+            final_w, final_h, scaled_w, scaled_h, scale
+        );
+        let downscaled = downscale_bilinear(&rgb_f32, final_w, final_h, scaled_w, scaled_h);
+        (scaled_w, scaled_h, downscaled)
+    } else {
+        (final_w, final_h, rgb_f32)
+    };
 
     // ── Convert f32 [0,1] sRGB → u8 [0,255] with ordered dithering ─────────
     // Uses an 8×8 Bayer matrix to break up banding in smooth gradients
