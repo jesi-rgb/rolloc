@@ -17,9 +17,10 @@
 		dirPath: string;
 		selected?: boolean;
 		onSelect?: (frame: Frame) => void;
+		onDblClick?: (frame: Frame) => void;
 	}
 
-	let { frame, dirPath, selected = false, onSelect }: Props = $props();
+	let { frame, dirPath, selected = false, onSelect, onDblClick }: Props = $props();
 
 	/**
 	 * Get the film type for this frame.
@@ -86,6 +87,7 @@
 <button
 	bind:this={el}
 	onclick={() => onSelect?.(frame)}
+	ondblclick={() => onDblClick?.(frame)}
 	class="relative flex flex-col overflow-hidden transition-all w-full
 	       focus:outline-none focus:ring-2 focus:ring-primary
 	focus:ring-offset-1 focus:ring-offset-base
