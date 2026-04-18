@@ -105,6 +105,10 @@
 		if (idx >= 0) selIdx = idx;
 	}
 
+	function openFrame(f: Frame) {
+		void goto(`/roll/${rollId}/frame/${f.id}`);
+	}
+
 	function onFrameUpdated(updated: Frame) {
 		frames = frames.map((f) => (f.id === updated.id ? updated : f));
 	}
@@ -255,6 +259,7 @@
 							dirPath={dirPath!}
 							selected={i === selIdx}
 							onSelect={selectFrame}
+							onDblClick={openFrame}
 						/>
 					{/snippet}
 				</VirtualGrid>
