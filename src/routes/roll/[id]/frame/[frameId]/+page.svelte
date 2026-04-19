@@ -56,7 +56,7 @@
   import TransformControls from "$lib/components/TransformControls.svelte";
   import { detectHorizonCandidates, createImageData } from "$lib/image/horizon-detect";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
-  import { ArrowFatUpIcon } from "phosphor-svelte";
+  import { ArrowFatUpIcon, CommandIcon } from "phosphor-svelte";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
 
@@ -1207,6 +1207,8 @@
       case "T":
       case "g":
       case "G": {
+        // Ignore when system modifiers are held (e.g. ⌘Q should quit, not nudge).
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
         // Throttle nudge keys to KEY_THROTTLE_MS to prevent runaway key-repeat.
         const k = e.key.toLowerCase();
         const now = performance.now();
@@ -1815,8 +1817,21 @@
         keys: [{ icon: ArrowFatUpIcon, eventKey: "Shift" }],
         label: "10× step",
       },
-      { keys: ["⌘Z"], label: "undo" },
-      { keys: ["⌘⇧Z"], label: "redo" },
+      {
+        keys: [
+          { icon: CommandIcon, eventKey: ["Meta", "Control"] },
+          "Z",
+        ],
+        label: "undo",
+      },
+      {
+        keys: [
+          { icon: CommandIcon, eventKey: ["Meta", "Control"] },
+          { icon: ArrowFatUpIcon, eventKey: "Shift" },
+          "Z",
+        ],
+        label: "redo",
+      },
       { keys: ["Esc"], label: "back to roll" },
     ]}
   />
