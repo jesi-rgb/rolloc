@@ -184,6 +184,15 @@ export interface InversionParams {
 	/** Saturation: uniform saturation adjustment. [-1, +1] */
 	saturation: number;
 
+	// ── Glow (highlight bloom) ────────────────────────────────────────────────
+	/**
+	 * Glow: all-channel Gaussian bloom of highlights (lens diffusion effect).
+	 * Extracts bright regions, blurs them, and blends via screen mode.
+	 * Range: 0 (off) to 1 (full strength).
+	 * Preview uses a fast downsampled algorithm; export uses full-res HQ glow.
+	 */
+	glow: number;
+
 	// ── Film type and E6-specific settings ────────────────────────────────────
 	/**
 	 * Film processing mode.
@@ -383,6 +392,7 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	claheStrength:    0.25,
 	vibrance:         0.0,
 	saturation:       0.0,
+	glow:             0.0,
 	filmType:         'C41',
 	e6Normalize:      true,
 };

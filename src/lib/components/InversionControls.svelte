@@ -49,6 +49,7 @@
 	let claheStrength = $state(untrack(() => value.claheStrength));
 	let vibrance = $state(untrack(() => value.vibrance));
 	let saturation = $state(untrack(() => value.saturation));
+	let glow = $state(untrack(() => value.glow));
 
 	// Re-sync when parent swaps to a different frame / roll
 	$effect(() => {
@@ -80,6 +81,7 @@
 		claheStrength = value.claheStrength;
 		vibrance = value.vibrance;
 		saturation = value.saturation;
+		glow = value.glow;
 	});
 
 	/** Build the current params object. */
@@ -111,6 +113,7 @@
 			claheStrength,
 			vibrance,
 			saturation,
+			glow,
 		};
 	}
 
@@ -152,6 +155,7 @@
 		claheStrength = d.claheStrength;
 		vibrance = d.vibrance;
 		saturation = d.saturation;
+		glow = d.glow;
 		// Reset is a discrete action — commit immediately so it persists + adds to history.
 		commit();
 	}
@@ -182,7 +186,8 @@
 			shoulderHardness === DEFAULT_INVERSION_PARAMS.shoulderHardness &&
 			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength &&
 			vibrance === DEFAULT_INVERSION_PARAMS.vibrance &&
-			saturation === DEFAULT_INVERSION_PARAMS.saturation,
+			saturation === DEFAULT_INVERSION_PARAMS.saturation &&
+			glow === DEFAULT_INVERSION_PARAMS.glow,
 	);
 </script>
 
@@ -718,6 +723,31 @@
 				}}
 				oncommit={commit}
 				signed
+			/>
+		</div>
+	</section>
+
+	<!-- ── Effects ─────────────────────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Effects
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-glow"
+				label="Glow"
+				min={0}
+				max={5}
+				step={0.01}
+				value={glow}
+				defaultValue={DEFAULT_INVERSION_PARAMS.glow}
+				onchange={(v) => {
+					glow = v;
+					emit();
+				}}
+				oncommit={commit}
 			/>
 		</div>
 	</section>
