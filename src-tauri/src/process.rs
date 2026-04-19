@@ -168,6 +168,11 @@ pub struct InversionParams {
 pub struct LogPercentiles {
     pub floors: [f32; 3],
     pub ceils: [f32; 3],
+    /// Auto-exposure correction in density units (matches GPU pipeline).
+    /// Positive = image is dark, needs brightening (reduce pivot density).
+    /// When `None`, treated as 0.0 (e.g. server-side compute_log_percentiles).
+    #[serde(default, rename = "autoExposure")]
+    pub auto_exposure: Option<f32>,
 }
 
 // ─── Curve LUT building (Fritsch–Carlson monotone cubic) ──────────────────────
@@ -444,6 +449,7 @@ pub fn compute_log_percentiles(
             percentile(&mut g_log, 99.999),
             percentile(&mut b_log, 99.999),
         ],
+        auto_exposure: None,
     }
 }
 
@@ -579,9 +585,10 @@ struct HDParams {
 }
 
 impl HDParams {
-    fn from_inversion(inv: &InversionParams) -> Self {
+    fn from_inversion(inv: &InversionParams, auto_exposure_adj: f32) -> Self {
+        let effective_density = inv.density - auto_exposure_adj;
         Self {
-            pivot: 1.0 - (0.01 + inv.density * DENSITY_MULTIPLIER),
+            pivot: 1.0 - (0.01 + effective_density * DENSITY_MULTIPLIER),
             slope: 1.0 + inv.grade * GRADE_MULTIPLIER,
             cmy_r: inv.cmy_cyan * CMY_MAX_DENSITY,
             cmy_g: inv.cmy_magenta * CMY_MAX_DENSITY,
@@ -1261,7 +1268,10 @@ pub fn process_image(
             }
         };
 
-        let hd = HDParams::from_inversion(&edit.inversion_params);
+        let hd = HDParams::from_inversion(
+            &edit.inversion_params,
+            perc.auto_exposure.unwrap_or(0.0),
+        );
         let is_bw = edit.inversion_params.film_type == "BW";
 
         // Step 1+2: Log normalization + H&D curve (fused, parallel by row).
