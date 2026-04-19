@@ -5,8 +5,19 @@
 		getAvailableUpdate,
 		isDownloading,
 		installUpdate,
+		checkForUpdate,
+		isChecking,
+		getError,
+		clearError,
+		updaterAvailable,
 	} from "$lib/updater.svelte";
-	import { SunIcon, MoonIcon, DownloadSimpleIcon } from "phosphor-svelte";
+	import {
+		SunIcon,
+		MoonIcon,
+		DownloadSimpleIcon,
+		ArrowClockwiseIcon,
+		WarningIcon,
+	} from "phosphor-svelte";
 
 	/** An icon key bound to one or more KeyboardEvent.key values. */
 	interface IconKey {
@@ -32,6 +43,9 @@
 	const theme = $derived(getTheme());
 	const update = $derived(getAvailableUpdate());
 	const downloading = $derived(isDownloading());
+	const checking = $derived(isChecking());
+	const updateError = $derived(getError());
+	const canCheck = $derived(updaterAvailable());
 
 	/** Type guard: is the key an IconKey object (not a bare Component)? */
 	function isIconKey(key: Key): key is IconKey {
@@ -197,6 +211,33 @@
 			<DownloadSimpleIcon size={14} class={downloading ? 'animate-bounce' : ''} />
 			<span>{downloading ? 'Installing...' : `v${update.version}`}</span>
 		</button>
+	{:else if updateError}
+		<button
+			onclick={() => { clearError(); checkForUpdate(); }}
+			aria-label="Update check failed: {updateError}. Click to retry."
+			title="Update check failed: {updateError}. Click to retry."
+			class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
+			       text-red-500 hover:bg-red-500/10 transition-colors
+			       {progress ? '' : 'ml-auto'}"
+		>
+			<WarningIcon size={14} />
+			<span>update check failed</span>
+		</button>
+	{/if}
+
+	<!-- Manual "check for updates" button (Tauri only) -->
+	{#if canCheck && !update}
+		<button
+			onclick={() => checkForUpdate()}
+			disabled={checking}
+			aria-label={checking ? "Checking for updates..." : "Check for updates"}
+			title={checking ? "Checking for updates..." : "Check for updates"}
+			class="p-0.5 rounded text-content-muted hover:text-content transition-colors
+			       {checking ? 'cursor-wait' : ''}
+			       {progress || updateError ? '' : 'ml-auto'}"
+		>
+			<ArrowClockwiseIcon size={14} class={checking ? 'animate-spin' : ''} />
+		</button>
 	{/if}
 
 	<!-- Theme toggle (sun/moon) -->
@@ -204,7 +245,7 @@
 		onclick={toggleTheme}
 		aria-label="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
 		title="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
-		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress || update ? '' : 'ml-auto'}"
+		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress || update || updateError || canCheck ? '' : 'ml-auto'}"
 	>
 		{#if theme === "dark"}
 			<SunIcon size={14} />

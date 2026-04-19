@@ -15,6 +15,7 @@ let availableUpdate: Update | null = $state(null);
 let checking: boolean = $state(false);
 let downloading: boolean = $state(false);
 let error: string | null = $state(null);
+let lastCheckedAt: number | null = $state(null);
 
 /** Whether an update is available. */
 export function getAvailableUpdate(): Update | null {
@@ -36,6 +37,21 @@ export function getError(): string | null {
 	return error;
 }
 
+/** Timestamp (ms) of the last completed check, or null if never checked. */
+export function getLastCheckedAt(): number | null {
+	return lastCheckedAt;
+}
+
+/** True when running inside a Tauri WebView — used by UI to show the re-check button. */
+export function updaterAvailable(): boolean {
+	return isTauri();
+}
+
+/** Clear any sticky error (e.g. after user dismissed the indicator). */
+export function clearError(): void {
+	error = null;
+}
+
 /**
  * Check for updates. Safe to call from browser (no-op).
  * Returns the update if available, null otherwise.
@@ -48,8 +64,16 @@ export async function checkForUpdate(): Promise<Update | null> {
 
 	try {
 		const { check } = await import('@tauri-apps/plugin-updater');
+		console.info('[updater] checking for updates…');
 		const update = await check();
 		availableUpdate = update;
+		if (update) {
+			console.info(
+				`[updater] update available: ${update.currentVersion} → ${update.version}`,
+			);
+		} else {
+			console.info('[updater] no update available (already on latest)');
+		}
 		return update;
 	} catch (e) {
 		error = e instanceof Error ? e.message : String(e);
@@ -57,6 +81,7 @@ export async function checkForUpdate(): Promise<Update | null> {
 		return null;
 	} finally {
 		checking = false;
+		lastCheckedAt = Date.now();
 	}
 }
 
