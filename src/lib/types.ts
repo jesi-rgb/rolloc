@@ -189,6 +189,7 @@ export interface InversionParams {
 	 * Glow: all-channel Gaussian bloom of highlights (lens diffusion effect).
 	 * Extracts bright regions, blurs them, and blends via screen mode.
 	 * Range: 0 (off) to 1 (full strength).
+	 * Preview uses a fast downsampled algorithm; export uses full-res HQ glow.
 	 */
 	glow: number;
 

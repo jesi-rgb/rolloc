@@ -1104,9 +1104,9 @@ function makeHDCurveUniforms(
 // ─── Glow uniform builder ─────────────────────────────────────────────────────
 
 /**
- * Build the glow pass uniform buffer.
+ * Build the glow-blend pass uniform buffer.
  *
- * GlowUniforms layout (total 16 bytes):
+ * GlowBlendUniforms layout (total 16 bytes):
  *   glow_amount : f32  @ 0
  *   _pad0       : f32  @ 4
  *   _pad1       : f32  @ 8
@@ -1115,6 +1115,52 @@ function makeHDCurveUniforms(
 function makeGlowUniforms(device: GPUDevice, glowAmount: number): GPUBuffer {
 	const data = new Float32Array([glowAmount, 0, 0, 0]);
 	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Build the glow-extract pass uniform buffer.
+ *
+ * GlowUniforms layout (total 16 bytes):
+ *   sample_radius : f32  @ 0   — Fibonacci spiral radius, in downsampled pixels
+ *   _pad0 .. _pad2 : f32
+ *
+ * The radius is scaled by the image's size relative to the reference preview
+ * size so that the bloom covers a consistent fraction of the image at any
+ * resolution (native export, lightbox preview, etc.).
+ */
+function makeGlowExtractUniforms(device: GPUDevice, sampleRadius: number): GPUBuffer {
+	const data = new Float32Array([sampleRadius, 0, 0, 0]);
+	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Reference image long-edge used to scale the glow sample radius. Matches
+ * `PREVIEW_SIZE` in `src/lib/image/thumbgen.ts` (the lightbox pre-render
+ * dimension at which the current 5-pixel spiral radius was tuned).
+ */
+const GLOW_REFERENCE_SIZE = 1200;
+
+/**
+ * Base Fibonacci-spiral sample radius (in downsampled pixels) at the
+ * reference image size. This is what the shader used to hard-code.
+ */
+const GLOW_BASE_SAMPLE_RADIUS = 5;
+
+/**
+ * Clamp on the scaled radius. At 64 taps, the tap spacing becomes visibly
+ * sparse past this value (taps start to "splotch"), and the extra reach
+ * stops mattering visually.
+ */
+const GLOW_MAX_SAMPLE_RADIUS = 40;
+
+/**
+ * Compute the glow sample radius for an image of the given full-res dimensions.
+ * Used by both the preview pipeline and the native export (in Rust) so they
+ * produce identical bloom.
+ */
+function glowSampleRadiusForImage(width: number, height: number): number {
+	const scale = Math.max(width, height) / GLOW_REFERENCE_SIZE;
+	return Math.min(GLOW_BASE_SAMPLE_RADIUS * scale, GLOW_MAX_SAMPLE_RADIUS);
 }
 
 // ─── Transform uniform builder ────────────────────────────────────────────────
@@ -1529,10 +1575,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			// ── Glow pass (skip when amount is zero) ─────────────────────────
 			// Glow applies highlight bloom effect after H&D curve.
-			// Uses downsampled processing for performance:
+			// Uses fast downsampled processing for preview performance:
 			//   1. Downsample H&D output to 1/4 res → glowDownsampleTex
 			//   2. Extract highlights + blur at 1/4 res → glowBlurTex
 			//   3. Blend upsampled glow onto full-res H&D output → intermediateE
+			// (Native export uses HQ full-res glow in Rust process.rs)
 			const glowAmount = edit.inversionParams.glow ?? 0;
 			let postGlowTexture: GPUTexture;
 			
@@ -1548,11 +1595,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				drawFullscreenTriangle(encoder, downsamplePipeline, downsampleBG, glowDownsampleTex.createView());
 
 				// Step 2: Extract highlights + blur at low resolution (fast!)
+				// Scale the Fibonacci-spiral radius by image size so the bloom
+				// covers a consistent fraction of the image at any resolution.
+				const sampleRadius = glowSampleRadiusForImage(w, h);
+				const glowExtractBuf = makeGlowExtractUniforms(device, sampleRadius);
+				toClean.push(glowExtractBuf);
+
 				const glowBG = device.createBindGroup({
 					layout: glowPipeline.getBindGroupLayout(0),
 					entries: [
 						{ binding: 0, resource: sampler },
 						{ binding: 1, resource: glowDownsampleTex.createView() },
+						{ binding: 2, resource: { buffer: glowExtractBuf } },
 					],
 				});
 				drawFullscreenTriangle(encoder, glowPipeline, glowBG, glowBlurTex.createView());

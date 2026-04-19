@@ -145,6 +145,16 @@ pub struct InversionParams {
     pub shoulder_hardness: f32,
     /// CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default.
     pub clahe_strength: f32,
+    /// Glow (highlight bloom) strength [0,1]. 0 = off.
+    /// Applies Gaussian blur to bright highlights and blends via screen mode.
+    #[serde(default)]
+    pub glow: f32,
+    /// Vibrance: intelligent saturation that protects already-saturated colors. [-1, +1]
+    #[serde(default)]
+    pub vibrance: f32,
+    /// Saturation: uniform saturation adjustment. [-1, +1]
+    #[serde(default)]
+    pub saturation: f32,
     /// Film type: "C41" (color negative), "BW" (black & white), "E6" (slide).
     pub film_type: String,
     /// E6 normalize mode — not used in CPU processing yet.
@@ -653,6 +663,315 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
 
 // ─── Color matrix pass (positive path only) ──────────────────────────────────
 
+// ─── Vibrance + Saturation ────────────────────────────────────────────────────
+//
+// Direct port of `apply_vibrance_saturation` in hd_curve.wgsl. The preview
+// applies this inside the H&D fragment shader immediately after the H&D curve
+// and before glow, so we do the same here in the CPU pipeline.
+
+/// Apply vibrance and saturation adjustments to an RGB f32 buffer in-place.
+///
+/// - `saturation` ∈ [-1, +1]: uniform blend toward/away from grayscale.
+/// - `vibrance` ∈ [-1, +1]: intelligent saturation that attenuates on already-
+///   saturated pixels (stronger effect on desaturated ones).
+///
+/// Skipped when both values are zero. Not called for B&W (the caller guards).
+fn apply_vibrance_saturation(
+    pixels: &mut [f32],
+    width: usize,
+    vibrance: f32,
+    saturation: f32,
+) {
+    if vibrance == 0.0 && saturation == 0.0 {
+        return;
+    }
+
+    let sat_factor = 1.0 + saturation;
+
+    pixels.par_chunks_mut(width * 3).for_each(|row| {
+        for i in (0..row.len()).step_by(3) {
+            let r = row[i];
+            let g = row[i + 1];
+            let b = row[i + 2];
+
+            // Saturation: mix toward grayscale using Rec.709 luminance.
+            let lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
+            let mut rr = lum + (r - lum) * sat_factor;
+            let mut gg = lum + (g - lum) * sat_factor;
+            let mut bb = lum + (b - lum) * sat_factor;
+
+            // Vibrance: stronger effect on less-saturated pixels.
+            if vibrance != 0.0 {
+                let max_c = rr.max(gg).max(bb);
+                let min_c = rr.min(gg).min(bb);
+                let chroma = max_c - min_c;
+                // Match shader: sat_level = chroma / max_c (0 when max_c very small).
+                let sat_level = if max_c < 0.001 {
+                    0.0
+                } else {
+                    chroma / max_c.max(0.001)
+                };
+                let vib_strength = vibrance * (1.0 - sat_level);
+                let vib_factor = 1.0 + vib_strength;
+
+                let lum2 = LUMA_R * rr + LUMA_G * gg + LUMA_B * bb;
+                rr = lum2 + (rr - lum2) * vib_factor;
+                gg = lum2 + (gg - lum2) * vib_factor;
+                bb = lum2 + (bb - lum2) * vib_factor;
+            }
+
+            // Match shader's final clamp.
+            row[i] = rr.clamp(0.0, 1.0);
+            row[i + 1] = gg.clamp(0.0, 1.0);
+            row[i + 2] = bb.clamp(0.0, 1.0);
+        }
+    });
+}
+
+// ─── Glow (Highlight Bloom) ───────────────────────────────────────────────────
+//
+// Direct port of the GPU preview shaders (`glow.wgsl` + `glow_blend.wgsl`).
+// We keep the export visually identical to the preview by reusing the same
+// algorithm: downsample to 1/4 res, run a 64-tap Fibonacci-spiral sample of
+// highlight-weighted color with Gaussian falloff, then bilinearly upsample
+// and screen-blend onto the original.
+//
+// This is fast (64 taps at 1/16 the pixel count) and produces exactly the
+// bloom the user sees during editing.
+
+/// Highlight threshold for glow extraction (luma above this contributes).
+/// Matches `HIGHLIGHT_THRESHOLD` in glow.wgsl.
+const GLOW_HIGHLIGHT_THRESHOLD: f32 = 0.5;
+
+/// Reference image long-edge used to scale the Fibonacci sample radius.
+/// Must stay in sync with `GLOW_REFERENCE_SIZE` in pipeline.ts and with
+/// `PREVIEW_SIZE` in thumbgen.ts — this is the lightbox pre-render size
+/// at which the base 5-pixel radius was tuned.
+const GLOW_REFERENCE_SIZE: f32 = 1200.0;
+
+/// Base Fibonacci-spiral sample radius (in downsampled pixels) at the
+/// reference image size. Matches `GLOW_BASE_SAMPLE_RADIUS` in pipeline.ts.
+const GLOW_BASE_SAMPLE_RADIUS: f32 = 5.0;
+
+/// Upper bound on the scaled radius — past this the 64 taps become visibly
+/// sparse. Matches `GLOW_MAX_SAMPLE_RADIUS` in pipeline.ts.
+const GLOW_MAX_SAMPLE_RADIUS: f32 = 40.0;
+
+/// Compute the Fibonacci-spiral sample radius for an image of the given
+/// full-resolution dimensions. Preview (TS) and export (Rust) call the
+/// same formula so bloom spread is consistent across resolutions.
+fn glow_sample_radius_for_image(width: usize, height: usize) -> f32 {
+    let scale = (width.max(height) as f32) / GLOW_REFERENCE_SIZE;
+    (GLOW_BASE_SAMPLE_RADIUS * scale).min(GLOW_MAX_SAMPLE_RADIUS)
+}
+
+/// Sum of exp(-2*r²) across the 64 Fibonacci samples — used to normalize
+/// the accumulator, matching `BLOOM_GAUSS_SUM` in glow.wgsl. Independent of
+/// the sample radius since the weights come from the unit-disk offset.
+const GLOW_BLOOM_GAUSS_SUM: f32 = 27.668145;
+
+/// 64-tap Fibonacci spiral — identical to `FIBONACCI_64` in glow.wgsl.
+/// Points lie in the unit disk; scale by the per-image sample radius
+/// (see `glow_sample_radius_for_image`) when sampling.
+#[rustfmt::skip]
+const GLOW_FIBONACCI_64: [(f32, f32); 64] = [
+    ( 0.088388,  0.000000), (-0.112886,  0.103413), ( 0.017279, -0.196886), ( 0.142286,  0.185586),
+    (-0.261112, -0.046187), ( 0.247348, -0.157342), (-0.082733,  0.307763), (-0.157781, -0.303797),
+    ( 0.342321,  0.125015), (-0.356128,  0.147004), ( 0.171677, -0.366864), ( 0.126865,  0.404466),
+    (-0.382373, -0.221593), ( 0.448567, -0.098616), (-0.273753,  0.389386), (-0.063243, -0.488045),
+    ( 0.388252,  0.327220), (-0.522466,  0.021606), ( 0.381099, -0.379244), (-0.025497,  0.551396),
+    (-0.362617, -0.434536), ( 0.574425,  0.077288), (-0.486709,  0.338640), ( 0.132997, -0.591185),
+    ( 0.307615,  0.536829), (-0.601358, -0.191850), ( 0.584143, -0.269889), (-0.253065,  0.604686),
+    (-0.225855, -0.627935), ( 0.600976,  0.315856), (-0.667533,  0.175960), ( 0.379431, -0.590102),
+    ( 0.120699,  0.702313), (-0.572008, -0.442995), ( 0.731702, -0.060620), (-0.505760,  0.546712),
+    ( 0.003684, -0.755181), ( 0.514305,  0.566946), (-0.772295, -0.071576), ( 0.625787, -0.474950),
+    (-0.142381,  0.782650), (-0.428884, -0.681539), ( 0.785920,  0.215388), (-0.733486,  0.376413),
+    ( 0.289862, -0.781852), ( 0.317911,  0.780942), (-0.770264, -0.365042), ( 0.823263, -0.253821),
+    (-0.440157,  0.751049), (-0.184643, -0.859851), ( 0.724177,  0.514422), (-0.890157,  0.110939),
+    ( 0.587054, -0.689695), ( 0.033320,  0.913689), (-0.647727, -0.657276), ( 0.930014,  0.047552),
+    (-0.724323,  0.598472), ( 0.130975, -0.938767), ( 0.542205,  0.787449), (-0.939649, -0.216211),
+    ( 0.845937, -0.479274), (-0.302492,  0.932436), (-0.410097, -0.899101), ( 0.916976,  0.389028),
+];
+
+/// Downsample an RGB float buffer to ~1/4 resolution via box average over 4×4 blocks.
+/// The output dimensions are `(width/4, height/4)` (integer division, min 1).
+fn glow_downsample_quarter(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+) -> (Vec<f32>, usize, usize) {
+    let dw = (width / 4).max(1);
+    let dh = (height / 4).max(1);
+    let mut out = vec![0.0_f32; dw * dh * 3];
+
+    out.par_chunks_mut(dw * 3).enumerate().for_each(|(dy, row)| {
+        let y0 = dy * 4;
+        let y1 = (y0 + 4).min(height);
+        for dx in 0..dw {
+            let x0 = dx * 4;
+            let x1 = (x0 + 4).min(width);
+            let mut sr = 0.0_f32;
+            let mut sg = 0.0_f32;
+            let mut sb = 0.0_f32;
+            let mut n = 0.0_f32;
+            for y in y0..y1 {
+                let row_base = y * width * 3;
+                for x in x0..x1 {
+                    let i = row_base + x * 3;
+                    sr += pixels[i];
+                    sg += pixels[i + 1];
+                    sb += pixels[i + 2];
+                    n += 1.0;
+                }
+            }
+            let inv_n = 1.0 / n;
+            let di = dx * 3;
+            row[di] = sr * inv_n;
+            row[di + 1] = sg * inv_n;
+            row[di + 2] = sb * inv_n;
+        }
+    });
+
+    (out, dw, dh)
+}
+
+/// Sample a downsampled RGB buffer with nearest-neighbor at integer pixel coords,
+/// clamped to the texture edge. Mirrors the shader's clamp-to-edge sampling.
+#[inline]
+fn glow_sample_nn(buf: &[f32], w: usize, h: usize, x: i32, y: i32) -> (f32, f32, f32) {
+    let sx = x.clamp(0, w as i32 - 1) as usize;
+    let sy = y.clamp(0, h as i32 - 1) as usize;
+    let i = (sy * w + sx) * 3;
+    (buf[i], buf[i + 1], buf[i + 2])
+}
+
+/// Apply glow (highlight bloom) effect to an RGB f32 buffer in-place.
+///
+/// This is a line-by-line port of the GPU preview pipeline (glow.wgsl +
+/// glow_blend.wgsl), so preview and export produce the same visual result.
+///
+/// Steps:
+///   1. Downsample the image to 1/4 resolution (box average over 4×4 blocks).
+///   2. For each pixel in the downsampled buffer, accumulate 64 Fibonacci-spiral
+///      samples weighted by:
+///        - the sampled pixel's highlight mask  ((luma - 0.5)/0.5)² clamped to [0,1]
+///        - a Gaussian falloff  exp(-2 * r²)   where r ∈ [0,1] is the spiral radius
+///      Divide by the normalization constant BLOOM_GAUSS_SUM.
+///   3. Bilinearly upsample the glow buffer to full resolution.
+///   4. Screen-blend onto the original:  out = 1 - (1 - orig) * (1 - glow * amount).
+fn apply_glow(pixels: &mut [f32], width: usize, height: usize, amount: f32) {
+    if amount <= 0.0 || width == 0 || height == 0 {
+        return;
+    }
+
+    // Step 1: downsample to ~1/4 resolution.
+    let (src_small, dw, dh) = glow_downsample_quarter(pixels, width, height);
+
+    // Compute the Fibonacci-spiral sample radius for this image's resolution.
+    // Matches the per-image radius used in the preview (pipeline.ts).
+    let sample_radius = glow_sample_radius_for_image(width, height);
+
+    // Step 2: Fibonacci-spiral bloom accumulation on the downsampled buffer.
+    let inv_norm = 1.0 / GLOW_BLOOM_GAUSS_SUM;
+    let mut glow_small = vec![0.0_f32; dw * dh * 3];
+    glow_small
+        .par_chunks_mut(dw * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..dw {
+                let mut acc_r = 0.0_f32;
+                let mut acc_g = 0.0_f32;
+                let mut acc_b = 0.0_f32;
+                for &(ox, oy) in GLOW_FIBONACCI_64.iter() {
+                    let gx = x as i32 + (ox * sample_radius).round() as i32;
+                    let gy = y as i32 + (oy * sample_radius).round() as i32;
+                    let (sr, sg, sb) = glow_sample_nn(&src_small, dw, dh, gx, gy);
+
+                    let luma = LUMA_R * sr + LUMA_G * sg + LUMA_B * sb;
+                    let hl_lin = ((luma - GLOW_HIGHLIGHT_THRESHOLD)
+                        / (1.0 - GLOW_HIGHLIGHT_THRESHOLD))
+                        .max(0.0);
+                    let hl = hl_lin * hl_lin;
+
+                    // Gaussian weight exp(-2 r²) where r = length(offset) ∈ [0,1].
+                    let r2 = ox * ox + oy * oy;
+                    let w = (-r2 * 2.0).exp();
+                    let k = hl * w;
+
+                    acc_r += sr * k;
+                    acc_g += sg * k;
+                    acc_b += sb * k;
+                }
+                let di = x * 3;
+                row[di] = (acc_r * inv_norm).clamp(0.0, 1.0);
+                row[di + 1] = (acc_g * inv_norm).clamp(0.0, 1.0);
+                row[di + 2] = (acc_b * inv_norm).clamp(0.0, 1.0);
+            }
+        });
+
+    // Steps 3 & 4 fused: bilinear upsample + screen blend in one pass.
+    // For each full-resolution pixel, compute the corresponding fractional
+    // coordinate in the downsampled glow buffer, fetch 4 neighbors, lerp,
+    // and screen-blend with the original.
+    let sx_scale = dw as f32 / width as f32;
+    let sy_scale = dh as f32 / height as f32;
+
+    pixels
+        .par_chunks_mut(width * 3)
+        .enumerate()
+        .for_each(|(y, dst_row)| {
+            // Fractional y in glow-space, centered on the source texel (match
+            // GPU sampler semantics: sample at pixel centers).
+            let fy = (y as f32 + 0.5) * sy_scale - 0.5;
+            let y0 = fy.floor() as i32;
+            let y1 = y0 + 1;
+            let ty = fy - y0 as f32;
+            let y0c = y0.clamp(0, dh as i32 - 1) as usize;
+            let y1c = y1.clamp(0, dh as i32 - 1) as usize;
+
+            for x in 0..width {
+                let fx = (x as f32 + 0.5) * sx_scale - 0.5;
+                let x0 = fx.floor() as i32;
+                let x1 = x0 + 1;
+                let tx = fx - x0 as f32;
+                let x0c = x0.clamp(0, dw as i32 - 1) as usize;
+                let x1c = x1.clamp(0, dw as i32 - 1) as usize;
+
+                // Fetch 4 neighbors.
+                let i00 = (y0c * dw + x0c) * 3;
+                let i10 = (y0c * dw + x1c) * 3;
+                let i01 = (y1c * dw + x0c) * 3;
+                let i11 = (y1c * dw + x1c) * 3;
+
+                // Bilinear lerp, per channel.
+                let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+                let gr = lerp(
+                    lerp(glow_small[i00], glow_small[i10], tx),
+                    lerp(glow_small[i01], glow_small[i11], tx),
+                    ty,
+                ) * amount;
+                let gg = lerp(
+                    lerp(glow_small[i00 + 1], glow_small[i10 + 1], tx),
+                    lerp(glow_small[i01 + 1], glow_small[i11 + 1], tx),
+                    ty,
+                ) * amount;
+                let gb = lerp(
+                    lerp(glow_small[i00 + 2], glow_small[i10 + 2], tx),
+                    lerp(glow_small[i01 + 2], glow_small[i11 + 2], tx),
+                    ty,
+                ) * amount;
+
+                // Screen blend: out = 1 - (1 - base) * (1 - glow).
+                let di = x * 3;
+                dst_row[di] = (1.0 - (1.0 - dst_row[di]) * (1.0 - gr)).clamp(0.0, 1.0);
+                dst_row[di + 1] =
+                    (1.0 - (1.0 - dst_row[di + 1]) * (1.0 - gg)).clamp(0.0, 1.0);
+                dst_row[di + 2] =
+                    (1.0 - (1.0 - dst_row[di + 2]) * (1.0 - gb)).clamp(0.0, 1.0);
+            }
+        });
+}
+
 // ─── CLAHE (Contrast Limited Adaptive Histogram Equalization) ─────────────────
 
 /// CLAHE tile grid dimensions (matches negpy's default grid_dim=8).
@@ -966,6 +1285,23 @@ pub fn process_image(
 
         // No color matrix in the negative path — per-channel log
         // normalization already handles color separation (matching negpy).
+
+        // Step 2.25: Vibrance + saturation — matches the preview's H&D shader,
+        // which applies these immediately after the H&D curve (and skips them
+        // for B&W film, which has already been collapsed to luminance).
+        if !is_bw {
+            apply_vibrance_saturation(
+                pixels,
+                width,
+                edit.inversion_params.vibrance,
+                edit.inversion_params.saturation,
+            );
+        }
+
+        // Step 2.5: Glow (highlight bloom) — applied after H&D curve, before CLAHE.
+        // Direct port of the GPU preview's glow.wgsl + glow_blend.wgsl so preview
+        // and export produce matching output.
+        apply_glow(pixels, width, height, edit.inversion_params.glow);
 
         // Step 3: CLAHE (needs the full H&D output before it can run).
         apply_clahe(pixels, width, height, edit.inversion_params.clahe_strength);

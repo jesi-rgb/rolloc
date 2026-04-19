@@ -739,7 +739,7 @@
 				id="inv-glow"
 				label="Glow"
 				min={0}
-				max={1}
+				max={5}
 				step={0.01}
 				value={glow}
 				defaultValue={DEFAULT_INVERSION_PARAMS.glow}

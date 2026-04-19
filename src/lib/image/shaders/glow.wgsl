@@ -23,10 +23,8 @@ const LUMA_COEFFS = vec3<f32>(0.2126, 0.7152, 0.0722);
 // Highlight threshold for glow extraction
 const HIGHLIGHT_THRESHOLD: f32 = 0.5;
 
-// Glow blur radius in pixels (at the downsampled resolution)
-// 15px at full res / 4 = ~4px, but we use a slightly larger radius
-// to compensate for the lower resolution
-const GLOW_RADIUS: f32 = 5.0;
+// Glow blur radius in pixels (at the downsampled resolution). Now supplied
+// via a uniform — see `GlowUniforms.sample_radius`.
 
 // 64-tap Fibonacci spiral — uniform area coverage, smooth Gaussian approximation.
 // Points lie in the unit disk; scale by the desired pixel radius when sampling.
@@ -97,12 +95,26 @@ const FIBONACCI_64 = array<vec2<f32>, 64>(
 	vec2<f32>(0.916976, 0.389028)
 );
 
+// Sample radius (in downsampled pixels) for the Fibonacci spiral.
+// Scaled by the image's size relative to the 1200-px preview reference so
+// the bloom covers a consistent *fraction* of the image at any resolution.
+// Provided via uniform so preview and export share identical math.
+struct GlowUniforms {
+	sample_radius : f32,
+	_pad0         : f32,
+	_pad1         : f32,
+	_pad2         : f32,
+}
+
 // Sum of exp(-2*r^2) over all 64 Fibonacci samples — used to normalize the
 // accumulator the same way a Gaussian convolution kernel is normalized (sum=1).
+// Independent of the sample radius since the weights are computed from the
+// unit-disk offset, not from the scaled pixel distance.
 const BLOOM_GAUSS_SUM: f32 = 27.668145;
 
 @group(0) @binding(0) var uSampler : sampler;
 @group(0) @binding(1) var uTexture : texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u : GlowUniforms;
 
 struct VertIn {
 	@builtin(vertex_index) idx : u32,
@@ -133,7 +145,7 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 
 	for (var tap = 0; tap < 64; tap++) {
 		let offset = FIBONACCI_64[tap];
-		let g_off = offset * GLOW_RADIUS;
+		let g_off = offset * u.sample_radius;
 		let g_coord = clamp(coords + vec2<i32>(g_off), vec2<i32>(0), vec2<i32>(dims) - 1);
 		
 		// Sample the neighbor pixel
