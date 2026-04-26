@@ -1634,25 +1634,12 @@
 
           <!-- NegPy inversion controls (only when invert = true) -->
           <section>
-            <div class="flex items-center justify-between mb-sm">
-              <h3
-                class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
-              >
-                Inversion
-              </h3>
-              <ToggleButton
-                active={wbPickerActive}
-                onclick={toggleWbPicker}
-                title="Pick a neutral white or gray pixel on the image to auto-set color balance"
-              >
-                <EyedropperSampleIcon weight="duotone" size={18} />
-                White Balance
-              </ToggleButton>
-            </div>
             <InversionControls
               value={effectiveInversionParams}
               onChange={onInversionChange}
               onCommit={onInversionCommit}
+              {wbPickerActive}
+              onToggleWbPicker={toggleWbPicker}
             />
           </section>
         {/if}
