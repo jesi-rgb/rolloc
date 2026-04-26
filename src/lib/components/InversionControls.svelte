@@ -3,6 +3,7 @@
 	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
+	import JointSlider from "./JointSlider.svelte";
 	import ColorFilmButton from "./ColorFilmButton.svelte";
 	import BlackWhiteFilmButton from "./BlackWhiteFilmButton.svelte";
 	import SlideFilmButton from "./SlideFilmButton.svelte";
@@ -229,50 +230,6 @@
 				}}
 			/>
 		</div>
-		{#if filmType === "E6"}
-			<label
-				class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
-			>
-				<input
-					type="checkbox"
-					checked={e6Normalize}
-					onchange={(e) => {
-						e6Normalize = e.currentTarget.checked;
-						commit();
-					}}
-					class="accent-accent"
-				/>
-				Auto-normalize (percentile stretch)
-			</label>
-		{/if}
-		<label
-			class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
-		>
-			<input
-				type="checkbox"
-				checked={autoLevels}
-				onchange={(e) => {
-					autoLevels = e.currentTarget.checked;
-					commit();
-				}}
-				class="accent-accent"
-			/>
-			Auto-levels (histogram black point)
-		</label>
-		<label
-			class="flex items-center gap-xs mt-sm text-xs text-content-subtle cursor-pointer"
-		>
-			<input
-				type="checkbox"
-				checked={autoExposure}
-				onchange={(e) => {
-					autoExposure = e.currentTarget.checked;
-					commit();
-				}}
-				class="accent-accent"
-			/>
-			Auto-exposure (target middle gray)
-		</label>
 	</section>
 
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
@@ -282,62 +239,50 @@
 		>
 			Color timing
 		</h4>
-		<div class="flex flex-col gap-sm">
-			<LabeledRange
-				id="inv-cyan"
-				label="Cyan"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={cmyCyan}
-				defaultValue={DEFAULT_INVERSION_PARAMS.cmyCyan}
-				onchange={(v) => {
-					cmyCyan = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-				labelClass="text-[#00bcd4]"
-				thumbColor="#00bcd4"
-				trackColor="#00bcd413"
-			/>
-			<LabeledRange
-				id="inv-magenta"
-				label="Magenta"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={cmyMagenta}
-				defaultValue={DEFAULT_INVERSION_PARAMS.cmyMagenta}
-				onchange={(v) => {
-					cmyMagenta = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-				labelClass="text-[#e91e63]"
-				thumbColor="#e91e63"
-				trackColor="#e91e6313"
-			/>
-			<LabeledRange
-				id="inv-yellow"
-				label="Yellow"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={cmyYellow}
-				defaultValue={DEFAULT_INVERSION_PARAMS.cmyYellow}
-				onchange={(v) => {
-					cmyYellow = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-				labelClass="text-[#ffeb3b]"
-				thumbColor="#ffeb3b"
-				trackColor="#ffeb3b13"
-			/>
-		</div>
+		<JointSlider
+			min={-1}
+			max={1}
+			step={0.01}
+			signed
+			slots={[
+				{
+					id: "cyan",
+					label: "C",
+					value: cmyCyan,
+					color: "#00bcd4",
+					negativeColor: "#f44336",
+					defaultValue: DEFAULT_INVERSION_PARAMS.cmyCyan,
+				},
+				{
+					id: "magenta",
+					label: "M",
+					value: cmyMagenta,
+					color: "#e91e63",
+					negativeColor: "#4caf50",
+					defaultValue: DEFAULT_INVERSION_PARAMS.cmyMagenta,
+				},
+				{
+					id: "yellow",
+					label: "Y",
+					value: cmyYellow,
+					color: "#ffeb3b",
+					negativeColor: "#2196f3",
+					defaultValue: DEFAULT_INVERSION_PARAMS.cmyYellow,
+				},
+			]}
+			onChange={(id, v) => {
+				if (id === "cyan") cmyCyan = v;
+				else if (id === "magenta") cmyMagenta = v;
+				else if (id === "yellow") cmyYellow = v;
+				emit();
+			}}
+			onCommit={(id, v) => {
+				if (id === "cyan") cmyCyan = v;
+				else if (id === "magenta") cmyMagenta = v;
+				else if (id === "yellow") cmyYellow = v;
+				commit();
+			}}
+		/>
 	</section>
 
 	<!-- ── Density + Grade ─────────────────────────────────────────────────── -->
