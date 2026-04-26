@@ -7,6 +7,8 @@
 	import ColorFilmButton from "./ColorFilmButton.svelte";
 	import BlackWhiteFilmButton from "./BlackWhiteFilmButton.svelte";
 	import SlideFilmButton from "./SlideFilmButton.svelte";
+	import ToggleButton from "./ToggleButton.svelte";
+	import { EyedropperSampleIcon } from "phosphor-svelte";
 
 	interface Props {
 		value: InversionParams;
@@ -18,9 +20,19 @@
 		 * Falls back to `onChange` if not provided (backwards-compatible).
 		 */
 		onCommit?: (p: InversionParams) => void;
+		/** Whether the white-balance eyedropper picker is currently active. */
+		wbPickerActive?: boolean;
+		/** Toggles the white-balance eyedropper picker on the canvas. */
+		onToggleWbPicker?: () => void;
 	}
 
-	let { value, onChange, onCommit }: Props = $props();
+	let {
+		value,
+		onChange,
+		onCommit,
+		wbPickerActive = false,
+		onToggleWbPicker,
+	}: Props = $props();
 
 	// ─── Local reactive copies (untrack to avoid "only captures initial value" warning) ───
 
@@ -42,11 +54,7 @@
 	let shadows = $state(untrack(() => value.shadows));
 	let highlights = $state(untrack(() => value.highlights));
 	let toe = $state(untrack(() => value.toe));
-	let toeWidth = $state(untrack(() => value.toeWidth));
-	let toeHardness = $state(untrack(() => value.toeHardness));
 	let shoulder = $state(untrack(() => value.shoulder));
-	let shoulderWidth = $state(untrack(() => value.shoulderWidth));
-	let shoulderHardness = $state(untrack(() => value.shoulderHardness));
 	let claheStrength = $state(untrack(() => value.claheStrength));
 	let vibrance = $state(untrack(() => value.vibrance));
 	let saturation = $state(untrack(() => value.saturation));
@@ -74,11 +82,7 @@
 		shadows = value.shadows;
 		highlights = value.highlights;
 		toe = value.toe;
-		toeWidth = value.toeWidth;
-		toeHardness = value.toeHardness;
 		shoulder = value.shoulder;
-		shoulderWidth = value.shoulderWidth;
-		shoulderHardness = value.shoulderHardness;
 		claheStrength = value.claheStrength;
 		vibrance = value.vibrance;
 		saturation = value.saturation;
@@ -106,11 +110,11 @@
 			shadows,
 			highlights,
 			toe,
-			toeWidth,
-			toeHardness,
+			toeWidth: DEFAULT_INVERSION_PARAMS.toeWidth,
+			toeHardness: DEFAULT_INVERSION_PARAMS.toeHardness,
 			shoulder,
-			shoulderWidth,
-			shoulderHardness,
+			shoulderWidth: DEFAULT_INVERSION_PARAMS.shoulderWidth,
+			shoulderHardness: DEFAULT_INVERSION_PARAMS.shoulderHardness,
 			claheStrength,
 			vibrance,
 			saturation,
@@ -148,11 +152,7 @@
 		shadows = d.shadows;
 		highlights = d.highlights;
 		toe = d.toe;
-		toeWidth = d.toeWidth;
-		toeHardness = d.toeHardness;
 		shoulder = d.shoulder;
-		shoulderWidth = d.shoulderWidth;
-		shoulderHardness = d.shoulderHardness;
 		claheStrength = d.claheStrength;
 		vibrance = d.vibrance;
 		saturation = d.saturation;
@@ -180,11 +180,7 @@
 			shadows === DEFAULT_INVERSION_PARAMS.shadows &&
 			highlights === DEFAULT_INVERSION_PARAMS.highlights &&
 			toe === DEFAULT_INVERSION_PARAMS.toe &&
-			toeWidth === DEFAULT_INVERSION_PARAMS.toeWidth &&
-			toeHardness === DEFAULT_INVERSION_PARAMS.toeHardness &&
 			shoulder === DEFAULT_INVERSION_PARAMS.shoulder &&
-			shoulderWidth === DEFAULT_INVERSION_PARAMS.shoulderWidth &&
-			shoulderHardness === DEFAULT_INVERSION_PARAMS.shoulderHardness &&
 			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength &&
 			vibrance === DEFAULT_INVERSION_PARAMS.vibrance &&
 			saturation === DEFAULT_INVERSION_PARAMS.saturation &&
@@ -234,11 +230,23 @@
 
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
 	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Color timing
-		</h4>
+		<div class="flex items-center justify-between mb-sm">
+			<h4
+				class="text-xs font-semibold uppercase tracking-widest text-content-subtle"
+			>
+				Color timing
+			</h4>
+			{#if onToggleWbPicker}
+				<ToggleButton
+					active={wbPickerActive}
+					onclick={onToggleWbPicker}
+					title="Pick a neutral white or gray pixel on the image to auto-set color balance"
+				>
+					<EyedropperSampleIcon weight="duotone" size={18} />
+					White Balance
+				</ToggleButton>
+			{/if}
+		</div>
 		<JointSlider
 			min={-1}
 			max={1}
@@ -335,8 +343,8 @@
 			<LabeledRange
 				id="inv-shadows"
 				label="Shadows"
-				min={-10}
-				max={10}
+				min={-5}
+				max={5}
 				step={0.01}
 				value={shadows}
 				defaultValue={DEFAULT_INVERSION_PARAMS.shadows}
@@ -363,104 +371,55 @@
 				signed
 			/>
 
-			<!-- Toe Width + Hardness side by side -->
-			<div class="grid grid-cols-2 gap-sm">
-				<LabeledRange
-					id="inv-toe-width"
-					label="Width"
-					min={0.5}
-					max={8}
-					step={0.1}
-					value={toeWidth}
-					defaultValue={DEFAULT_INVERSION_PARAMS.toeWidth}
-					onchange={(v) => {
-						toeWidth = v;
-						emit();
-					}}
-					oncommit={commit}
-					small
-				/>
-				<LabeledRange
-					id="inv-toe-hardness"
-					label="Hardness"
-					min={0.1}
-					max={4}
-					step={0.1}
-					value={toeHardness}
-					defaultValue={DEFAULT_INVERSION_PARAMS.toeHardness}
-					onchange={(v) => {
-						toeHardness = v;
-						emit();
-					}}
-					oncommit={commit}
-					small
-				/>
-			</div>
-
-			<!-- Shadow CMY -->
+			<!-- Shadow CMY tint -->
 			<div class="flex flex-col gap-xs">
-				<span class="text-xs text-content-subtle">Shadow color</span>
-				<div
-					class="flex flex-col gap-xs pl-xs border-l border-base-subtle"
-				>
-					<LabeledRange
-						id="inv-s-cyan"
-						label="Cyan"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={shadowCyan}
-						defaultValue={DEFAULT_INVERSION_PARAMS.shadowCyan}
-						onchange={(v) => {
-							shadowCyan = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#00bcd4]"
-						thumbColor="#00bcd4"
-						trackColor="#00bcd418"
-					/>
-					<LabeledRange
-						id="inv-s-magenta"
-						label="Magenta"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={shadowMagenta}
-						defaultValue={DEFAULT_INVERSION_PARAMS.shadowMagenta}
-						onchange={(v) => {
-							shadowMagenta = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#e91e63]"
-						thumbColor="#e91e63"
-						trackColor="#e91e6333"
-					/>
-					<LabeledRange
-						id="inv-s-yellow"
-						label="Yellow"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={shadowYellow}
-						defaultValue={DEFAULT_INVERSION_PARAMS.shadowYellow}
-						onchange={(v) => {
-							shadowYellow = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#ffeb3b]"
-						thumbColor="#ffeb3b"
-						trackColor="#ffeb3b33"
-					/>
-				</div>
+				<span class="text-xs text-content-subtle">Shadow tint</span>
+				<JointSlider
+					min={-1}
+					max={1}
+					step={0.01}
+					height={30}
+					signed
+					slots={[
+						{
+							id: "cyan",
+							label: "C",
+							value: shadowCyan,
+							color: "#00bcd4",
+							negativeColor: "#f44336",
+							defaultValue: DEFAULT_INVERSION_PARAMS.shadowCyan,
+						},
+						{
+							id: "magenta",
+							label: "M",
+							value: shadowMagenta,
+							color: "#e91e63",
+							negativeColor: "#4caf50",
+							defaultValue:
+								DEFAULT_INVERSION_PARAMS.shadowMagenta,
+						},
+						{
+							id: "yellow",
+							label: "Y",
+							value: shadowYellow,
+							color: "#ffeb3b",
+							negativeColor: "#2196f3",
+							defaultValue: DEFAULT_INVERSION_PARAMS.shadowYellow,
+						},
+					]}
+					onChange={(id, v) => {
+						if (id === "cyan") shadowCyan = v;
+						else if (id === "magenta") shadowMagenta = v;
+						else if (id === "yellow") shadowYellow = v;
+						emit();
+					}}
+					onCommit={(id, v) => {
+						if (id === "cyan") shadowCyan = v;
+						else if (id === "magenta") shadowMagenta = v;
+						else if (id === "yellow") shadowYellow = v;
+						commit();
+					}}
+				/>
 			</div>
 		</div>
 	</section>
@@ -504,104 +463,57 @@
 				signed
 			/>
 
-			<!-- Shoulder Width + Hardness -->
-			<div class="grid grid-cols-2 gap-sm">
-				<LabeledRange
-					id="inv-sh-width"
-					label="Width"
-					min={0.5}
-					max={8}
-					step={0.1}
-					value={shoulderWidth}
-					defaultValue={DEFAULT_INVERSION_PARAMS.shoulderWidth}
-					onchange={(v) => {
-						shoulderWidth = v;
-						emit();
-					}}
-					oncommit={commit}
-					small
-				/>
-				<LabeledRange
-					id="inv-sh-hardness"
-					label="Hardness"
-					min={0.1}
-					max={4}
-					step={0.1}
-					value={shoulderHardness}
-					defaultValue={DEFAULT_INVERSION_PARAMS.shoulderHardness}
-					onchange={(v) => {
-						shoulderHardness = v;
-						emit();
-					}}
-					oncommit={commit}
-					small
-				/>
-			</div>
-
-			<!-- Highlight CMY -->
+			<!-- Highlight CMY tint -->
 			<div class="flex flex-col gap-xs">
-				<span class="text-xs text-content-subtle">Highlight color</span>
-				<div
-					class="flex flex-col gap-xs pl-xs border-l border-base-subtle"
-				>
-					<LabeledRange
-						id="inv-h-cyan"
-						label="Cyan"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={highlightCyan}
-						defaultValue={DEFAULT_INVERSION_PARAMS.highlightCyan}
-						onchange={(v) => {
-							highlightCyan = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#00bcd4]"
-						thumbColor="#00bcd4"
-						trackColor="#00bcd418"
-					/>
-					<LabeledRange
-						id="inv-h-magenta"
-						label="Magenta"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={highlightMagenta}
-						defaultValue={DEFAULT_INVERSION_PARAMS.highlightMagenta}
-						onchange={(v) => {
-							highlightMagenta = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#e91e63]"
-						thumbColor="#e91e63"
-						trackColor="#e91e6333"
-					/>
-					<LabeledRange
-						id="inv-h-yellow"
-						label="Yellow"
-						layout="inline"
-						min={-1}
-						max={1}
-						step={0.01}
-						value={highlightYellow}
-						defaultValue={DEFAULT_INVERSION_PARAMS.highlightYellow}
-						onchange={(v) => {
-							highlightYellow = v;
-							emit();
-						}}
-						oncommit={commit}
-						signed
-						labelClass="text-[#ffeb3b]"
-						thumbColor="#ffeb3b"
-						trackColor="#ffeb3b33"
-					/>
-				</div>
+				<span class="text-xs text-content-subtle">Highlight tint</span>
+				<JointSlider
+					min={-1}
+					max={1}
+					step={0.01}
+					height={30}
+					signed
+					slots={[
+						{
+							id: "cyan",
+							label: "C",
+							value: highlightCyan,
+							color: "#00bcd4",
+							negativeColor: "#f44336",
+							defaultValue:
+								DEFAULT_INVERSION_PARAMS.highlightCyan,
+						},
+						{
+							id: "magenta",
+							label: "M",
+							value: highlightMagenta,
+							color: "#e91e63",
+							negativeColor: "#4caf50",
+							defaultValue:
+								DEFAULT_INVERSION_PARAMS.highlightMagenta,
+						},
+						{
+							id: "yellow",
+							label: "Y",
+							value: highlightYellow,
+							color: "#ffeb3b",
+							negativeColor: "#2196f3",
+							defaultValue:
+								DEFAULT_INVERSION_PARAMS.highlightYellow,
+						},
+					]}
+					onChange={(id, v) => {
+						if (id === "cyan") highlightCyan = v;
+						else if (id === "magenta") highlightMagenta = v;
+						else if (id === "yellow") highlightYellow = v;
+						emit();
+					}}
+					onCommit={(id, v) => {
+						if (id === "cyan") highlightCyan = v;
+						else if (id === "magenta") highlightMagenta = v;
+						else if (id === "yellow") highlightYellow = v;
+						commit();
+					}}
+				/>
 			</div>
 		</div>
 	</section>
