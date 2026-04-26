@@ -3,6 +3,7 @@
 	import { DEFAULT_TRANSFORM } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
+	import ToggleButton from "./ToggleButton.svelte";
 
 	interface Props {
 		value: TransformParams;
@@ -263,15 +264,12 @@
 	<div class="flex items-center gap-sm">
 		<span class="text-xs text-content-muted w-16">Flip</span>
 		<div class="flex items-center gap-xs flex-1">
-			<button
+			<ToggleButton
+				active={flipH}
 				onclick={toggleFlipH}
 				title="Flip horizontal"
 				aria-label="Flip horizontal"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       {flipH
-					? 'border-primary bg-primary/10 text-primary'
-					: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+				fill
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -290,16 +288,13 @@
 					/>
 				</svg>
 				H
-			</button>
-			<button
+			</ToggleButton>
+			<ToggleButton
+				active={flipV}
 				onclick={toggleFlipV}
 				title="Flip vertical"
 				aria-label="Flip vertical"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       {flipV
-					? 'border-primary bg-primary/10 text-primary'
-					: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+				fill
 			>
 				<svg
 					xmlns="http://www.w3.org/2000/svg"
@@ -318,7 +313,7 @@
 					/>
 				</svg>
 				V
-			</button>
+			</ToggleButton>
 		</div>
 	</div>
 

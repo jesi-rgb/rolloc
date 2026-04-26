@@ -54,9 +54,17 @@
   import CropOverlay from "$lib/components/CropOverlay.svelte";
   import HorizonOverlay from "$lib/components/HorizonOverlay.svelte";
   import TransformControls from "$lib/components/TransformControls.svelte";
-  import { detectHorizonCandidates, createImageData } from "$lib/image/horizon-detect";
+  import ToggleButton from "$lib/components/ToggleButton.svelte";
+  import {
+    detectHorizonCandidates,
+    createImageData,
+  } from "$lib/image/horizon-detect";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
-  import { ArrowFatUpIcon, CommandIcon } from "phosphor-svelte";
+  import {
+    ArrowFatUpIcon,
+    CommandIcon,
+    EyedropperSampleIcon,
+  } from "phosphor-svelte";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
 
@@ -911,7 +919,7 @@
       const pixels = await pipeline.readPixels(0, 0, w, h);
 
       if (!pixels) {
-        console.error('[horizon] Failed to read pixels from canvas');
+        console.error("[horizon] Failed to read pixels from canvas");
         return;
       }
 
@@ -920,12 +928,12 @@
       const candidates = detectHorizonCandidates(imageData);
 
       if (candidates.length === 0) {
-        console.log('[horizon] No lines detected');
+        console.log("[horizon] No lines detected");
         // Do nothing — user just sees no overlay
         return;
       }
 
-      console.log('[horizon] Found', candidates.length, 'candidates');
+      console.log("[horizon] Found", candidates.length, "candidates");
 
       // Store pre-detection rotation for revert on cancel
       preHorizonRotation = effectiveTransform.rotation;
@@ -1582,14 +1590,11 @@
 
           <!-- Crop mode toggle -->
           <section>
-            <button
+            <ToggleButton
+              active={cropModeActive}
               onclick={toggleCropMode}
               title="Toggle crop mode (C)"
-              class="w-full flex items-center justify-center gap-sm
-							       px-sm py-xs rounded border text-xs transition
-							       {cropModeActive
-                ? 'border-primary bg-primary/10 text-primary'
-                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+              block
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -1607,7 +1612,7 @@
                 <path d="M18 22V8a2 2 0 0 0-2-2H2" />
               </svg>
               {cropModeActive ? "Exit Crop" : "Crop"}
-            </button>
+            </ToggleButton>
           </section>
 
           <!-- Transform controls (rotation, flip) -->
@@ -1627,180 +1632,123 @@
             />
           </section>
 
-          <!-- Negative inversion toggle -->
-          <section>
-            <label class="flex items-center gap-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={roll.rollEdit.invert}
-                onchange={(e) =>
-                  saveRollEdit({
-                    invert: e.currentTarget.checked,
-                  })}
-                class="w-4 h-4 accent-primary"
-              />
-              <span class="text-sm text-content">Negative (invert)</span>
-            </label>
-          </section>
-
           <!-- NegPy inversion controls (only when invert = true) -->
-          {#if roll.rollEdit.invert}
-            <section>
-              <div class="flex items-center justify-between mb-sm">
-                <h3
-                  class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
-                >
-                  Inversion
-                </h3>
-                <button
-                  onclick={toggleWbPicker}
-                  title="Pick a neutral white or gray pixel on the image to auto-set color balance"
-                  class="flex items-center gap-xs text-xs px-sm py-xs rounded border transition
-									       {wbPickerActive
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M2 13.5V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.5" />
-                    <path d="M22 10.5V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5" />
-                    <line x1="12" y1="2" x2="12" y2="22" />
-                    <circle
-                      cx="12"
-                      cy="12"
-                      r="2"
-                      fill="currentColor"
-                      stroke="none"
-                    />
-                  </svg>
-                  WB Picker
-                </button>
-              </div>
-              <InversionControls
-                value={effectiveInversionParams}
-                onChange={onInversionChange}
-                onCommit={onInversionCommit}
-              />
-            </section>
-          {/if}
-
-          <!-- Curves section -->
           <section>
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              Curves
-            </h3>
-            <CurvesEditor
-              global={effectiveToneCurve}
-              r={effectiveRGBCurves[0]}
-              g={effectiveRGBCurves[1]}
-              b={effectiveRGBCurves[2]}
-              onChange={onCurveChange}
-              onCommit={onCurveCommit}
-              histogram={currentHistogram}
+            <div class="flex items-center justify-between mb-sm">
+              <h3
+                class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
+              >
+                Inversion
+              </h3>
+              <ToggleButton
+                active={wbPickerActive}
+                onclick={toggleWbPicker}
+                title="Pick a neutral white or gray pixel on the image to auto-set color balance"
+              >
+                <EyedropperSampleIcon weight="duotone" size={18} />
+                White Balance
+              </ToggleButton>
+            </div>
+            <InversionControls
+              value={effectiveInversionParams}
+              onChange={onInversionChange}
+              onCommit={onInversionCommit}
             />
           </section>
+        {/if}
 
-          <!-- Frame info -->
-          <section class="border-t border-base-subtle pt-l">
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              File
-            </h3>
-            <p class="text-xs text-content-muted font-mono break-all">
-              {frame.filename}
-            </p>
-          </section>
+        <!-- Curves section -->
+        <section>
+          <h3
+            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+          >
+            Curves
+          </h3>
+          <CurvesEditor
+            global={effectiveToneCurve}
+            r={effectiveRGBCurves[0]}
+            g={effectiveRGBCurves[1]}
+            b={effectiveRGBCurves[2]}
+            onChange={onCurveChange}
+            onCommit={onCurveCommit}
+            histogram={currentHistogram}
+          />
+        </section>
 
-          <!-- Export -->
-          <section class="border-t border-base-subtle pt-l">
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              Export
-            </h3>
+        <!-- Export -->
+        <section class="border-t border-base-subtle pt-l">
+          <h3
+            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+          >
+            Export
+          </h3>
 
-            <!-- Scale selector (joined button group) -->
-            <div class="flex mb-sm" role="radiogroup" aria-label="Export scale">
-              <button
-                type="button"
-                onclick={() => (exportScale = 0.25)}
-                aria-pressed={exportScale === 0.25}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
+          <!-- Scale selector (joined button group) -->
+          <div class="flex mb-sm" role="radiogroup" aria-label="Export scale">
+            <button
+              type="button"
+              onclick={() => (exportScale = 0.25)}
+              aria-pressed={exportScale === 0.25}
+              class="flex-1 px-sm py-xs text-xs font-medium transition
                        border border-r-0 rounded-l
                        {exportScale === 0.25
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                0.25x
-              </button>
-              <button
-                type="button"
-                onclick={() => (exportScale = 0.5)}
-                aria-pressed={exportScale === 0.5}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
+                ? 'bg-primary/15 border-primary text-primary'
+                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+            >
+              0.25x
+            </button>
+            <button
+              type="button"
+              onclick={() => (exportScale = 0.5)}
+              aria-pressed={exportScale === 0.5}
+              class="flex-1 px-sm py-xs text-xs font-medium transition
                        border border-r-0
                        {exportScale === 0.5
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                0.5x
-              </button>
-              <button
-                type="button"
-                onclick={() => (exportScale = 1)}
-                aria-pressed={exportScale === 1}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
+                ? 'bg-primary/15 border-primary text-primary'
+                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+            >
+              0.5x
+            </button>
+            <button
+              type="button"
+              onclick={() => (exportScale = 1)}
+              aria-pressed={exportScale === 1}
+              class="flex-1 px-sm py-xs text-xs font-medium transition
                        border rounded-r
                        {exportScale === 1
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                1x
-              </button>
-            </div>
+                ? 'bg-primary/15 border-primary text-primary'
+                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+            >
+              1x
+            </button>
+          </div>
 
-            <button
-              onclick={exportFrame}
-              disabled={exporting || loading || !pipeline}
-              class="w-full flex items-center justify-center gap-sm
+          <button
+            onclick={exportFrame}
+            disabled={exporting || loading || !pipeline}
+            class="w-full flex items-center justify-center gap-sm
 							       px-sm py-xs rounded border text-sm transition
 							       border-primary text-primary
 							       hover:bg-primary/10
 							       disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {#if exporting}
-                Exporting…
-              {:else}
-                Export JPEG
-              {/if}
-            </button>
-
-            {#if exportSuccess}
+          >
+            {#if exporting}
+              Exporting…
+            {:else if exportSuccess}
               <p class="mt-sm text-xs text-content-muted">
                 Saved successfully.
               </p>
+            {:else}
+              Export to JPEG
             {/if}
+          </button>
 
-            {#if exportError}
-              <p class="mt-sm text-xs text-red-500 break-all">
-                {exportError}
-              </p>
-            {/if}
-          </section>
-        {/if}
+          {#if exportError}
+            <p class="mt-sm text-xs text-red-500 break-all">
+              {exportError}
+            </p>
+          {/if}
+        </section>
       </div>
     </aside>
   </div>
@@ -1818,10 +1766,7 @@
         label: "10× step",
       },
       {
-        keys: [
-          { icon: CommandIcon, eventKey: ["Meta", "Control"] },
-          "Z",
-        ],
+        keys: [{ icon: CommandIcon, eventKey: ["Meta", "Control"] }, "Z"],
         label: "undo",
       },
       {
