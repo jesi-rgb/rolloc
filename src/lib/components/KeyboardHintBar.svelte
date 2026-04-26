@@ -17,6 +17,8 @@
 		DownloadSimpleIcon,
 		ArrowClockwiseIcon,
 		WarningIcon,
+		CommandIcon,
+		ArrowFatUpIcon,
 	} from "phosphor-svelte";
 
 	/** An icon key bound to one or more KeyboardEvent.key values. */
@@ -55,6 +57,9 @@
 	/**
 	 * Map display label → KeyboardEvent.key values that should activate it.
 	 * A single display key can match multiple physical keys (e.g. "←" matches "ArrowLeft").
+	 *
+	 * For range-like labels (Q–E, A–D) we deliberately list only the keyboard-row
+	 * neighbours the user actually controls: Q/W/E and A/S/D.
 	 */
 	const DISPLAY_TO_KEYS: Record<string, string[]> = {
 		"←": ["ArrowLeft"],
@@ -62,29 +67,16 @@
 		"↑": ["ArrowUp"],
 		"↓": ["ArrowDown"],
 		Esc: ["Escape"],
-		"⌘Z": ["z"],
-		"⌘⇧Z": ["z", "Z"],
 		"⌫": ["Backspace"],
 		"⏎": ["Enter"],
 		" ": [" "],
+		"Q–E": ["q", "Q", "w", "W", "e", "E"],
+		"A–D": ["a", "A", "s", "S", "d", "D"],
 	};
 
 	/** Resolve a display key string to the set of KeyboardEvent.key values it represents. */
 	function eventKeysFor(display: string): string[] {
 		if (DISPLAY_TO_KEYS[display]) return DISPLAY_TO_KEYS[display];
-
-		// Range labels like "0–5", "Q–E", "A–D" — expand to every char in the range.
-		const rangeMatch = display.match(/^([A-Za-z0-9])–([A-Za-z0-9])$/);
-		if (rangeMatch) {
-			const start = rangeMatch[1].charCodeAt(0);
-			const end = rangeMatch[2].charCodeAt(0);
-			const keys: string[] = [];
-			for (let c = Math.min(start, end); c <= Math.max(start, end); c++) {
-				const ch = String.fromCharCode(c);
-				keys.push(ch, ch.toLowerCase(), ch.toUpperCase());
-			}
-			return [...new Set(keys)];
-		}
 
 		// Single-character keys — match both cases.
 		if (display.length === 1) {
@@ -171,20 +163,20 @@
 				<kbd
 					class="inline-flex items-center justify-center font-mono text-xs
 					       px-xs py-xs min-w-sm
-					       rounded text-content-muted leading-none
-					       transition-all duration-75
+					       rounded border border-base-subtle bg-base text-content-muted
+					       leading-none transition-[transform,box-shadow] duration-75
 					       {pressed
-						? 'bg-base translate-y-px border border-transparent shadow-none'
-						: 'bg-base border border-base-subtle shadow-[0_2px_0_0_var(--color-base-subtle)]'}"
+						? 'translate-y-[2px] shadow-none'
+						: 'translate-y-0 shadow-[0_2px_0_0_var(--color-base-subtle)]'}"
 				>
 					{#if typeof key === "string"}
 						{key}
 					{:else if isIconKey(key)}
 						{@const IconComponent = key.icon}
-						<IconComponent size={12} />
+						<IconComponent size={10} />
 					{:else}
 						{@const IconComponent = key}
-						<IconComponent size={12} />
+						<IconComponent size={10} />
 					{/if}
 				</kbd>
 			{/each}
