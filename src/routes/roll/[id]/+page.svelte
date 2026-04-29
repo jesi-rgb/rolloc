@@ -14,12 +14,18 @@
 	import { getRoll, getRollPath } from "$lib/db/rolls";
 	import { getFrames, putFrame } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag, FilmType } from "$lib/types";
-	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
+	import { DEFAULT_INVERSION_PARAMS, frameHasEdits } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+	import RollExportBar from "$lib/components/RollExportBar.svelte";
+	import {
+		exportFramesBatch,
+		type ExportScale,
+		type BatchExportProgress,
+	} from "$lib/export/batch";
 	import {
 		prefetchThumbs,
 		resetThumbQueueProgress,
@@ -50,6 +56,118 @@
 	);
 
 	const selected = $derived(frames[selIdx] ?? null);
+
+	// ─── Selection / batch export state ───────────────────────────────────────
+
+	/** True when the user has entered "select frames for export" mode. */
+	let selecting = $state(false);
+	/** Set of frame IDs picked for export. */
+	let pickedIds = $state<Set<string>>(new Set());
+	let exportScale = $state<ExportScale>(1);
+	let exporting = $state(false);
+	let exportProgress = $state<BatchExportProgress | null>(null);
+	let exportLastResult = $state<{
+		exported: number;
+		skipped:  number;
+		failed:   number;
+	} | null>(null);
+	/** Mutable signal for cooperative cancellation. */
+	let exportCancel = { aborted: false };
+
+	const selectedCount = $derived(pickedIds.size);
+	const editedCount = $derived(frames.filter(frameHasEdits).length);
+
+	function togglePicked(frame: Frame): void {
+		// Use a fresh Set so the $state proxy notices the change.
+		const next = new Set(pickedIds);
+		if (next.has(frame.id)) {
+			next.delete(frame.id);
+		} else {
+			next.add(frame.id);
+		}
+		pickedIds = next;
+	}
+
+	function enterSelectionMode(): void {
+		selecting = true;
+		exportLastResult = null;
+	}
+
+	function exitSelectionMode(): void {
+		selecting = false;
+		pickedIds = new Set();
+		exportLastResult = null;
+	}
+
+	function selectAll(): void {
+		pickedIds = new Set(frames.map((f) => f.id));
+	}
+
+	function selectEdited(): void {
+		pickedIds = new Set(frames.filter(frameHasEdits).map((f) => f.id));
+	}
+
+	function clearSelection(): void {
+		pickedIds = new Set();
+	}
+
+	function invertSelection(): void {
+		const next = new Set<string>();
+		for (const f of frames) if (!pickedIds.has(f.id)) next.add(f.id);
+		pickedIds = next;
+	}
+
+	async function runExport(): Promise<void> {
+		if (!roll || !dirPath || pickedIds.size === 0 || exporting) return;
+
+		const targets = frames.filter((f) => pickedIds.has(f.id));
+		exportCancel = { aborted: false };
+		exporting = true;
+		exportLastResult = null;
+		exportProgress = {
+			processed: 0,
+			total:     targets.length,
+			current:   null,
+			exported:  0,
+			skipped:   0,
+			failed:    [],
+		};
+
+		try {
+			const result = await exportFramesBatch({
+				roll,
+				frames:  targets,
+				dirPath,
+				scale:   exportScale,
+				signal:  exportCancel,
+				onProgress: (p) => {
+					exportProgress = p;
+				},
+			});
+			exportLastResult = {
+				exported: result.exported,
+				skipped:  result.skipped,
+				failed:   result.failed.length,
+			};
+			if (result.failed.length > 0) {
+				console.error("[export] some frames failed:", result.failed);
+			}
+		} catch (err) {
+			console.error("[export] batch export crashed:", err);
+			exportLastResult = {
+				exported: exportProgress?.exported ?? 0,
+				skipped:  exportProgress?.skipped  ?? 0,
+				failed:   (exportProgress?.failed.length ?? 0) + 1,
+			};
+		} finally {
+			exporting = false;
+			exportProgress = null;
+		}
+	}
+
+	function cancelExport(): void {
+		exportCancel.aborted = true;
+	}
 
 	onMount(async () => {
 		// Reset any counters left by a previous page visit.
@@ -125,6 +243,25 @@
 		// Don't intercept when typing in an input or textarea
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+		// While in selection mode the keyboard maps to selection actions only.
+		if (selecting) {
+			if (e.key === "Escape" && !exporting) {
+				e.preventDefault();
+				exitSelectionMode();
+			} else if (e.key === " " && selected) {
+				// Space toggles the focused frame's pick state.
+				e.preventDefault();
+				togglePicked(selected);
+			} else if (e.key === "ArrowLeft" || e.key === "k") {
+				e.preventDefault();
+				selIdx = Math.max(0, selIdx - 1);
+			} else if (e.key === "ArrowRight" || e.key === "j") {
+				e.preventDefault();
+				selIdx = Math.min(frames.length - 1, selIdx + 1);
+			}
+			return;
+		}
 
 		switch (e.key) {
 			case "ArrowLeft":
@@ -204,8 +341,42 @@
 			<span class="text-xs text-content-subtle">
 				{frames.length} frame{frames.length !== 1 ? "s" : ""}
 			</span>
+
+			<div class="flex-1"></div>
+
+			{#if !selecting && frames.length > 0}
+				<button
+					type="button"
+					onclick={enterSelectionMode}
+					class="px-sm py-xs text-xs rounded border border-base-subtle
+					       text-content-muted hover:border-content-muted hover:text-content
+					       transition"
+				>
+					Export…
+				</button>
+			{/if}
 		{/if}
 	</header>
+
+	{#if selecting}
+		<RollExportBar
+			totalFrames={frames.length}
+			{selectedCount}
+			{editedCount}
+			scale={exportScale}
+			{exporting}
+			progress={exportProgress}
+			lastResult={exportLastResult}
+			onScaleChange={(s) => (exportScale = s)}
+			onSelectAll={selectAll}
+			onSelectEdited={selectEdited}
+			onClear={clearSelection}
+			onInvert={invertSelection}
+			onExport={runExport}
+			onCancel={cancelExport}
+			onExit={exitSelectionMode}
+		/>
+	{/if}
 
 	{#if loading}
 		<div class="flex-1 flex items-center justify-center text-content-muted">
@@ -263,9 +434,13 @@
 						<FrameThumb
 							{frame}
 							dirPath={dirPath!}
-							selected={i === selIdx}
-							onSelect={selectFrame}
-							onDblClick={openFrame}
+							selected={!selecting && i === selIdx}
+							{selecting}
+							picked={pickedIds.has(frame.id)}
+							onSelect={selecting
+								? togglePicked
+								: selectFrame}
+							onDblClick={selecting ? undefined : openFrame}
 						/>
 					{/snippet}
 				</VirtualGrid>

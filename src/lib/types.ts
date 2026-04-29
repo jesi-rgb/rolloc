@@ -480,3 +480,30 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		transform: (f as { transform?: TransformParams | null }).transform ?? DEFAULT_TRANSFORM,
 	};
 }
+
+// ─── Edit-state helpers ───────────────────────────────────────────────────────
+
+/**
+ * True when a frame has at least one per-frame override set (i.e. it diverges
+ * from the roll-level defaults). Used to drive "Select edited" in the export
+ * UI and any other "this frame has been touched" affordance.
+ *
+ * Implemented as a plain non-null check across all override fields rather than
+ * a deep equality with `DEFAULT_FRAME_EDIT` because the contract of
+ * `FrameEditOverrides` is that `null` means "fall through to the roll-level
+ * value" — anything else, including identity-shaped objects, is a deliberate
+ * override the user has authored.
+ */
+export function frameHasEdits(frame: Frame): boolean {
+	const f = frame.frameEdit;
+	return (
+		f.exposureCompensation !== null ||
+		f.whiteBalance         !== null ||
+		f.toneCurve            !== null ||
+		f.rgbCurves            !== null ||
+		f.rebateRegion         !== null ||
+		f.inversionParams      !== null ||
+		f.cropQuad             !== null ||
+		f.transform            !== null
+	);
+}
