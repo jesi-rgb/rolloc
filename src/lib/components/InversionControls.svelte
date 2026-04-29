@@ -528,7 +528,7 @@
 		<div class="flex flex-col gap-sm">
 			<LabeledRange
 				id="inv-clahe"
-				label="CLAHE"
+				label="Clarity"
 				min={0}
 				max={1}
 				step={0.01}
@@ -544,45 +544,47 @@
 	</section>
 
 	<!-- ── Color (Vibrance & Saturation) ──────────────────────────────────── -->
-	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Color
-		</h4>
-		<div class="flex flex-col gap-sm">
-			<LabeledRange
-				id="inv-vibrance"
-				label="Vibrance"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={vibrance}
-				defaultValue={DEFAULT_INVERSION_PARAMS.vibrance}
-				onchange={(v) => {
-					vibrance = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-			/>
-			<LabeledRange
-				id="inv-saturation"
-				label="Saturation"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={saturation}
-				defaultValue={DEFAULT_INVERSION_PARAMS.saturation}
-				onchange={(v) => {
-					saturation = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-			/>
-		</div>
-	</section>
+	{#if filmType !== "BW"}
+		<section>
+			<h4
+				class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			>
+				Color
+			</h4>
+			<div class="flex flex-col gap-sm">
+				<LabeledRange
+					id="inv-vibrance"
+					label="Vibrance"
+					min={-1}
+					max={1}
+					step={0.01}
+					value={vibrance}
+					defaultValue={DEFAULT_INVERSION_PARAMS.vibrance}
+					onchange={(v) => {
+						vibrance = v;
+						emit();
+					}}
+					oncommit={commit}
+					signed
+				/>
+				<LabeledRange
+					id="inv-saturation"
+					label="Saturation"
+					min={-1}
+					max={1}
+					step={0.01}
+					value={saturation}
+					defaultValue={DEFAULT_INVERSION_PARAMS.saturation}
+					onchange={(v) => {
+						saturation = v;
+						emit();
+					}}
+					oncommit={commit}
+					signed
+				/>
+			</div>
+		</section>
+	{/if}
 
 	<!-- ── Effects ─────────────────────────────────────────────────────────── -->
 	<section>
