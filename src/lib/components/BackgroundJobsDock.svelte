@@ -12,9 +12,14 @@
 	 * through the store's exported functions.
 	 */
 	import { goto } from "$app/navigation";
-	import { CheckIcon, XIcon, WarningIcon, FilmStripIcon } from "phosphor-svelte";
+	import {
+		CheckIcon,
+		XIcon,
+		WarningIcon,
+		FilmStripIcon,
+	} from "phosphor-svelte";
 	import { fly } from "svelte/transition";
-	import { cubicOut } from "svelte/easing";
+	import { cubicOut, quintIn, quintOut } from "svelte/easing";
 	import {
 		getJobs,
 		cancelJob,
@@ -40,12 +45,18 @@
 
 	function statusLabel(job: ExportJob): string {
 		switch (job.status) {
-			case "queued":     return "Queued";
-			case "running":    return "Exporting…";
-			case "cancelling": return "Cancelling…";
-			case "cancelled":  return "Cancelled";
-			case "done":       return "Done";
-			case "error":      return "Failed";
+			case "queued":
+				return "Queued";
+			case "running":
+				return "Exporting…";
+			case "cancelling":
+				return "Cancelling…";
+			case "cancelled":
+				return "Cancelled";
+			case "done":
+				return "Done";
+			case "error":
+				return "Failed";
 		}
 	}
 
@@ -57,10 +68,10 @@
 {#if hasAny}
 	<div
 		class="fixed bottom-base right-base z-30 w-80 max-w-[calc(100vw-2rem)]
-		       rounded-lg border border-base-subtle bg-base/70 backdrop-blur-md
+		       rounded-lg border border-base-subtle bg-base/80 backdrop-blur-xl
 		       shadow-xl shadow-black/20 overflow-hidden"
-		in:fly={{ y: 24, x: 12, duration: 280, easing: cubicOut }}
-		out:fly={{ y: 24, x: 12, duration: 200, easing: cubicOut }}
+		in:fly={{ y: 24, duration: 280, easing: quintOut }}
+		out:fly={{ y: 24, duration: 200, easing: quintIn }}
 	>
 		<!-- Header ─────────────────────────────────────────────────── -->
 		<div
@@ -148,7 +159,9 @@
 
 						<!-- Status / progress line -->
 						{#if job.status === "queued"}
-							<div class="flex items-center gap-xs text-xs text-content-muted">
+							<div
+								class="flex items-center gap-xs text-xs text-content-muted"
+							>
 								<span>{statusLabel(job)}</span>
 								<span class="tabular-nums">
 									· {job.progress.total} frames
@@ -161,14 +174,15 @@
 								>
 									<div
 										class="h-full bg-primary rounded-full transition-all duration-150
-										       {job.status === 'cancelling'
-											? 'opacity-50'
-											: ''}"
+										       {job.status === 'cancelling' ? 'opacity-50' : ''}"
 										style="width: {percentFor(job)}%"
 									></div>
 								</div>
-								<span class="text-xs text-content-subtle tabular-nums shrink-0">
-									{job.progress.processed} / {job.progress.total}
+								<span
+									class="text-xs text-content-subtle tabular-nums shrink-0"
+								>
+									{job.progress.processed} / {job.progress
+										.total}
 								</span>
 							</div>
 							<div class="text-xs text-content-muted">
@@ -178,7 +192,9 @@
 							<!-- Terminal: done / cancelled / error -->
 							<div class="flex items-center gap-base text-xs">
 								{#if job.status === "done"}
-									<span class="flex items-center gap-1 text-success">
+									<span
+										class="flex items-center gap-1 text-success"
+									>
 										<CheckIcon size={12} />
 										<span class="tabular-nums">
 											{job.result?.exported ?? 0}
@@ -196,7 +212,9 @@
 										{/if}
 									</span>
 								{:else if job.status === "error"}
-									<span class="flex items-center gap-1 text-danger">
+									<span
+										class="flex items-center gap-1 text-danger"
+									>
 										<WarningIcon size={12} />
 										Failed
 									</span>

@@ -72,7 +72,7 @@
 
 <svelte:head><title>Rolloc — Film Archive</title></svelte:head>
 
-<div class="min-h-screen bg-base text-content flex flex-col">
+<div class="h-screen bg-base text-content flex flex-col overflow-hidden">
 	<!-- Top bar -->
 	<header
 		class="flex items-center justify-between px-l py-base border-b border-base-subtle"
@@ -140,7 +140,7 @@
 		</div>
 	</nav>
 
-	<main class="flex-1 w-full px-l py-xl max-w-5xl mx-auto">
+	<main class="flex-1 min-h-0 overflow-y-auto w-full px-l py-xl max-w-5xl mx-auto">
 		{#if loading}
 			<p class="text-content-muted">Loading…</p>
 		{:else if activeTab === "rolls"}

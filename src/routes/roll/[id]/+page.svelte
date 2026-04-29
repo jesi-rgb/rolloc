@@ -69,7 +69,9 @@
 	let exportScale = $state<ExportScale>(1);
 
 	const selectedCount = $derived(pickedIds.size);
-	const editedCount = $derived(frames.filter(frameHasEdits).length);
+	const editedCount = $derived(
+		roll === null ? 0 : frames.filter((f) => frameHasEdits(f, roll!)).length,
+	);
 
 	// Live view of the most recent export job for this roll.  Driven by the
 	// global jobs store so the bar keeps showing live progress even if the
@@ -120,7 +122,9 @@
 	}
 
 	function selectEdited(): void {
-		pickedIds = new Set(frames.filter(frameHasEdits).map((f) => f.id));
+		if (roll === null) return;
+		const r = roll;
+		pickedIds = new Set(frames.filter((f) => frameHasEdits(f, r)).map((f) => f.id));
 	}
 
 	function clearSelection(): void {
