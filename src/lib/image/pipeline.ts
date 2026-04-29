@@ -1200,18 +1200,29 @@ function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
  *
  * TransformUniforms layout (total 16 bytes):
  *   rotation     : f32   @ 0   (radians)
- *   outputAspect : f32   @ 4   (width/height of output texture)
+ *   sourceAspect : f32   @ 4   (width/height of source texture)
  *   zoom         : f32   @ 8   (1.0 = no zoom, 2.0 = 2x zoom)
- *   _pad0        : f32   @ 12
+ *   outputAspect : f32   @ 12  (width/height of output texture)
  */
-function makeTransformUniforms(device: GPUDevice, t: TransformParams, outputAspect: number): GPUBuffer {
+function makeTransformUniforms(device: GPUDevice, t: TransformParams, sourceAspect: number, outputAspect: number): GPUBuffer {
 	const data = new Float32Array([
 		(t.rotation * Math.PI) / 180, // Convert degrees to radians
-		outputAspect,                  // For aspect-correct rotation
+		sourceAspect,                  // Source texture aspect ratio
 		t.zoom ?? 1,                   // Zoom factor (default 1.0 = no zoom)
-		0,                             // _pad0
+		outputAspect,                  // Output texture aspect ratio
 	]);
 	return makeUniformBuffer(device, data);
+}
+
+/**
+ * Check if the rotation results in a dimension swap (portrait↔landscape).
+ * This is true when the nearest 90° step is an odd multiple (90° or 270°).
+ * Fine rotation adjustments (±45°) don't change the swap state.
+ */
+function isRotation90Multiple(rotation: number): boolean {
+	const nearest90 = Math.round(rotation / 90);
+	// Odd multiples of 90° (1, 3, 5, -1, -3, ...) swap dimensions
+	return ((nearest90 % 2) + 2) % 2 === 1;
 }
 
 /**
@@ -1412,6 +1423,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	/** Track last output dimensions to detect when resize is needed. */
 	let lastOutputWidth = 0;
 	let lastOutputHeight = 0;
+	/** Track last pre-crop texture dimensions (post-rotation, pre-crop). */
+	let lastPreCropW = 0;
+	let lastPreCropH = 0;
 
 	// ─── Shared main-pass render logic ─────────────────────────────────────────
 
@@ -1437,18 +1451,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		isLinear: boolean,
 		logPerc: LogPercentiles | null,
 	): Promise<void> {
-		// ── Compute output dimensions (may differ from source if cropped) ───
-		// Rotation does NOT change dimensions — it's purely UV-based in the GPU.
+		// ── Compute output dimensions (may differ from source if cropped/rotated) ───
 		const hasCrop = edit.cropQuad !== null;
 		const hasTransform = !isIdentityTransform(edit.transform);
+		const swapDims = isRotation90Multiple(edit.transform.rotation);
 		
-		// Start with source dimensions, apply crop if present
-		let outW = w;
-		let outH = h;
+		// Start with source dimensions, swap if rotated 90°/270°
+		let outW = swapDims ? h : w;
+		let outH = swapDims ? w : h;
 		
-		// Apply crop dimensions
+		// Apply crop dimensions (crop is in post-rotation space, so use rotated dims)
 		if (hasCrop && edit.cropQuad) {
-			const cropDims = computeCropOutputDimensions(edit.cropQuad, w, h);
+			const cropDims = computeCropOutputDimensions(edit.cropQuad, outW, outH);
 			outW = cropDims.width;
 			outH = cropDims.height;
 		}
@@ -1475,6 +1489,22 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			lastOutputWidth = outW;
 			lastOutputHeight = outH;
+		}
+
+		// ── Resize pre-crop texture if rotation swaps dimensions ────────────
+		// preCropTexture is the transform pass output (and crop pass input).
+		// When rotation is 90°/270°, it needs swapped dimensions vs source.
+		const preCropW = swapDims ? h : w;
+		const preCropH = swapDims ? w : h;
+		if (hasCrop && hasTransform && (preCropW !== lastPreCropW || preCropH !== lastPreCropH)) {
+			preCropTexture?.destroy();
+			preCropTexture = device.createTexture({
+				size: [preCropW, preCropH],
+				format: 'rgba16float',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+			lastPreCropW = preCropW;
+			lastPreCropH = preCropH;
 		}
 		// ── Build LUT textures ──────────────────────────────────────────────
 
@@ -1786,11 +1816,15 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		drawFullscreenTriangle(encoder, toneCurvePipeline, toneCurveBG, toneCurveTarget.createView());
 
 		// ── Optional transform pass (rotation) ───────────────────────────────
-		// Rotation is purely UV-based, no dimension changes.
+		// When rotation is ±90°/±270°, the output dimensions are swapped.
 		if (hasTransform) {
-			// Use source aspect ratio for aspect-correct rotation
-			const outputAspect = w / h;
-			const transformUnifBuf = makeTransformUniforms(device, edit.transform, outputAspect);
+			const sourceAspect = w / h;
+			// The transform output is either preCropTexture (if crop follows) or outputTexture.
+			// When swapDims, these textures have swapped dimensions relative to source.
+			const transformOutW = hasCrop ? (swapDims ? h : w) : outW;
+			const transformOutH = hasCrop ? (swapDims ? w : h) : outH;
+			const transformOutputAspect = transformOutW / transformOutH;
+			const transformUnifBuf = makeTransformUniforms(device, edit.transform, sourceAspect, transformOutputAspect);
 			toClean.push(transformUnifBuf);
 
 			// Determine the transform output target
@@ -1922,6 +1956,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				GPUTextureUsage.RENDER_ATTACHMENT |
 				GPUTextureUsage.TEXTURE_BINDING,
 		});
+		lastPreCropW = srcW;
+		lastPreCropH = srcH;
 		// Reset output dimensions tracking so runMainPasses rebuilds output textures
 		lastOutputWidth = 0;
 		lastOutputHeight = 0;
