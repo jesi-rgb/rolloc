@@ -17,12 +17,12 @@ struct TransformUniforms {
 	// Rotation in radians (positive = clockwise)
 	rotation : f32,
 	// Aspect ratio of the source texture (width/height)
-	// Needed for correct rotation without distortion
 	sourceAspect : f32,
 	// Zoom factor (1.0 = no zoom, 2.0 = 2x zoom / crop in)
 	zoom : f32,
-	// Padding to 16 bytes (std140 alignment)
-	_pad0 : f32,
+	// Aspect ratio of the output texture (width/height)
+	// Differs from sourceAspect when rotation is ±90°/±270° (dimensions swapped)
+	outputAspect : f32,
 }
 
 struct VertIn {
@@ -56,20 +56,47 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		uv = uv / uTransform.zoom;
 	}
 	
-	// Apply rotation with aspect ratio correction
-	// This prevents distortion on non-square images
-	if (uTransform.rotation != 0.0) {
-		let aspect = uTransform.sourceAspect;
-		let cosA = cos(uTransform.rotation);
-		let sinA = sin(uTransform.rotation);
-		
-		// Scale X to square space, rotate, then scale back
-		let correctedX = uv.x * aspect;
-		let rx = correctedX * cosA - uv.y * sinA;
-		let ry = correctedX * sinA + uv.y * cosA;
-		uv.x = rx / aspect;
-		uv.y = ry;
-	}
+	// Apply rotation while keeping the source's pixel size constant on screen.
+	//
+	// The canvas dimensions are chosen by the host code as the source dims
+	// optionally swapped for ±90°/±270° (the nearest-90° step). The intent:
+	// - 0°/180°: output is sized like source → identity / 180° flip works.
+	// - ±90°/±270°: output is sized as swapped source → rotation is exact.
+	// - Fine rotations (e.g. 5°): output keeps source size; rotated corners
+	//   clip into the sampler clamp region (caller crops as needed).
+	//
+	// We work in a "source-pixel" reference frame where the source occupies
+	// physical extent (srcAspect, 1). Depending on the nearest-90° step, the
+	// output canvas occupies either (srcAspect, 1) — same orientation as
+	// source — or (1, srcAspect) — swapped. This is determined by comparing
+	// outputAspect to sourceAspect: if outputAspect ≈ sourceAspect, the
+	// canvas is in source orientation; otherwise it's swapped.
+	let srcAspect = uTransform.sourceAspect;
+	let outAspect = uTransform.outputAspect;
+	let cosA = cos(uTransform.rotation);
+	let sinA = sin(uTransform.rotation);
+	
+	// Decide canvas physical extent in source-pixel units.
+	// If output is in swapped orientation (outAspect closer to 1/srcAspect
+	// than to srcAspect), the canvas extent is (1, srcAspect); otherwise
+	// it's (srcAspect, 1). Same total area as source either way.
+	let swappedDist = abs(outAspect - 1.0 / srcAspect);
+	let unswappedDist = abs(outAspect - srcAspect);
+	let isSwapped = swappedDist < unswappedDist;
+	let canvasW = select(srcAspect, 1.0, isSwapped);
+	let canvasH = select(1.0, srcAspect, isSwapped);
+	
+	// Map output uv ∈ [-0.5, 0.5] to canvas physical extent
+	let px = uv.x * canvasW;
+	let py = uv.y * canvasH;
+	
+	// Rotate in physical space (inverse rotation to look up source pixel)
+	let rx = px * cosA - py * sinA;
+	let ry = px * sinA + py * cosA;
+	
+	// Convert back to source UV space (source physical is srcAspect × 1)
+	uv.x = rx / srcAspect;
+	uv.y = ry;
 	
 	// Un-center
 	uv = uv + vec2<f32>(0.5, 0.5);
