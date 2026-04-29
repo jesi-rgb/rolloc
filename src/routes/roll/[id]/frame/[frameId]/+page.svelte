@@ -55,6 +55,8 @@
   import HorizonOverlay from "$lib/components/HorizonOverlay.svelte";
   import TransformControls from "$lib/components/TransformControls.svelte";
   import ToggleButton from "$lib/components/ToggleButton.svelte";
+  import ExportControls from "$lib/components/ExportControls.svelte";
+  import SidebarSection from "$lib/components/SidebarSection.svelte";
   import {
     detectHorizonCandidates,
     createImageData,
@@ -64,6 +66,9 @@
     ArrowFatUpIcon,
     CommandIcon,
     EyedropperSampleIcon,
+    CropIcon,
+    ArrowArcLeftIcon,
+    ArrowArcRightIcon,
   } from "phosphor-svelte";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
@@ -1532,104 +1537,71 @@
       class="w-72 shrink-0 border-l border-base-subtle bg-base
 			       overflow-y-auto flex flex-col"
     >
-      <div class="flex flex-col gap-l p-l">
-        {#if roll && frame}
-          <!-- Undo / Redo -->
-          <section>
-            <div class="flex items-center gap-xs">
-              <button
-                onclick={undo}
-                disabled={!canUndo}
-                title="Undo (Ctrl+Z)"
-                aria-label="Undo"
-                class="flex-1 flex items-center justify-center gap-xs
-								       px-sm py-xs rounded border text-xs transition
-								       border-base-subtle text-content-muted
-								       hover:border-content-muted hover:text-content
-								       disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  ><path d="M3 7v6h6" /><path
-                    d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"
-                  /></svg
-                >
-                Undo
-              </button>
-              <button
-                onclick={redo}
-                disabled={!canRedo}
-                title="Redo (Ctrl+Shift+Z)"
-                aria-label="Redo"
-                class="flex-1 flex items-center justify-center gap-xs
-								       px-sm py-xs rounded border text-xs transition
-								       border-base-subtle text-content-muted
-								       hover:border-content-muted hover:text-content
-								       disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                Redo
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  ><path d="M21 7v6h-6" /><path
-                    d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"
-                  /></svg
-                >
-              </button>
-            </div>
-          </section>
+      {#if roll && frame}
+        <!-- Export -->
+        <SidebarSection>
+          <ExportControls
+            {exportScale}
+            {exporting}
+            {exportSuccess}
+            {exportError}
+            disabled={exporting || loading || !pipeline}
+            onExport={exportFrame}
+            onScaleChange={(s) => (exportScale = s)}
+          />
+        </SidebarSection>
 
-          <!-- Crop mode toggle -->
-          <section>
-            <ToggleButton
-              active={cropModeActive}
-              onclick={toggleCropMode}
-              title="Toggle crop mode (C)"
-              block
+        <!-- Undo / Redo -->
+        <SidebarSection>
+          <div class="flex items-center gap-xs">
+            <button
+              onclick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo"
+              class="flex-1 flex items-center justify-center gap-xs
+							       px-sm py-xs rounded border text-xs transition
+							       border-base-subtle text-content-muted
+							       hover:border-content-muted hover:text-content
+							       disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M6 2v14a2 2 0 0 0 2 2h14" />
-                <path d="M18 22V8a2 2 0 0 0-2-2H2" />
-              </svg>
-              {cropModeActive ? "Exit Crop" : "Crop"}
-            </ToggleButton>
-          </section>
+              <ArrowArcLeftIcon size={12} />
+              Undo
+            </button>
+            <button
+              onclick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo"
+              class="flex-1 flex items-center justify-center gap-xs
+							       px-sm py-xs rounded border text-xs transition
+							       border-base-subtle text-content-muted
+							       hover:border-content-muted hover:text-content
+							       disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Redo
+              <ArrowArcRightIcon size={12} />
+            </button>
+          </div>
+        </SidebarSection>
 
-          <!-- Transform controls (rotation, flip) -->
-          <section>
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              Transform
-            </h3>
+        <!-- Transform controls (rotation, flip, crop) -->
+        <SidebarSection alternate>
+          <h3
+            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+          >
+            Transform
+          </h3>
+          <ToggleButton
+            active={cropModeActive}
+            onclick={toggleCropMode}
+            title="Toggle crop mode (C)"
+            block
+          >
+            <CropIcon size={14} />
+            {cropModeActive ? "Exit Crop" : "Crop"}
+          </ToggleButton>
+          <div class="mt-base">
             <TransformControls
               value={effectiveTransform}
               onChange={onTransformChange}
@@ -1638,22 +1610,22 @@
               onAutoStraighten={startHorizonDetection}
               {detectingHorizon}
             />
-          </section>
+          </div>
+        </SidebarSection>
 
-          <!-- NegPy inversion controls (only when invert = true) -->
-          <section>
-            <InversionControls
-              value={effectiveInversionParams}
-              onChange={onInversionChange}
-              onCommit={onInversionCommit}
-              {wbPickerActive}
-              onToggleWbPicker={toggleWbPicker}
-            />
-          </section>
-        {/if}
+        <!-- NegPy inversion controls (only when invert = true) -->
+        <SidebarSection>
+          <InversionControls
+            value={effectiveInversionParams}
+            onChange={onInversionChange}
+            onCommit={onInversionCommit}
+            {wbPickerActive}
+            onToggleWbPicker={toggleWbPicker}
+          />
+        </SidebarSection>
 
         <!-- Curves section -->
-        <section>
+        <SidebarSection alternate>
           <h3
             class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
           >
@@ -1668,83 +1640,8 @@
             onCommit={onCurveCommit}
             histogram={currentHistogram}
           />
-        </section>
-
-        <!-- Export -->
-        <section class="border-t border-base-subtle pt-l">
-          <h3
-            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-          >
-            Export
-          </h3>
-
-          <!-- Scale selector (joined button group) -->
-          <div class="flex mb-sm" role="radiogroup" aria-label="Export scale">
-            <button
-              type="button"
-              onclick={() => (exportScale = 0.25)}
-              aria-pressed={exportScale === 0.25}
-              class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border border-r-0 rounded-l
-                       {exportScale === 0.25
-                ? 'bg-primary/15 border-primary text-primary'
-                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-            >
-              0.25x
-            </button>
-            <button
-              type="button"
-              onclick={() => (exportScale = 0.5)}
-              aria-pressed={exportScale === 0.5}
-              class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border border-r-0
-                       {exportScale === 0.5
-                ? 'bg-primary/15 border-primary text-primary'
-                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-            >
-              0.5x
-            </button>
-            <button
-              type="button"
-              onclick={() => (exportScale = 1)}
-              aria-pressed={exportScale === 1}
-              class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border rounded-r
-                       {exportScale === 1
-                ? 'bg-primary/15 border-primary text-primary'
-                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-            >
-              1x
-            </button>
-          </div>
-
-          <button
-            onclick={exportFrame}
-            disabled={exporting || loading || !pipeline}
-            class="w-full flex items-center justify-center gap-sm
-							       px-sm py-xs rounded border text-sm transition
-							       border-primary text-primary
-							       hover:bg-primary/10
-							       disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {#if exporting}
-              Exporting…
-            {:else if exportSuccess}
-              <p class="mt-sm text-xs text-content-muted">
-                Saved successfully.
-              </p>
-            {:else}
-              Export to JPEG
-            {/if}
-          </button>
-
-          {#if exportError}
-            <p class="mt-sm text-xs text-red-500 break-all">
-              {exportError}
-            </p>
-          {/if}
-        </section>
-      </div>
+        </SidebarSection>
+      {/if}
     </aside>
   </div>
 
