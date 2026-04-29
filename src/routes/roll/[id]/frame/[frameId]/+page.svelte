@@ -1041,10 +1041,18 @@
         exportScale === 0.25 ? "_sm" : exportScale === 0.5 ? "_md" : "";
       const defaultFileName = `${stem}${sizeSuffix}.jpg`;
 
+      // ── Default to an "exports" subfolder inside the roll's source dir ──
+      let defaultPath = defaultFileName;
+      const rollDirPath = await getRollPath(rollId);
+      if (rollDirPath) {
+        const exportsDir = await join(rollDirPath, "exports");
+        defaultPath = await join(exportsDir, defaultFileName);
+      }
+
       // ── Open native Save As dialog ─────────────────────────────────
       const savePath = await saveDialog({
         title: "Export JPEG",
-        defaultPath: defaultFileName,
+        defaultPath,
         filters: [{ name: "JPEG Image", extensions: ["jpg", "jpeg"] }],
       });
 
