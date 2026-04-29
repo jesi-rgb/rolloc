@@ -157,10 +157,12 @@ fn hd_channel(
 	let highlight_level_offset = highlights * shoulder_mask  * 0.1;
 
 	// 6. Adjusted diff (negpy sign convention + Rolloc shadows/highlights extension)
+	// Shadows/highlights UI convention: positive = brighter. Density adds darken,
+	// so we subtract both level offsets here.
 	let diff_adj = diff
 		+ shadow_color_offset + highlight_color_offset
 		- toe_density_offset + shoulder_density_offset
-		- shadow_level_offset + highlight_level_offset;
+		- shadow_level_offset - highlight_level_offset;
 
 	// 7. Contrast damping (toe/shoulder reduce effective contrast)
 	let damp_toe      = toe      * toe_mask      * 0.5;

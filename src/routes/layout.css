@@ -144,6 +144,9 @@
 	--base-subtle: oklch(88% 0.006 264);
 	/* ≈ zinc-200 */
 
+	/* Sidebar section alternate background */
+	--sidebar-section-alt: oklch(96% 0.004 264);
+
 	/* Content — dark end of zinc */
 	--content: oklch(20% 0.006 264);
 	/* ≈ zinc-900 */
@@ -205,6 +208,9 @@
 	/* ≈ zinc-900 */
 	--base-subtle: oklch(22% 0.008 264);
 	/* ≈ zinc-800 */
+
+	/* Sidebar section alternate background */
+	--sidebar-section-alt: oklch(14% 0.006 264);
 
 	/* Content — light end of zinc */
 	--content: oklch(93% 0.004 264);

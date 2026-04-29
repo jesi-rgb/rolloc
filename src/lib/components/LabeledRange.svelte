@@ -8,9 +8,9 @@
 		value: number;
 		onchange: (v: number) => void;
 		/**
-		 * Called when the user releases the slider (pointer-up / native change
-		 * event). Use this to trigger expensive side-effects like IDB writes
-		 * that should not fire on every drag tick.
+		 * Called when the user releases the slider (pointer-up). Use this to
+		 * trigger expensive side-effects like IDB writes that should not fire
+		 * on every drag tick.
 		 */
 		oncommit?: (v: number) => void;
 		/** Called when the user starts dragging the slider. */
@@ -28,10 +28,17 @@
 		small?: boolean;
 		/** Double-clicking the thumb resets to this value. */
 		defaultValue?: number;
-		/** Custom color for the thumb. */
+		/** Custom color for the thumb + fill (positive direction). */
 		thumbColor?: string;
-		/** Custom color for the track. */
+		/** Custom color for the track background. */
 		trackColor?: string;
+		/**
+		 * Optional complementary color shown at the negative end of the track
+		 * background gradient. If omitted, the track uses a flat background.
+		 */
+		negativeColor?: string;
+		/** Hide the label + value header row (show only the slider). */
+		hideHeader?: boolean;
 	}
 
 	let {
@@ -52,6 +59,8 @@
 		defaultValue,
 		thumbColor,
 		trackColor,
+		negativeColor,
+		hideHeader = false,
 	}: Props = $props();
 
 	function fmt(v: number): string {
@@ -60,46 +69,170 @@
 
 	const textSize = $derived(small ? "text-[10px]" : "text-xs");
 
-	function handleDblClick(): void {
-		if (defaultValue !== undefined) {
-			onchange(defaultValue);
-			oncommit?.(defaultValue);
+	/** Map a value in [min,max] to a 0..1 fraction (0 = left, 1 = right). */
+	function valueToFrac(v: number): number {
+		return (v - min) / (max - min);
+	}
+
+	/** Fraction of the track corresponding to the zero baseline.
+	 *  Clamped — when min/max don't straddle zero, fill grows from min. */
+	const zeroFrac = $derived(Math.max(0, Math.min(1, valueToFrac(0))));
+
+	const frac = $derived(
+		Math.max(0, Math.min(1, valueToFrac(value))),
+	);
+	const fillLeft = $derived(Math.min(frac, zeroFrac));
+	const fillRight = $derived(Math.max(frac, zeroFrac));
+
+	/** Build the track background. */
+	const trackBg = $derived.by(() => {
+		if (trackColor) return trackColor;
+		if (negativeColor && thumbColor) {
+			const z = (zeroFrac * 100).toFixed(2);
+			return (
+				`linear-gradient(to right, ` +
+				`${negativeColor}1a 0%, ` +
+				`var(--color-base) ${z}%, ` +
+				`${thumbColor}1a 100%)`
+			);
 		}
+		return "var(--color-base)";
+	});
+
+	function snap(v: number): number {
+		const stepped = Math.round((v - min) / step) * step + min;
+		return Math.max(min, Math.min(max, parseFloat(stepped.toFixed(6))));
+	}
+
+	function clientXToValue(track: HTMLElement, clientX: number): number {
+		const rect = track.getBoundingClientRect();
+		const f = (clientX - rect.left) / rect.width;
+		const clamped = Math.max(0, Math.min(1, f));
+		return snap(min + clamped * (max - min));
+	}
+
+	let dragging = $state(false);
+
+	function onPointerDown(e: PointerEvent): void {
+		const track = e.currentTarget as HTMLElement;
+		track.setPointerCapture(e.pointerId);
+		dragging = true;
+		ondragstart?.();
+		const v = clientXToValue(track, e.clientX);
+		onchange(v);
+	}
+
+	function onPointerMove(e: PointerEvent): void {
+		if (!dragging) return;
+		const track = e.currentTarget as HTMLElement;
+		const v = clientXToValue(track, e.clientX);
+		onchange(v);
+	}
+
+	function onPointerUp(e: PointerEvent): void {
+		if (!dragging) return;
+		const track = e.currentTarget as HTMLElement;
+		const v = clientXToValue(track, e.clientX);
+		dragging = false;
+		oncommit?.(v);
+		ondragend?.();
+	}
+
+	function onDblClick(): void {
+		if (defaultValue === undefined) return;
+		onchange(defaultValue);
+		oncommit?.(defaultValue);
+	}
+
+	function onKeyDown(e: KeyboardEvent): void {
+		const big = (max - min) / 10;
+		let next = value;
+		switch (e.key) {
+			case "ArrowRight":
+			case "ArrowUp":
+				next = snap(value + step);
+				break;
+			case "ArrowLeft":
+			case "ArrowDown":
+				next = snap(value - step);
+				break;
+			case "PageUp":
+				next = snap(value + big);
+				break;
+			case "PageDown":
+				next = snap(value - big);
+				break;
+			case "Home":
+				next = min;
+				break;
+			case "End":
+				next = max;
+				break;
+			default:
+				return;
+		}
+		e.preventDefault();
+		onchange(next);
+		oncommit?.(next);
 	}
 </script>
 
 {#snippet rangeInput(extraClass: string)}
-	<input
+	<div
 		{id}
-		type="range"
-		{min}
-		{max}
-		{step}
-		{value}
-		oninput={(e) =>
-			onchange(parseFloat((e.currentTarget as HTMLInputElement).value))}
-		onchange={(e) =>
-			oncommit?.(parseFloat((e.currentTarget as HTMLInputElement).value))}
-		onpointerdown={() => ondragstart?.()}
-		onpointerup={() => ondragend?.()}
-		onpointercancel={() => ondragend?.()}
-		ondblclick={handleDblClick}
-		class="range-track {extraClass}"
-		style:--thumb-color={thumbColor}
-		style:--track-color={trackColor}
-	/>
+		class="track {extraClass}"
+		role="slider"
+		tabindex="0"
+		aria-label={label}
+		aria-valuemin={min}
+		aria-valuemax={max}
+		aria-valuenow={value}
+		aria-orientation="horizontal"
+		style:background={trackBg}
+		onpointerdown={onPointerDown}
+		onpointermove={onPointerMove}
+		onpointerup={onPointerUp}
+		onpointercancel={onPointerUp}
+		ondblclick={onDblClick}
+		onkeydown={onKeyDown}
+	>
+		<!-- center baseline (only meaningful when zero is inside the range) -->
+		{#if zeroFrac > 0 && zeroFrac < 1}
+			<div
+				class="baseline"
+				style:left="calc({zeroFrac * 100}% - 0.5px)"
+			></div>
+		{/if}
+
+		<!-- fill from zero toward thumb -->
+		<div
+			class="fill"
+			style:left="{fillLeft * 100}%"
+			style:width="{(fillRight - fillLeft) * 100}%"
+			style:background-color={thumbColor ?? "var(--color-primary)"}
+		></div>
+
+		<!-- vertical line thumb -->
+		<div
+			class="thumb"
+			style:left="calc({frac * 100}% - 1px)"
+			style:background-color={thumbColor ?? "var(--color-primary)"}
+		></div>
+	</div>
 {/snippet}
 
 {#if layout === "stacked"}
 	<div class="flex flex-col gap-xs">
-		<div class="flex items-center justify-between">
-			<label for={id} class="{textSize} font-medium {labelClass}"
-				>{label}</label
-			>
-			<span class="{textSize} text-content font-mono tabular-nums"
-				>{fmt(value)}</span
-			>
-		</div>
+		{#if !hideHeader}
+			<div class="flex items-center justify-between">
+				<label for={id} class="{textSize} font-medium {labelClass}"
+					>{label}</label
+				>
+				<span class="{textSize} text-content font-mono tabular-nums"
+					>{fmt(value)}</span
+				>
+			</div>
+		{/if}
 		{@render rangeInput("w-full")}
 	</div>
 {:else}
@@ -116,82 +249,57 @@
 {/if}
 
 <style>
-	.range-track {
-		cursor: pointer;
-		appearance: none;
-		border-radius: 9999px;
-		accent-color: var(--primary);
-		background-color: var(--base-subtle);
+	.track {
+		position: relative;
+		height: 0.875rem; /* fatter than the previous 0.5rem */
+		border-radius: 0.3125rem;
+		border: 1px solid var(--color-base-subtle);
+		background-color: var(--color-base);
+		cursor: ew-resize;
+		touch-action: none;
+		overflow: hidden;
 	}
 
-	/* WebKit (Chrome, Safari, Edge) */
-	.range-track::-webkit-slider-runnable-track {
-		height: 0.5rem;
-		border-radius: 9999px;
-		background-color: var(--track-color, var(--base-subtle));
+	.track:focus-visible {
+		outline: 2px solid var(--color-primary);
+		outline-offset: 2px;
 	}
 
-	.range-track::-webkit-slider-thumb {
-		-webkit-appearance: none;
-		appearance: none;
-		/* Visual size - pill shape */
-		width: 1.25rem;
-		height: 0.5rem;
-		border-radius: 9999px;
-		background-color: var(--thumb-color, var(--primary));
-		/* Stroke behind via box-shadow (expands outward) */
-		box-shadow: 0 0 0 0 var(--color-base);
-		/* Center thumb on track */
-		margin-top: calc((0.5rem - 0.5rem) / 2);
-		cursor: pointer;
-		/* Smooth transitions */
-		transition:
-			transform 150ms ease-out,
-			box-shadow 150ms ease-out;
-		transform: scale(1);
+	.baseline {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background-color: var(--color-base-subtle);
+		pointer-events: none;
 	}
 
-	.range-track:hover::-webkit-slider-thumb {
-		transform: scale(1.15);
-		box-shadow: 0 0 0 3px var(--color-base);
+	.fill {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		opacity: 0.35;
+		pointer-events: none;
+		transition: opacity 120ms ease-out;
 	}
 
-	.range-track:active::-webkit-slider-thumb {
-		transform: scale(1.15);
-		box-shadow: 0 0 0 3px var(--color-base);
+	.track:hover .fill,
+	.track:active .fill {
+		opacity: 0.5;
 	}
 
-	/* Firefox */
-	.range-track::-moz-range-track {
-		height: 0.5rem;
-		border-radius: 9999px;
-		background-color: var(--track-color, var(--base-subtle));
+	.thumb {
+		position: absolute;
+		top: -2px;
+		bottom: -2px;
+		width: 2px;
+		border-radius: 1px;
+		pointer-events: none;
+		transition: transform 120ms ease-out;
 	}
 
-	.range-track::-moz-range-thumb {
-		/* Visual size - pill shape */
-		width: 1.25rem;
-		height: 0.5rem;
-		border-radius: 9999px;
-		background-color: var(--thumb-color, var(--primary));
-		/* Stroke behind via box-shadow (expands outward) */
-		box-shadow: 0 0 0 0 var(--color-base);
-		border: none;
-		cursor: pointer;
-		/* Smooth transitions */
-		transition:
-			transform 150ms ease-out,
-			box-shadow 150ms ease-out;
-		transform: scale(1);
-	}
-
-	.range-track:hover::-moz-range-thumb {
-		transform: scale(1.15);
-		box-shadow: 0 0 0 3px var(--color-base);
-	}
-
-	.range-track:active::-moz-range-thumb {
-		transform: scale(1.15);
-		box-shadow: 0 0 0 3px var(--color-base);
+	.track:hover .thumb,
+	.track:active .thumb {
+		transform: scaleX(1.5);
 	}
 </style>

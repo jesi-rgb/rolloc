@@ -54,9 +54,22 @@
   import CropOverlay from "$lib/components/CropOverlay.svelte";
   import HorizonOverlay from "$lib/components/HorizonOverlay.svelte";
   import TransformControls from "$lib/components/TransformControls.svelte";
-  import { detectHorizonCandidates, createImageData } from "$lib/image/horizon-detect";
+  import ToggleButton from "$lib/components/ToggleButton.svelte";
+  import ExportControls from "$lib/components/ExportControls.svelte";
+  import SidebarSection from "$lib/components/SidebarSection.svelte";
+  import {
+    detectHorizonCandidates,
+    createImageData,
+  } from "$lib/image/horizon-detect";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
-  import { ArrowFatUpIcon, CommandIcon } from "phosphor-svelte";
+  import {
+    ArrowFatUpIcon,
+    CommandIcon,
+    EyedropperSampleIcon,
+    CropIcon,
+    ArrowArcLeftIcon,
+    ArrowArcRightIcon,
+  } from "phosphor-svelte";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
 
@@ -911,7 +924,7 @@
       const pixels = await pipeline.readPixels(0, 0, w, h);
 
       if (!pixels) {
-        console.error('[horizon] Failed to read pixels from canvas');
+        console.error("[horizon] Failed to read pixels from canvas");
         return;
       }
 
@@ -920,12 +933,12 @@
       const candidates = detectHorizonCandidates(imageData);
 
       if (candidates.length === 0) {
-        console.log('[horizon] No lines detected');
+        console.log("[horizon] No lines detected");
         // Do nothing — user just sees no overlay
         return;
       }
 
-      console.log('[horizon] Found', candidates.length, 'candidates');
+      console.log("[horizon] Found", candidates.length, "candidates");
 
       // Store pre-detection rotation for revert on cancel
       preHorizonRotation = effectiveTransform.rotation;
@@ -1033,10 +1046,18 @@
         exportScale === 0.25 ? "_sm" : exportScale === 0.5 ? "_md" : "";
       const defaultFileName = `${stem}${sizeSuffix}.jpg`;
 
+      // ── Default to an "exports" subfolder inside the roll's source dir ──
+      let defaultPath = defaultFileName;
+      const rollDirPath = await getRollPath(rollId);
+      if (rollDirPath) {
+        const exportsDir = await join(rollDirPath, "exports");
+        defaultPath = await join(exportsDir, defaultFileName);
+      }
+
       // ── Open native Save As dialog ─────────────────────────────────
       const savePath = await saveDialog({
         title: "Export JPEG",
-        defaultPath: defaultFileName,
+        defaultPath,
         filters: [{ name: "JPEG Image", extensions: ["jpg", "jpeg"] }],
       });
 
@@ -1516,107 +1537,71 @@
       class="w-72 shrink-0 border-l border-base-subtle bg-base
 			       overflow-y-auto flex flex-col"
     >
-      <div class="flex flex-col gap-l p-l">
-        {#if roll && frame}
-          <!-- Undo / Redo -->
-          <section>
-            <div class="flex items-center gap-xs">
-              <button
-                onclick={undo}
-                disabled={!canUndo}
-                title="Undo (Ctrl+Z)"
-                aria-label="Undo"
-                class="flex-1 flex items-center justify-center gap-xs
-								       px-sm py-xs rounded border text-xs transition
-								       border-base-subtle text-content-muted
-								       hover:border-content-muted hover:text-content
-								       disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  ><path d="M3 7v6h6" /><path
-                    d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"
-                  /></svg
-                >
-                Undo
-              </button>
-              <button
-                onclick={redo}
-                disabled={!canRedo}
-                title="Redo (Ctrl+Shift+Z)"
-                aria-label="Redo"
-                class="flex-1 flex items-center justify-center gap-xs
-								       px-sm py-xs rounded border text-xs transition
-								       border-base-subtle text-content-muted
-								       hover:border-content-muted hover:text-content
-								       disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                Redo
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                  ><path d="M21 7v6h-6" /><path
-                    d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"
-                  /></svg
-                >
-              </button>
-            </div>
-          </section>
+      {#if roll && frame}
+        <!-- Export -->
+        <SidebarSection>
+          <ExportControls
+            {exportScale}
+            {exporting}
+            {exportSuccess}
+            {exportError}
+            disabled={exporting || loading || !pipeline}
+            onExport={exportFrame}
+            onScaleChange={(s) => (exportScale = s)}
+          />
+        </SidebarSection>
 
-          <!-- Crop mode toggle -->
-          <section>
+        <!-- Undo / Redo -->
+        <SidebarSection>
+          <div class="flex items-center gap-xs">
             <button
-              onclick={toggleCropMode}
-              title="Toggle crop mode (C)"
-              class="w-full flex items-center justify-center gap-sm
+              onclick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo"
+              class="flex-1 flex items-center justify-center gap-xs
 							       px-sm py-xs rounded border text-xs transition
-							       {cropModeActive
-                ? 'border-primary bg-primary/10 text-primary'
-                : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+							       border-base-subtle text-content-muted
+							       hover:border-content-muted hover:text-content
+							       disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M6 2v14a2 2 0 0 0 2 2h14" />
-                <path d="M18 22V8a2 2 0 0 0-2-2H2" />
-              </svg>
-              {cropModeActive ? "Exit Crop" : "Crop"}
+              <ArrowArcLeftIcon size={12} />
+              Undo
             </button>
-          </section>
-
-          <!-- Transform controls (rotation, flip) -->
-          <section>
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+            <button
+              onclick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo"
+              class="flex-1 flex items-center justify-center gap-xs
+							       px-sm py-xs rounded border text-xs transition
+							       border-base-subtle text-content-muted
+							       hover:border-content-muted hover:text-content
+							       disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              Transform
-            </h3>
+              Redo
+              <ArrowArcRightIcon size={12} />
+            </button>
+          </div>
+        </SidebarSection>
+
+        <!-- Transform controls (rotation, flip, crop) -->
+        <SidebarSection alternate>
+          <h3
+            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+          >
+            Transform
+          </h3>
+          <ToggleButton
+            active={cropModeActive}
+            onclick={toggleCropMode}
+            title="Toggle crop mode (C)"
+            block
+          >
+            <CropIcon size={14} />
+            {cropModeActive ? "Exit Crop" : "Crop"}
+          </ToggleButton>
+          <div class="mt-base">
             <TransformControls
               value={effectiveTransform}
               onChange={onTransformChange}
@@ -1625,183 +1610,38 @@
               onAutoStraighten={startHorizonDetection}
               {detectingHorizon}
             />
-          </section>
+          </div>
+        </SidebarSection>
 
-          <!-- Negative inversion toggle -->
-          <section>
-            <label class="flex items-center gap-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={roll.rollEdit.invert}
-                onchange={(e) =>
-                  saveRollEdit({
-                    invert: e.currentTarget.checked,
-                  })}
-                class="w-4 h-4 accent-primary"
-              />
-              <span class="text-sm text-content">Negative (invert)</span>
-            </label>
-          </section>
+        <!-- NegPy inversion controls (only when invert = true) -->
+        <SidebarSection>
+          <InversionControls
+            value={effectiveInversionParams}
+            onChange={onInversionChange}
+            onCommit={onInversionCommit}
+            {wbPickerActive}
+            onToggleWbPicker={toggleWbPicker}
+          />
+        </SidebarSection>
 
-          <!-- NegPy inversion controls (only when invert = true) -->
-          {#if roll.rollEdit.invert}
-            <section>
-              <div class="flex items-center justify-between mb-sm">
-                <h3
-                  class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
-                >
-                  Inversion
-                </h3>
-                <button
-                  onclick={toggleWbPicker}
-                  title="Pick a neutral white or gray pixel on the image to auto-set color balance"
-                  class="flex items-center gap-xs text-xs px-sm py-xs rounded border transition
-									       {wbPickerActive
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M2 13.5V19a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.5" />
-                    <path d="M22 10.5V5a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v5.5" />
-                    <line x1="12" y1="2" x2="12" y2="22" />
-                    <circle
-                      cx="12"
-                      cy="12"
-                      r="2"
-                      fill="currentColor"
-                      stroke="none"
-                    />
-                  </svg>
-                  WB Picker
-                </button>
-              </div>
-              <InversionControls
-                value={effectiveInversionParams}
-                onChange={onInversionChange}
-                onCommit={onInversionCommit}
-              />
-            </section>
-          {/if}
-
-          <!-- Curves section -->
-          <section>
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              Curves
-            </h3>
-            <CurvesEditor
-              global={effectiveToneCurve}
-              r={effectiveRGBCurves[0]}
-              g={effectiveRGBCurves[1]}
-              b={effectiveRGBCurves[2]}
-              onChange={onCurveChange}
-              onCommit={onCurveCommit}
-              histogram={currentHistogram}
-            />
-          </section>
-
-          <!-- Frame info -->
-          <section class="border-t border-base-subtle pt-l">
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              File
-            </h3>
-            <p class="text-xs text-content-muted font-mono break-all">
-              {frame.filename}
-            </p>
-          </section>
-
-          <!-- Export -->
-          <section class="border-t border-base-subtle pt-l">
-            <h3
-              class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-            >
-              Export
-            </h3>
-
-            <!-- Scale selector (joined button group) -->
-            <div class="flex mb-sm" role="radiogroup" aria-label="Export scale">
-              <button
-                type="button"
-                onclick={() => (exportScale = 0.25)}
-                aria-pressed={exportScale === 0.25}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border border-r-0 rounded-l
-                       {exportScale === 0.25
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                0.25x
-              </button>
-              <button
-                type="button"
-                onclick={() => (exportScale = 0.5)}
-                aria-pressed={exportScale === 0.5}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border border-r-0
-                       {exportScale === 0.5
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                0.5x
-              </button>
-              <button
-                type="button"
-                onclick={() => (exportScale = 1)}
-                aria-pressed={exportScale === 1}
-                class="flex-1 px-sm py-xs text-xs font-medium transition
-                       border rounded-r
-                       {exportScale === 1
-                  ? 'bg-primary/15 border-primary text-primary'
-                  : 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
-              >
-                1x
-              </button>
-            </div>
-
-            <button
-              onclick={exportFrame}
-              disabled={exporting || loading || !pipeline}
-              class="w-full flex items-center justify-center gap-sm
-							       px-sm py-xs rounded border text-sm transition
-							       border-primary text-primary
-							       hover:bg-primary/10
-							       disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {#if exporting}
-                Exporting…
-              {:else}
-                Export JPEG
-              {/if}
-            </button>
-
-            {#if exportSuccess}
-              <p class="mt-sm text-xs text-content-muted">
-                Saved successfully.
-              </p>
-            {/if}
-
-            {#if exportError}
-              <p class="mt-sm text-xs text-red-500 break-all">
-                {exportError}
-              </p>
-            {/if}
-          </section>
-        {/if}
-      </div>
+        <!-- Curves section -->
+        <SidebarSection alternate>
+          <h3
+            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+          >
+            Curves
+          </h3>
+          <CurvesEditor
+            global={effectiveToneCurve}
+            r={effectiveRGBCurves[0]}
+            g={effectiveRGBCurves[1]}
+            b={effectiveRGBCurves[2]}
+            onChange={onCurveChange}
+            onCommit={onCurveCommit}
+            histogram={currentHistogram}
+          />
+        </SidebarSection>
+      {/if}
     </aside>
   </div>
 
@@ -1818,10 +1658,7 @@
         label: "10× step",
       },
       {
-        keys: [
-          { icon: CommandIcon, eventKey: ["Meta", "Control"] },
-          "Z",
-        ],
+        keys: [{ icon: CommandIcon, eventKey: ["Meta", "Control"] }, "Z"],
         label: "undo",
       },
       {

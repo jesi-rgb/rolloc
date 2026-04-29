@@ -3,6 +3,8 @@
 	import { DEFAULT_TRANSFORM } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
+	import ToggleButton from "./ToggleButton.svelte";
+	import { ArrowCounterClockwiseIcon, ArrowClockwiseIcon, SpinnerIcon } from "phosphor-svelte";
 
 	interface Props {
 		value: TransformParams;
@@ -148,178 +150,126 @@
 	Rotation (90° buttons + fine slider), flip, and zoom controls.
 -->
 
-<div class="flex flex-col gap-sm">
-	<!-- ── 90° rotation buttons ─────────────────────────────────────────────── -->
-	<div class="flex items-center gap-sm">
-		<span class="text-xs text-content-muted w-16">Rotate</span>
-		<div class="flex items-center gap-xs flex-1">
-			<button
-				onclick={rotateRight}
-				title="Rotate 90° counter-clockwise"
-				aria-label="Rotate left"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       border-base-subtle text-content-muted
-				       hover:border-content-muted hover:text-content"
-			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M2.5 2v6h6M2.66 15.57a10 10 0 1 0 .57-8.38" />
-				</svg>
-			</button>
-			<span
-				class="text-xs text-content font-mono tabular-nums w-16 text-center"
-			>
-				{rotationLabel}
-			</span>
-			<button
-				onclick={rotateLeft}
-				title="Rotate 90° clockwise"
-				aria-label="Rotate right"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       border-base-subtle text-content-muted
-				       hover:border-content-muted hover:text-content"
-			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38" />
-				</svg>
-			</button>
-		</div>
-	</div>
-
-	<!-- ── Fine rotation slider ─────────────────────────────────────────────── -->
-	<div class="flex items-center gap-xs">
-		<div class="flex-1">
-			<LabeledRange
-				id="transform-fine-rotation"
-				label="Fine"
-				min={-45}
-				max={45}
-				step={0.1}
-				value={fineValue}
-				defaultValue={0}
-				onchange={onFineChange}
-				oncommit={commit}
-				ondragstart={() => onFineRotateDrag?.(true)}
-				ondragend={() => onFineRotateDrag?.(false)}
-				signed
-			/>
-		</div>
+<div class="flex flex-col gap-base">
+	<!-- ── Rotation group (buttons + fine slider) ───────────────────────────── -->
+	<div class="flex flex-col gap-xs">
+		<!-- 90° rotation + auto buttons -->
+		<div class="flex items-center gap-xs">
+		<button
+			onclick={rotateRight}
+			title="Rotate 90° counter-clockwise"
+			aria-label="Rotate left"
+			class="flex-1 flex items-center justify-center gap-xs
+			       px-sm py-xs rounded border text-xs transition
+			       border-base-subtle text-content-muted
+			       hover:border-content-muted hover:text-content"
+		>
+			<ArrowCounterClockwiseIcon size={14} />
+		</button>
 		{#if onAutoStraighten}
 			<button
 				onclick={onAutoStraighten}
 				disabled={detectingHorizon}
 				title="Detect horizon/vertical lines for auto-straighten"
 				aria-label="Auto straighten"
-				class="px-2 py-1 rounded border text-xs transition shrink-0
+				class="flex-1 flex items-center justify-center gap-xs
+				       px-sm py-xs rounded border text-xs transition
 				       border-base-subtle text-content-muted
 				       hover:border-content-muted hover:text-content
 				       disabled:opacity-50 disabled:cursor-wait"
 			>
 				{#if detectingHorizon}
-					<svg
-						class="animate-spin"
-						xmlns="http://www.w3.org/2000/svg"
-						width="14"
-						height="14"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						aria-hidden="true"
-					>
-						<path d="M21 12a9 9 0 1 1-6.219-8.56" />
-					</svg>
+					<SpinnerIcon size={14} class="animate-spin" />
 				{:else}
 					Auto
 				{/if}
 			</button>
 		{/if}
+		<button
+			onclick={rotateLeft}
+			title="Rotate 90° clockwise"
+			aria-label="Rotate right"
+			class="flex-1 flex items-center justify-center gap-xs
+			       px-sm py-xs rounded border text-xs transition
+			       border-base-subtle text-content-muted
+			       hover:border-content-muted hover:text-content"
+		>
+			<ArrowClockwiseIcon size={14} />
+		</button>
+	</div>
+
+	<!-- ── Fine rotation slider ─────────────────────────────────────────────── -->
+	<LabeledRange
+		id="transform-fine-rotation"
+		label="Fine"
+		min={-45}
+		max={45}
+		step={0.1}
+		value={fineValue}
+		defaultValue={0}
+		onchange={onFineChange}
+		oncommit={commit}
+		ondragstart={() => onFineRotateDrag?.(true)}
+		ondragend={() => onFineRotateDrag?.(false)}
+		signed
+		hideHeader
+	/>
 	</div>
 
 	<!-- ── Flip buttons ─────────────────────────────────────────────────────── -->
-	<div class="flex items-center gap-sm">
-		<span class="text-xs text-content-muted w-16">Flip</span>
-		<div class="flex items-center gap-xs flex-1">
-			<button
-				onclick={toggleFlipH}
-				title="Flip horizontal"
-				aria-label="Flip horizontal"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       {flipH
-					? 'border-primary bg-primary/10 text-primary'
-					: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+	<div class="flex items-center gap-xs">
+		<ToggleButton
+			active={flipH}
+			onclick={toggleFlipH}
+			title="Flip horizontal"
+			aria-label="Flip horizontal"
+			fill
+			block
+		>
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
 			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path
-						d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M12 20v2M12 14v2M12 8v2M12 2v2"
-					/>
-				</svg>
-				H
-			</button>
-			<button
-				onclick={toggleFlipV}
-				title="Flip vertical"
-				aria-label="Flip vertical"
-				class="flex-1 flex items-center justify-center gap-xs
-				       px-sm py-xs rounded border text-xs transition
-				       {flipV
-					? 'border-primary bg-primary/10 text-primary'
-					: 'border-base-subtle text-content-muted hover:border-content-muted hover:text-content'}"
+				<path
+					d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M12 20v2M12 14v2M12 8v2M12 2v2"
+				/>
+			</svg>
+			H
+		</ToggleButton>
+		<ToggleButton
+			active={flipV}
+			onclick={toggleFlipV}
+			title="Flip vertical"
+			aria-label="Flip vertical"
+			fill
+			block
+		>
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
 			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					width="14"
-					height="14"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path
-						d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M20 12h2M14 12h2M8 12h2M2 12h2"
-					/>
-				</svg>
-				V
-			</button>
-		</div>
+				<path
+					d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M20 12h2M14 12h2M8 12h2M2 12h2"
+				/>
+			</svg>
+			V
+		</ToggleButton>
 	</div>
 
 	<!-- ── Zoom slider ──────────────────────────────────────────────────────── -->
