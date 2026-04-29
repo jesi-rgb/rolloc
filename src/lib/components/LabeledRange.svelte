@@ -37,6 +37,8 @@
 		 * background gradient. If omitted, the track uses a flat background.
 		 */
 		negativeColor?: string;
+		/** Hide the label + value header row (show only the slider). */
+		hideHeader?: boolean;
 	}
 
 	let {
@@ -58,6 +60,7 @@
 		thumbColor,
 		trackColor,
 		negativeColor,
+		hideHeader = false,
 	}: Props = $props();
 
 	function fmt(v: number): string {
@@ -220,14 +223,16 @@
 
 {#if layout === "stacked"}
 	<div class="flex flex-col gap-xs">
-		<div class="flex items-center justify-between">
-			<label for={id} class="{textSize} font-medium {labelClass}"
-				>{label}</label
-			>
-			<span class="{textSize} text-content font-mono tabular-nums"
-				>{fmt(value)}</span
-			>
-		</div>
+		{#if !hideHeader}
+			<div class="flex items-center justify-between">
+				<label for={id} class="{textSize} font-medium {labelClass}"
+					>{label}</label
+				>
+				<span class="{textSize} text-content font-mono tabular-nums"
+					>{fmt(value)}</span
+				>
+			</div>
+		{/if}
 		{@render rangeInput("w-full")}
 	</div>
 {:else}
