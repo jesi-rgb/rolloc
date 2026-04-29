@@ -19,31 +19,32 @@
 
 	interface Props {
 		/** Total frames in the roll — drives the "of N" counts. */
-		totalFrames: number;
+		totalFrames:    number;
 		/** Number of frames currently in the selection set. */
-		selectedCount: number;
+		selectedCount:  number;
 		/** Number of frames the user has marked as "edited" (non-null overrides). */
-		editedCount: number;
-		scale: ExportScale;
-		exporting: boolean;
+		editedCount:    number;
+		scale:          ExportScale;
+		/** True whenever a job is queued, running, or cancelling. */
+		exporting:      boolean;
+		/** True while the active job is in `'cancelling'` state. */
+		cancelling?:    boolean;
+		/** True while the active job is sitting in the global queue, not yet running. */
+		queued?:        boolean;
 		/** Live progress while exporting; null when idle. */
-		progress: BatchExportProgress | null;
+		progress:       BatchExportProgress | null;
 		/** Last completed run's summary; null while a job is in flight or pre-job. */
-		lastResult: {
-			exported: number;
-			skipped: number;
-			failed: number;
-		} | null;
-		onScaleChange: (scale: ExportScale) => void;
-		onSelectAll: () => void;
+		lastResult:     { exported: number; skipped: number; failed: number } | null;
+		onScaleChange:  (scale: ExportScale) => void;
+		onSelectAll:    () => void;
 		onSelectEdited: () => void;
-		onClear: () => void;
-		onInvert: () => void;
-		onExport: () => void;
+		onClear:        () => void;
+		onInvert:       () => void;
+		onExport:       () => void;
 		/** Cancel a running export (best-effort — current frame finishes). */
-		onCancel: () => void;
+		onCancel:       () => void;
 		/** Exit selection mode entirely. */
-		onExit: () => void;
+		onExit:         () => void;
 	}
 
 	let {
@@ -52,6 +53,8 @@
 		editedCount,
 		scale,
 		exporting,
+		cancelling = false,
+		queued = false,
 		progress,
 		lastResult,
 		onScaleChange,
@@ -165,10 +168,12 @@
 				<button
 					type="button"
 					onclick={onCancel}
+					disabled={cancelling}
 					class="px-base py-xs rounded-r border border-danger text-danger text-sm font-medium
-					       hover:bg-danger/10 transition"
+					       hover:bg-danger/10 transition
+					       disabled:opacity-40 disabled:cursor-not-allowed"
 				>
-					Cancel
+					{cancelling ? "Cancelling…" : "Cancel"}
 				</button>
 			{:else}
 				<button
@@ -198,14 +203,19 @@
 		</button>
 	</div>
 
-	<!-- Progress bar (only while exporting) ───────────────────────────── -->
-	{#if exporting && progress}
+	<!-- Progress / status row (only while exporting) ──────────────────── -->
+	{#if exporting && queued}
+		<div class="text-xs text-content-muted">
+			Queued · waiting for other jobs to finish
+		</div>
+	{:else if exporting && progress}
 		<div class="flex items-center gap-sm">
 			<div
 				class="flex-1 h-1.5 rounded-full bg-base-subtle overflow-hidden"
 			>
 				<div
-					class="h-full bg-primary rounded-full transition-all duration-150"
+					class="h-full bg-primary rounded-full transition-all duration-150
+					       {cancelling ? 'opacity-50' : ''}"
 					style="width: {percent}%"
 				></div>
 			</div>

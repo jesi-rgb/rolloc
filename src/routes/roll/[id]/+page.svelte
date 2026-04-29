@@ -21,11 +21,14 @@
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
 	import RollExportBar from "$lib/components/RollExportBar.svelte";
+	import { type ExportScale } from "$lib/export/batch";
 	import {
-		exportFramesBatch,
-		type ExportScale,
-		type BatchExportProgress,
-	} from "$lib/export/batch";
+		getJobForRoll,
+		startExport,
+		cancelJob,
+		dismissJob,
+		isJobActive,
+	} from "$lib/jobs.svelte";
 	import {
 		prefetchThumbs,
 		resetThumbQueueProgress,
@@ -64,18 +67,27 @@
 	/** Set of frame IDs picked for export. */
 	let pickedIds = $state<Set<string>>(new Set());
 	let exportScale = $state<ExportScale>(1);
-	let exporting = $state(false);
-	let exportProgress = $state<BatchExportProgress | null>(null);
-	let exportLastResult = $state<{
-		exported: number;
-		skipped:  number;
-		failed:   number;
-	} | null>(null);
-	/** Mutable signal for cooperative cancellation. */
-	let exportCancel = { aborted: false };
 
 	const selectedCount = $derived(pickedIds.size);
 	const editedCount = $derived(frames.filter(frameHasEdits).length);
+
+	// Live view of the most recent export job for this roll.  Driven by the
+	// global jobs store so the bar keeps showing live progress even if the
+	// user navigates away and comes back, and reflects state mutated from
+	// the BackgroundJobsDock (cancel / dismiss).
+	const job = $derived(rollId ? getJobForRoll(rollId) : null);
+	const exporting = $derived(job !== null && isJobActive(job.status));
+	const cancelling = $derived(job?.status === "cancelling");
+	const queued = $derived(job?.status === "queued");
+	const exportProgress = $derived(exporting ? (job?.progress ?? null) : null);
+	const exportLastResult = $derived(
+		job &&
+			(job.status === "done" ||
+				job.status === "cancelled" ||
+				job.status === "error")
+			? job.result
+			: null,
+	);
 
 	function togglePicked(frame: Frame): void {
 		// Use a fresh Set so the $state proxy notices the change.
@@ -90,13 +102,17 @@
 
 	function enterSelectionMode(): void {
 		selecting = true;
-		exportLastResult = null;
+		// If there's a stale terminal job for this roll, dismiss it so the
+		// bar starts clean.  Active jobs (queued/running) are left alone so
+		// the user sees ongoing progress.
+		if (job && !isJobActive(job.status)) {
+			dismissJob(job.id);
+		}
 	}
 
 	function exitSelectionMode(): void {
 		selecting = false;
 		pickedIds = new Set();
-		exportLastResult = null;
 	}
 
 	function selectAll(): void {
@@ -117,56 +133,26 @@
 		pickedIds = next;
 	}
 
-	async function runExport(): Promise<void> {
+	function runExport(): void {
 		if (!roll || !dirPath || pickedIds.size === 0 || exporting) return;
-
 		const targets = frames.filter((f) => pickedIds.has(f.id));
-		exportCancel = { aborted: false };
-		exporting = true;
-		exportLastResult = null;
-		exportProgress = {
-			processed: 0,
-			total:     targets.length,
-			current:   null,
-			exported:  0,
-			skipped:   0,
-			failed:    [],
-		};
-
-		try {
-			const result = await exportFramesBatch({
-				roll,
-				frames:  targets,
-				dirPath,
-				scale:   exportScale,
-				signal:  exportCancel,
-				onProgress: (p) => {
-					exportProgress = p;
-				},
-			});
-			exportLastResult = {
-				exported: result.exported,
-				skipped:  result.skipped,
-				failed:   result.failed.length,
-			};
-			if (result.failed.length > 0) {
-				console.error("[export] some frames failed:", result.failed);
-			}
-		} catch (err) {
-			console.error("[export] batch export crashed:", err);
-			exportLastResult = {
-				exported: exportProgress?.exported ?? 0,
-				skipped:  exportProgress?.skipped  ?? 0,
-				failed:   (exportProgress?.failed.length ?? 0) + 1,
-			};
-		} finally {
-			exporting = false;
-			exportProgress = null;
-		}
+		startExport({
+			rollId,
+			rollLabel: roll.label,
+			roll,
+			frames:    targets,
+			dirPath,
+			scale:     exportScale,
+		});
+		// Hand off to the background jobs dock — clear selection state so
+		// the user comes back to a clean roll page.
+		exitSelectionMode();
 	}
 
 	function cancelExport(): void {
-		exportCancel.aborted = true;
+		if (job && isJobActive(job.status)) {
+			cancelJob(job.id);
+		}
 	}
 
 	onMount(async () => {
@@ -365,6 +351,8 @@
 			{editedCount}
 			scale={exportScale}
 			{exporting}
+			{cancelling}
+			{queued}
 			progress={exportProgress}
 			lastResult={exportLastResult}
 			onScaleChange={(s) => (exportScale = s)}

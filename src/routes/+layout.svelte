@@ -3,6 +3,7 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { initTheme, getTheme } from '$lib/theme.svelte';
 	import { initUpdater } from '$lib/updater.svelte';
+	import BackgroundJobsDock from '$lib/components/BackgroundJobsDock.svelte';
 
 	let { children } = $props();
 
@@ -26,3 +27,4 @@
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
 {@render children()}
+<BackgroundJobsDock />
