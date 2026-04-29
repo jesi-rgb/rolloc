@@ -223,6 +223,15 @@ fn apply_transform_and_crop(
     let src_aspect = src_w as f32 / src_h as f32;
     let out_aspect = rot_w as f32 / rot_h as f32;
 
+    // Decide canvas physical extent in source-pixel units (matches transform.wgsl).
+    // If output is in swapped orientation (out_aspect closer to 1/src_aspect than
+    // to src_aspect), canvas extent is (1, src_aspect); otherwise (src_aspect, 1).
+    let swapped_dist = (out_aspect - 1.0 / src_aspect).abs();
+    let unswapped_dist = (out_aspect - src_aspect).abs();
+    let is_swapped = swapped_dist < unswapped_dist;
+    let canvas_w = if is_swapped { 1.0 } else { src_aspect };
+    let canvas_h = if is_swapped { src_aspect } else { 1.0 };
+
     let sw = src_w as f32;
     let sh = src_h as f32;
 
@@ -251,24 +260,22 @@ fn apply_transform_and_crop(
             // Replicate the GPU transform shader logic:
             // 1. Center the UV
             // 2. Apply zoom
-            // 3. Scale to physical space using output aspect
-            // 4. Rotate
-            // 5. Scale back to source UV using source aspect
-            
+            // 3. Map onto canvas physical extent (canvas_w, canvas_h)
+            // 4. Inverse-rotate
+            // 5. Map back to source UV using source physical extent (src_aspect, 1)
+
             let centered_x = crop_x - 0.5;
             let centered_y = crop_y - 0.5;
-            
-            // Apply zoom
+
             let zoomed_x = centered_x / zoom;
             let zoomed_y = centered_y / zoom;
-            
-            // Scale to physical space using output aspect, rotate, scale back using source aspect
-            let px = zoomed_x * out_aspect;
-            let py = zoomed_y;
-            
+
+            let px = zoomed_x * canvas_w;
+            let py = zoomed_y * canvas_h;
+
             let rx = px * cos_a - py * sin_a;
             let ry = px * sin_a + py * cos_a;
-            
+
             let src_norm_x = (rx / src_aspect) + 0.5;
             let src_norm_y = ry + 0.5;
 
