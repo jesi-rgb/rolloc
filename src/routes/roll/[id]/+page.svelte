@@ -67,7 +67,13 @@
 
 		const [r, f] = await Promise.all([getRoll(rollId), getFrames(rollId)]);
 		roll = r ?? null;
-		frames = f;
+		// Camera scans usually encode order in the filename — sort with
+		// natural/numeric-aware comparison so IMG_2 < IMG_10.
+		const collator = new Intl.Collator(undefined, {
+			numeric: true,
+			sensitivity: "base",
+		});
+		frames = f.slice().sort((a, b) => collator.compare(a.filename, b.filename));
 
 		if (!roll) {
 			loading = false;

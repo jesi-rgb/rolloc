@@ -20,7 +20,10 @@
 	let deleting = $state<string | null>(null);
 
 	onMount(async () => {
-		[rolls, libraries] = await Promise.all([getRolls(), getLibraries()]);
+		const [r, l] = await Promise.all([getRolls(), getLibraries()]);
+		// Newest first by creation time.
+		rolls = r.sort((a, b) => b.createdAt - a.createdAt);
+		libraries = l.sort((a, b) => b.createdAt - a.createdAt);
 		loading = false;
 	});
 
