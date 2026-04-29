@@ -480,3 +480,54 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 		transform: (f as { transform?: TransformParams | null }).transform ?? DEFAULT_TRANSFORM,
 	};
 }
+
+// ─── Edit-state helpers ───────────────────────────────────────────────────────
+
+/**
+ * True when a frame has been deliberately altered by the user via the editor's
+ * transform, color, or effect controls — i.e. it diverges from the roll-level
+ * baseline in a way the user authored.
+ *
+ * What counts as "edited":
+ *   - Color   : `exposureCompensation`, `whiteBalance`, `toneCurve`, `rgbCurves`
+ *   - Transform: `cropQuad`, `transform`
+ *   - Effect  : `inversionParams` *only when it differs from the roll default*
+ *
+ * What does NOT count:
+ *   - `rebateRegion` — currently auto-detected only, no user-facing UI.
+ *   - `inversionParams` matching the roll default — at import time we eagerly
+ *     seed each frame's `inversionParams` from the chosen film type so the
+ *     pipeline has sane defaults; that's not a user edit.
+ *
+ * Used to drive "Select edited" in the export UI and any other "this frame has
+ * been touched" affordance.
+ */
+export function frameHasEdits(frame: Frame, roll: Roll): boolean {
+	const f = frame.frameEdit;
+	if (
+		f.exposureCompensation !== null ||
+		f.whiteBalance         !== null ||
+		f.toneCurve            !== null ||
+		f.rgbCurves            !== null ||
+		f.cropQuad             !== null ||
+		f.transform            !== null
+	) {
+		return true;
+	}
+	// `inversionParams` is pre-seeded at import for non-mixed rolls, so non-null
+	// alone doesn't imply user intent. Only count it when it diverges from the
+	// roll-level inversion baseline.
+	if (f.inversionParams !== null) {
+		return !inversionParamsEqual(f.inversionParams, roll.rollEdit.inversionParams);
+	}
+	return false;
+}
+
+/** Deep equality for `InversionParams` — flat record of primitives. */
+function inversionParamsEqual(a: InversionParams, b: InversionParams): boolean {
+	const keys = Object.keys(a) as (keyof InversionParams)[];
+	for (const k of keys) {
+		if (a[k] !== b[k]) return false;
+	}
+	return true;
+}

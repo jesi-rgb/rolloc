@@ -6,7 +6,7 @@
 	 * scrolls near the viewport.  Thumb generation is routed through the
 	 * shared thumb-queue so the worker pool and LRU cache are reused.
 	 */
-	import { StarIcon } from "phosphor-svelte";
+	import { CheckIcon } from "phosphor-svelte";
 	import { requestThumb } from "$lib/image/thumb-queue";
 	import { join } from "@tauri-apps/api/path";
 	import type { Frame, FilmType } from "$lib/types";
@@ -15,12 +15,27 @@
 	interface Props {
 		frame: Frame;
 		dirPath: string;
+		/** Focus selection (keyboard/mouse focused frame). */
 		selected?: boolean;
+		/** When true, the thumb renders a checkbox overlay and clicks toggle
+		 *  selection rather than focus. Used by the roll-level export flow. */
+		selecting?: boolean;
+		/** True when this frame is in the export selection set. Independent
+		 *  of `selected` (which is the focus highlight). */
+		picked?: boolean;
 		onSelect?: (frame: Frame) => void;
 		onDblClick?: (frame: Frame) => void;
 	}
 
-	let { frame, dirPath, selected = false, onSelect, onDblClick }: Props = $props();
+	let {
+		frame,
+		dirPath,
+		selected = false,
+		selecting = false,
+		picked = false,
+		onSelect,
+		onDblClick,
+	}: Props = $props();
 
 	/**
 	 * Get the film type for this frame.
@@ -91,8 +106,9 @@
 	class="relative flex flex-col overflow-hidden transition-all w-full
 	       focus:outline-none focus:ring-2 focus:ring-primary
 	focus:ring-offset-1 focus:ring-offset-base
-	       {selected ? 'ring ring-primary shadow-lg shadow-primary/20' : ''}"
-	aria-pressed={selected}
+	       {selected ? 'ring ring-primary shadow-lg shadow-primary/20' : ''}
+	       {selecting && picked ? 'ring-2 ring-accent' : ''}"
+	aria-pressed={selecting ? picked : selected}
 >
 	<!-- Film strip wrapper — subtle film rebate with sprocket holes -->
 	<div class="bg-primary-subtle w-full flex flex-col py-xs">
@@ -141,6 +157,20 @@
 							-top-base -left-base {flagColour[flag] ?? 'bg-content-subtle'}"
 						></span>
 					{/each}
+				</div>
+			{/if}
+
+			<!-- Selection checkbox overlay (selection mode only) -->
+			{#if selecting}
+				<div
+					class="absolute top-1.5 right-1.5 size-5 rounded border-2
+					       flex items-center justify-center transition
+					       {picked
+						? 'bg-accent border-accent text-base'
+						: 'bg-base/80 border-content-muted text-transparent'}"
+					aria-hidden="true"
+				>
+					<CheckIcon size={12} weight="bold" />
 				</div>
 			{/if}
 		</div>

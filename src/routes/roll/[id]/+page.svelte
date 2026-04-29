@@ -14,12 +14,21 @@
 	import { getRoll, getRollPath } from "$lib/db/rolls";
 	import { getFrames, putFrame } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag, FilmType } from "$lib/types";
-	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
+	import { DEFAULT_INVERSION_PARAMS, frameHasEdits } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+	import RollExportBar from "$lib/components/RollExportBar.svelte";
+	import { type ExportScale } from "$lib/export/batch";
+	import {
+		getJobForRoll,
+		startExport,
+		cancelJob,
+		dismissJob,
+		isJobActive,
+	} from "$lib/jobs.svelte";
 	import {
 		prefetchThumbs,
 		resetThumbQueueProgress,
@@ -50,6 +59,105 @@
 	);
 
 	const selected = $derived(frames[selIdx] ?? null);
+
+	// ─── Selection / batch export state ───────────────────────────────────────
+
+	/** True when the user has entered "select frames for export" mode. */
+	let selecting = $state(false);
+	/** Set of frame IDs picked for export. */
+	let pickedIds = $state<Set<string>>(new Set());
+	let exportScale = $state<ExportScale>(1);
+
+	const selectedCount = $derived(pickedIds.size);
+	const editedCount = $derived(
+		roll === null ? 0 : frames.filter((f) => frameHasEdits(f, roll!)).length,
+	);
+
+	// Live view of the most recent export job for this roll.  Driven by the
+	// global jobs store so the bar keeps showing live progress even if the
+	// user navigates away and comes back, and reflects state mutated from
+	// the BackgroundJobsDock (cancel / dismiss).
+	const job = $derived(rollId ? getJobForRoll(rollId) : null);
+	const exporting = $derived(job !== null && isJobActive(job.status));
+	const cancelling = $derived(job?.status === "cancelling");
+	const queued = $derived(job?.status === "queued");
+	const exportProgress = $derived(exporting ? (job?.progress ?? null) : null);
+	const exportLastResult = $derived(
+		job &&
+			(job.status === "done" ||
+				job.status === "cancelled" ||
+				job.status === "error")
+			? job.result
+			: null,
+	);
+
+	function togglePicked(frame: Frame): void {
+		// Use a fresh Set so the $state proxy notices the change.
+		const next = new Set(pickedIds);
+		if (next.has(frame.id)) {
+			next.delete(frame.id);
+		} else {
+			next.add(frame.id);
+		}
+		pickedIds = next;
+	}
+
+	function enterSelectionMode(): void {
+		selecting = true;
+		// If there's a stale terminal job for this roll, dismiss it so the
+		// bar starts clean.  Active jobs (queued/running) are left alone so
+		// the user sees ongoing progress.
+		if (job && !isJobActive(job.status)) {
+			dismissJob(job.id);
+		}
+	}
+
+	function exitSelectionMode(): void {
+		selecting = false;
+		pickedIds = new Set();
+	}
+
+	function selectAll(): void {
+		pickedIds = new Set(frames.map((f) => f.id));
+	}
+
+	function selectEdited(): void {
+		if (roll === null) return;
+		const r = roll;
+		pickedIds = new Set(frames.filter((f) => frameHasEdits(f, r)).map((f) => f.id));
+	}
+
+	function clearSelection(): void {
+		pickedIds = new Set();
+	}
+
+	function invertSelection(): void {
+		const next = new Set<string>();
+		for (const f of frames) if (!pickedIds.has(f.id)) next.add(f.id);
+		pickedIds = next;
+	}
+
+	function runExport(): void {
+		if (!roll || !dirPath || pickedIds.size === 0 || exporting) return;
+		const targets = frames.filter((f) => pickedIds.has(f.id));
+		startExport({
+			rollId,
+			rollLabel: roll.label,
+			roll,
+			frames:    targets,
+			dirPath,
+			scale:     exportScale,
+		});
+		// Hand off to the background jobs dock — clear selection state so
+		// the user comes back to a clean roll page.
+		exitSelectionMode();
+	}
+
+	function cancelExport(): void {
+		if (job && isJobActive(job.status)) {
+			cancelJob(job.id);
+		}
+	}
 
 	onMount(async () => {
 		// Reset any counters left by a previous page visit.
@@ -125,6 +233,25 @@
 		// Don't intercept when typing in an input or textarea
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+		// While in selection mode the keyboard maps to selection actions only.
+		if (selecting) {
+			if (e.key === "Escape" && !exporting) {
+				e.preventDefault();
+				exitSelectionMode();
+			} else if (e.key === " " && selected) {
+				// Space toggles the focused frame's pick state.
+				e.preventDefault();
+				togglePicked(selected);
+			} else if (e.key === "ArrowLeft" || e.key === "k") {
+				e.preventDefault();
+				selIdx = Math.max(0, selIdx - 1);
+			} else if (e.key === "ArrowRight" || e.key === "j") {
+				e.preventDefault();
+				selIdx = Math.min(frames.length - 1, selIdx + 1);
+			}
+			return;
+		}
 
 		switch (e.key) {
 			case "ArrowLeft":
@@ -204,8 +331,44 @@
 			<span class="text-xs text-content-subtle">
 				{frames.length} frame{frames.length !== 1 ? "s" : ""}
 			</span>
+
+			<div class="flex-1"></div>
+
+			{#if !selecting && frames.length > 0}
+				<button
+					type="button"
+					onclick={enterSelectionMode}
+					class="px-sm py-xs text-xs rounded border border-base-subtle
+					       text-content-muted hover:border-content-muted hover:text-content
+					       transition"
+				>
+					Export…
+				</button>
+			{/if}
 		{/if}
 	</header>
+
+	{#if selecting}
+		<RollExportBar
+			totalFrames={frames.length}
+			{selectedCount}
+			{editedCount}
+			scale={exportScale}
+			{exporting}
+			{cancelling}
+			{queued}
+			progress={exportProgress}
+			lastResult={exportLastResult}
+			onScaleChange={(s) => (exportScale = s)}
+			onSelectAll={selectAll}
+			onSelectEdited={selectEdited}
+			onClear={clearSelection}
+			onInvert={invertSelection}
+			onExport={runExport}
+			onCancel={cancelExport}
+			onExit={exitSelectionMode}
+		/>
+	{/if}
 
 	{#if loading}
 		<div class="flex-1 flex items-center justify-center text-content-muted">
@@ -263,9 +426,13 @@
 						<FrameThumb
 							{frame}
 							dirPath={dirPath!}
-							selected={i === selIdx}
-							onSelect={selectFrame}
-							onDblClick={openFrame}
+							selected={!selecting && i === selIdx}
+							{selecting}
+							picked={pickedIds.has(frame.id)}
+							onSelect={selecting
+								? togglePicked
+								: selectFrame}
+							onDblClick={selecting ? undefined : openFrame}
 						/>
 					{/snippet}
 				</VirtualGrid>
