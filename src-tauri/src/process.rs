@@ -77,6 +77,10 @@ fn default_sharpen() -> f32 {
     0.25
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -126,6 +130,16 @@ pub struct CurvePoint {
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct InversionParams {
+    /// When true, computes per-channel floors/ceils with rebate-aware histogram
+    /// valley detection (matches Photoshop "Levels"-style auto-adjust). When
+    /// false, uses the negpy "darkest pixels by mean luminance" method.
+    /// Defaults to true (UI default).
+    #[serde(default = "default_true")]
+    pub auto_levels: bool,
+    /// When true, computes an exposure correction in density units from the
+    /// median luminance and subtracts it from the pivot. Defaults to true.
+    #[serde(default = "default_true")]
+    pub auto_exposure: bool,
     pub density: f32,
     pub grade: f32,
     pub cmy_cyan: f32,
@@ -347,17 +361,223 @@ fn linear_to_srgb(c: f32) -> f32 {
 
 /// Compute per-channel log10 percentiles from linear f32 RGB pixels.
 ///
-/// Floor computation matches negpy: find the 0.001th percentile of the mean
-/// luminance, select pixels at or below that threshold, and average their
-/// per-channel log values.  Ceils use the 99.999th per-channel percentile.
+/// Backwards-compatible wrapper around [`compute_log_percentiles_full`] that
+/// uses the legacy negpy "darkest pixels" floor method, no auto-exposure, and
+/// C-41 semantics. Newer callers should prefer the `_full` variant which
+/// honours the per-frame `autoLevels` / `autoExposure` toggles.
 ///
 /// `pixels` is a flat slice of [R, G, B, R, G, B, ...] f32 values in [0, 1].
 /// `color_matrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
+#[allow(dead_code)]
 pub fn compute_log_percentiles(
     pixels: &[f32],
     width: usize,
     height: usize,
     color_matrix: Option<&[f32; 9]>,
+) -> LogPercentiles {
+    compute_log_percentiles_full(pixels, width, height, color_matrix, false, "C41", false)
+}
+
+// ─── Auto-levels: histogram valley detection ─────────────────────────────────
+//
+// Constants mirror pipeline.ts so the Rust implementation produces identical
+// output for the same input (modulo trivial floating-point ordering).
+
+const AUTO_LEVELS_CUMULATIVE_PERCENT: f32 = 0.001; // 0.1%
+const VALLEY_HISTOGRAM_BINS: usize = 256;
+const VALLEY_THRESHOLD: f32 = 0.02;
+const REBATE_MIN_FRACTION: f32 = 0.05;
+const REBATE_PEAK_RATIO: f32 = 3.0;
+
+struct ValleyResult {
+    valley_value: f32,
+    rebate_detected: bool,
+}
+
+/// Mirror of `findHistogramValley` in pipeline.ts.
+/// Detects the rebate spike at the bright end of a per-channel log-density
+/// histogram and returns the valley value separating image data from rebate.
+fn find_histogram_valley(values: &[f32]) -> ValleyResult {
+    if values.is_empty() {
+        return ValleyResult {
+            valley_value: 0.0,
+            rebate_detected: false,
+        };
+    }
+
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min_val = sorted[0];
+    let max_val = sorted[sorted.len() - 1];
+    let range = max_val - min_val;
+
+    let fallback_idx =
+        ((sorted.len() as f32) * (1.0 - AUTO_LEVELS_CUMULATIVE_PERCENT)).floor() as usize;
+    let fallback_value = sorted[fallback_idx.min(sorted.len() - 1)];
+
+    if range < 0.001 {
+        return ValleyResult {
+            valley_value: fallback_value,
+            rebate_detected: false,
+        };
+    }
+
+    let num_bins = VALLEY_HISTOGRAM_BINS;
+    let bin_width = range / num_bins as f32;
+    let mut histogram = vec![0u32; num_bins];
+
+    for &v in values {
+        let mut bin = ((v - min_val) / bin_width).floor() as isize;
+        if bin < 0 {
+            bin = 0;
+        } else if bin as usize >= num_bins {
+            bin = num_bins as isize - 1;
+        }
+        histogram[bin as usize] += 1;
+    }
+
+    // Median bin count over the lower 75% of bins (image region, not rebate).
+    let image_region_end = (num_bins as f32 * 0.75).floor() as usize;
+    let mut image_region: Vec<u32> = histogram[..image_region_end].to_vec();
+    image_region.sort_unstable();
+    let median_image_bin_count = image_region[image_region.len() / 2].max(1);
+
+    // Find peak in the top 15% of the histogram (likely rebate).
+    let search_start = (num_bins as f32 * 0.85).floor() as usize;
+    let mut peak_bin = search_start;
+    let mut peak_count = histogram[search_start];
+    for i in search_start..num_bins {
+        if histogram[i] > peak_count {
+            peak_count = histogram[i];
+            peak_bin = i;
+        }
+    }
+
+    let total_pixels = values.len() as u32;
+    let has_enough_pixels =
+        peak_count as f32 >= total_pixels as f32 * REBATE_MIN_FRACTION;
+    let is_significant_spike =
+        peak_count as f32 > median_image_bin_count as f32 * REBATE_PEAK_RATIO;
+
+    if !has_enough_pixels || !is_significant_spike {
+        return ValleyResult {
+            valley_value: fallback_value,
+            rebate_detected: false,
+        };
+    }
+
+    // Scan backward from the peak for the valley.
+    let threshold = peak_count as f32 * VALLEY_THRESHOLD;
+    let mut valley_bin = peak_bin;
+    let mut found_valley = false;
+
+    let mut i: isize = peak_bin as isize - 1;
+    while i >= 1 {
+        let idx = i as usize;
+        let count = histogram[idx] as f32;
+        if count < threshold {
+            valley_bin = idx;
+            found_valley = true;
+            break;
+        }
+        // Local minimum check
+        if histogram[idx] < histogram[idx - 1] && histogram[idx] < histogram[idx + 1] {
+            if (histogram[idx] as f32) < peak_count as f32 * 0.1 {
+                valley_bin = idx;
+                found_valley = true;
+                break;
+            }
+        }
+        i -= 1;
+    }
+
+    if !found_valley {
+        return ValleyResult {
+            valley_value: fallback_value,
+            rebate_detected: false,
+        };
+    }
+
+    let valley_value = min_val + (valley_bin as f32 + 0.5) * bin_width;
+    ValleyResult {
+        valley_value,
+        rebate_detected: true,
+    }
+}
+
+/// Mirror of `computeAutoLevelsFloorsAndCeils` in pipeline.ts.
+fn compute_auto_levels_floors_and_ceils(
+    r_log: &[f32],
+    g_log: &[f32],
+    b_log: &[f32],
+    is_e6: bool,
+) -> ([f32; 3], [f32; 3]) {
+    if r_log.is_empty() {
+        return ([-1.0, -1.0, -1.0], [0.0, 0.0, 0.0]);
+    }
+
+    fn find_floor(values: &[f32]) -> f32 {
+        if values.is_empty() {
+            return -1.0;
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let low_idx = (sorted.len() as f32 * AUTO_LEVELS_CUMULATIVE_PERCENT).floor() as usize;
+        sorted[low_idx.min(sorted.len() - 1)]
+    }
+
+    fn find_ceil_excluding_rebate(values: &[f32]) -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let valley = find_histogram_valley(values);
+        let filtered: Vec<f32> = if valley.rebate_detected {
+            values.iter().copied().filter(|&v| v <= valley.valley_value).collect()
+        } else {
+            values.to_vec()
+        };
+        let mut filtered = if filtered.is_empty() {
+            values.to_vec()
+        } else {
+            filtered
+        };
+        filtered.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let high_idx =
+            (filtered.len() as f32 * (1.0 - AUTO_LEVELS_CUMULATIVE_PERCENT)).floor() as usize;
+        filtered[high_idx.min(filtered.len() - 1)]
+    }
+
+    let r_floor = find_floor(r_log);
+    let g_floor = find_floor(g_log);
+    let b_floor = find_floor(b_log);
+
+    let r_ceil = find_ceil_excluding_rebate(r_log);
+    let g_ceil = find_ceil_excluding_rebate(g_log);
+    let b_ceil = find_ceil_excluding_rebate(b_log);
+
+    if is_e6 {
+        // E6 has dark rebate; swap interpretations.
+        ([r_ceil, g_ceil, b_ceil], [r_floor, g_floor, b_floor])
+    } else {
+        ([r_floor, g_floor, b_floor], [r_ceil, g_ceil, b_ceil])
+    }
+}
+
+/// Full implementation of log-percentile computation.
+///
+/// `auto_levels`           — when true, uses the per-channel rebate-aware
+///                           histogram method (matches the TS pipeline default).
+/// `film_type`             — "C41" | "BW" | "E6". E6 inverts floor/ceil semantics.
+/// `compute_auto_exposure` — when true, populates `auto_exposure` from the
+///                           median luminance vs. middle gray.
+pub fn compute_log_percentiles_full(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    color_matrix: Option<&[f32; 9]>,
+    auto_levels: bool,
+    film_type: &str,
+    compute_auto_exposure: bool,
 ) -> LogPercentiles {
     let log10_e: f32 = std::f32::consts::LOG10_E;
     let eps: f32 = 1e-6;
@@ -370,10 +590,10 @@ pub fn compute_log_percentiles(
     let start_x = cut_x;
     let end_x = width - cut_x;
 
-    let mut r_log = Vec::new();
-    let mut g_log = Vec::new();
-    let mut b_log = Vec::new();
-    let mut mean_log = Vec::new();
+    let mut r_log: Vec<f32> = Vec::new();
+    let mut g_log: Vec<f32> = Vec::new();
+    let mut b_log: Vec<f32> = Vec::new();
+    let mut mean_log: Vec<f32> = Vec::new();
 
     let mut y = start_y;
     while y < end_y {
@@ -384,7 +604,6 @@ pub fn compute_log_percentiles(
             let mut g = pixels[i + 1];
             let mut b = pixels[i + 2];
 
-            // Apply color matrix before log transform (matches GPU pipeline order).
             if let Some(m) = color_matrix {
                 let cr = (m[0] * r + m[1] * g + m[2] * b).max(0.0);
                 let cg = (m[3] * r + m[4] * g + m[5] * b).max(0.0);
@@ -417,46 +636,88 @@ pub fn compute_log_percentiles(
         arr[idx.min(arr.len() - 1)]
     }
 
-    // Floors: find the 0.001th percentile of mean luminance, select pixels
-    // at or below that threshold, and average their per-channel log values.
-    let mut mean_sorted = mean_log.clone();
-    let dark_threshold = percentile(&mut mean_sorted, 0.001);
+    let is_e6 = film_type == "E6";
 
-    let mut floor_r = 0.0_f32;
-    let mut floor_g = 0.0_f32;
-    let mut floor_b = 0.0_f32;
-    let mut dark_count = 0_usize;
-    for (i, &m) in mean_log.iter().enumerate() {
-        if m <= dark_threshold {
-            floor_r += r_log[i];
-            floor_g += g_log[i];
-            floor_b += b_log[i];
-            dark_count += 1;
-        }
-    }
-
-    let floors = if dark_count > 0 {
-        [
-            floor_r / dark_count as f32,
-            floor_g / dark_count as f32,
-            floor_b / dark_count as f32,
-        ]
+    let (floors, ceils) = if auto_levels {
+        compute_auto_levels_floors_and_ceils(&r_log, &g_log, &b_log, is_e6)
     } else {
-        [
-            percentile(&mut r_log.clone(), 0.001),
-            percentile(&mut g_log.clone(), 0.001),
-            percentile(&mut b_log.clone(), 0.001),
-        ]
+        // negpy method: floors from darkest pixels (by mean luminance);
+        // ceils from per-channel high percentile.
+        let p_low: f32 = if is_e6 { 99.999 } else { 0.001 };
+        let p_high: f32 = if is_e6 { 0.001 } else { 99.999 };
+
+        let mut mean_sorted = mean_log.clone();
+        let dark_threshold = percentile(&mut mean_sorted, p_low);
+
+        let mut floor_r = 0.0_f32;
+        let mut floor_g = 0.0_f32;
+        let mut floor_b = 0.0_f32;
+        let mut dark_count = 0_usize;
+        for (i, &m) in mean_log.iter().enumerate() {
+            let is_dark = if is_e6 {
+                m >= dark_threshold
+            } else {
+                m <= dark_threshold
+            };
+            if is_dark {
+                floor_r += r_log[i];
+                floor_g += g_log[i];
+                floor_b += b_log[i];
+                dark_count += 1;
+            }
+        }
+
+        let floors = if dark_count > 0 {
+            [
+                floor_r / dark_count as f32,
+                floor_g / dark_count as f32,
+                floor_b / dark_count as f32,
+            ]
+        } else {
+            [
+                percentile(&mut r_log.clone(), p_low),
+                percentile(&mut g_log.clone(), p_low),
+                percentile(&mut b_log.clone(), p_low),
+            ]
+        };
+
+        let ceils = [
+            percentile(&mut r_log.clone(), p_high),
+            percentile(&mut g_log.clone(), p_high),
+            percentile(&mut b_log.clone(), p_high),
+        ];
+
+        (floors, ceils)
+    };
+
+    // ── Auto-exposure (mirrors pipeline.ts) ──────────────────────────────────
+    let auto_exposure = if compute_auto_exposure {
+        let median_r = percentile(&mut r_log.clone(), 50.0);
+        let median_g = percentile(&mut g_log.clone(), 50.0);
+        let median_b = percentile(&mut b_log.clone(), 50.0);
+
+        let range_r = (ceils[0] - floors[0]).max(0.001);
+        let range_g = (ceils[1] - floors[1]).max(0.001);
+        let range_b = (ceils[2] - floors[2]).max(0.001);
+
+        let norm_median_r = (median_r - floors[0]) / range_r;
+        let norm_median_g = (median_g - floors[1]) / range_g;
+        let norm_median_b = (median_b - floors[2]) / range_b;
+
+        let avg_norm_median =
+            0.2126 * norm_median_r + 0.7152 * norm_median_g + 0.0722 * norm_median_b;
+
+        const TARGET_MEDIAN: f32 = 0.5;
+        const EXPOSURE_SCALE: f32 = 4.0;
+        Some((avg_norm_median - TARGET_MEDIAN) * EXPOSURE_SCALE)
+    } else {
+        None
     };
 
     LogPercentiles {
         floors,
-        ceils: [
-            percentile(&mut r_log, 99.999),
-            percentile(&mut g_log, 99.999),
-            percentile(&mut b_log, 99.999),
-        ],
-        auto_exposure: None,
+        ceils,
+        auto_exposure,
     }
 }
 
@@ -1343,11 +1604,21 @@ pub fn process_image(
 
         // Compute or use provided log percentiles.
         // No color matrix applied — percentiles operate on camera-native data.
+        // Honour the user's autoLevels / autoExposure toggles so batch export
+        // (which always passes log_perc = None) matches the WebGPU preview.
         let owned_perc;
         let perc = match log_perc {
             Some(p) => p,
             None => {
-                owned_perc = compute_log_percentiles(pixels, width, height, None);
+                owned_perc = compute_log_percentiles_full(
+                    pixels,
+                    width,
+                    height,
+                    None,
+                    edit.inversion_params.auto_levels,
+                    &edit.inversion_params.film_type,
+                    edit.inversion_params.auto_exposure,
+                );
                 &owned_perc
             }
         };
