@@ -36,6 +36,7 @@ import downsampleWGSL       from './shaders/downsample.wgsl?raw';
 import glowBlendWGSL        from './shaders/glow_blend.wgsl?raw';
 import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
 import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
+import sharpenWGSL          from './shaders/sharpen.wgsl?raw';
 import blitWGSL             from './shaders/blit.wgsl?raw';
 import cropWGSL             from './shaders/crop.wgsl?raw';
 import transformWGSL        from './shaders/transform.wgsl?raw';
@@ -1307,6 +1308,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const glowBlendModule     = device.createShaderModule({ code: glowBlendWGSL });
 	const claheHistModule     = device.createShaderModule({ code: claheHistogramWGSL });
 	const claheRemapModule    = device.createShaderModule({ code: claheRemapWGSL });
+	const sharpenModule       = device.createShaderModule({ code: sharpenWGSL });
 	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
 	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
 	const blitModule          = device.createShaderModule({ code: blitWGSL });
@@ -1345,6 +1347,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	/** CLAHE remap fragment pipeline (fullscreen triangle). */
 	const claheRemapPipeline = makeRenderPipeline(claheRemapModule, 'rgba16float');
+
+	/** Sharpening (unsharp mask on luminance) pipeline. */
+	const sharpenPipeline = makeRenderPipeline(sharpenModule, 'rgba16float');
 
 	/**
 	 * CLAHE histogram compute pipeline.
@@ -1740,6 +1745,31 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			} else {
 				// CLAHE disabled — feed glow output (or H&D output) to tonecurve.
 				beforeToneCurve = postGlowTexture.createView();
+			}
+
+			// ── Sharpen pass (skip when amount is zero) ──────────────────────
+			const sharpenAmount = edit.inversionParams.sharpen ?? 0;
+			if (sharpenAmount > 0 && intermediateD) {
+				const sharpenUnifData = new Float32Array([sharpenAmount, 0, 0, 0]);
+				const sharpenUnifBuf = makeUniformBuffer(device, sharpenUnifData);
+				toClean.push(sharpenUnifBuf);
+
+				// The input to sharpen is whatever was going to feed tone curve
+				const sharpenInputTex = (edit.inversionParams.claheStrength > 0 && intermediateC)
+					? intermediateC
+					: postGlowTexture;
+
+				const sharpenBG = device.createBindGroup({
+					layout: sharpenPipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: sampler },
+						{ binding: 1, resource: sharpenInputTex.createView() },
+						{ binding: 2, resource: { buffer: sharpenUnifBuf } },
+					],
+				});
+
+				drawFullscreenTriangle(encoder, sharpenPipeline, sharpenBG, intermediateD.createView());
+				beforeToneCurve = intermediateD.createView();
 			}
 		} else {
 			// ── Positive / pass-through path ──────────────────────────────────

@@ -73,6 +73,10 @@ fn default_zoom() -> f32 {
     1.0
 }
 
+fn default_sharpen() -> f32 {
+    0.25
+}
+
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +159,9 @@ pub struct InversionParams {
     /// Saturation: uniform saturation adjustment. [-1, +1]
     #[serde(default)]
     pub saturation: f32,
+    /// Output sharpening amount (unsharp mask on luminance). [0, 1]. Default 0.25.
+    #[serde(default = "default_sharpen")]
+    pub sharpen: f32,
     /// Film type: "C41" (color negative), "BW" (black & white), "E6" (slide).
     pub film_type: String,
     /// E6 normalize mode — not used in CPU processing yet.
@@ -1162,6 +1169,83 @@ fn apply_clahe(pixels: &mut [f32], width: usize, height: usize, strength: f32) {
         });
 }
 
+// ─── Sharpening (unsharp mask on luminance) ───────────────────────────────────
+
+/// Apply unsharp mask sharpening on perceptual luminance.
+/// Matches negpy's LAB lightness sharpening and the GPU sharpen.wgsl shader:
+///   sharpened = luma + (luma - blur_luma) * amount * 2.5
+/// Uses a 5×5 Gaussian blur (sigma ≈ 1.0) with threshold 0.02 in perceptual space.
+fn apply_sharpen(pixels: &mut [f32], width: usize, height: usize, amount: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+
+    let amount_f = amount * 2.5;
+    let threshold = 0.02_f32;
+
+    // 5×5 Gaussian kernel (sigma ≈ 1.0), matches the GPU shader
+    const KERNEL: [f32; 25] = [
+        0.003765, 0.015019, 0.023792, 0.015019, 0.003765,
+        0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+        0.023792, 0.094907, 0.150342, 0.094907, 0.023792,
+        0.015019, 0.059912, 0.094907, 0.059912, 0.015019,
+        0.003765, 0.015019, 0.023792, 0.015019, 0.003765,
+    ];
+
+    #[inline(always)]
+    fn to_perceptual(v: f32) -> f32 {
+        v.max(0.0).powf(1.0 / 2.2)
+    }
+
+    #[inline(always)]
+    fn luma(r: f32, g: f32, b: f32) -> f32 {
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    // Compute per-pixel perceptual luminance
+    let pixel_count = width * height;
+    let mut luma_map = vec![0.0_f32; pixel_count];
+    for i in 0..pixel_count {
+        let base = i * 3;
+        luma_map[i] = luma(
+            to_perceptual(pixels[base]),
+            to_perceptual(pixels[base + 1]),
+            to_perceptual(pixels[base + 2]),
+        );
+    }
+
+    // Compute blurred luminance with 5×5 Gaussian, then apply USM
+    for y in 0..height {
+        for x in 0..width {
+            let mut blur_luma = 0.0_f32;
+            for ky in 0..5_i32 {
+                for kx in 0..5_i32 {
+                    let sy = (y as i32 + ky - 2).clamp(0, height as i32 - 1) as usize;
+                    let sx = (x as i32 + kx - 2).clamp(0, width as i32 - 1) as usize;
+                    blur_luma += luma_map[sy * width + sx] * KERNEL[(ky * 5 + kx) as usize];
+                }
+            }
+
+            let idx = y * width + x;
+            let orig_luma = luma_map[idx];
+            let diff = orig_luma - blur_luma;
+
+            if diff.abs() < threshold {
+                continue;
+            }
+
+            let sharpened_luma = orig_luma + diff * amount_f;
+            let ratio = sharpened_luma / orig_luma.max(1e-6);
+
+            let base = idx * 3;
+            // Apply ratio in perceptual space, convert back to linear
+            pixels[base] = (to_perceptual(pixels[base]) * ratio).clamp(0.0, 1.0).powf(2.2);
+            pixels[base + 1] = (to_perceptual(pixels[base + 1]) * ratio).clamp(0.0, 1.0).powf(2.2);
+            pixels[base + 2] = (to_perceptual(pixels[base + 2]) * ratio).clamp(0.0, 1.0).powf(2.2);
+        }
+    }
+}
+
 // ─── Color matrix pass (positive path only) ──────────────────────────────────
 
 /// Apply 3×3 color matrix (row-major) to a pixel.
@@ -1315,6 +1399,9 @@ pub fn process_image(
 
         // Step 3: CLAHE (needs the full H&D output before it can run).
         apply_clahe(pixels, width, height, edit.inversion_params.clahe_strength);
+
+        // Step 3.5: Sharpening (unsharp mask on luminance, after CLAHE, before tone curve).
+        apply_sharpen(pixels, width, height, edit.inversion_params.sharpen);
 
         // Step 4: Tone curve (skip sRGB — H&D already did 1/2.2).
         pixels.par_chunks_mut(width * 3).for_each(|row| {
