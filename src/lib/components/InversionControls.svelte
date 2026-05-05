@@ -59,6 +59,7 @@
 	let vibrance = $state(untrack(() => value.vibrance));
 	let saturation = $state(untrack(() => value.saturation));
 	let glow = $state(untrack(() => value.glow));
+	let sharpen = $state(untrack(() => value.sharpen));
 
 	// Re-sync when parent swaps to a different frame / roll
 	$effect(() => {
@@ -87,6 +88,7 @@
 		vibrance = value.vibrance;
 		saturation = value.saturation;
 		glow = value.glow;
+		sharpen = value.sharpen;
 	});
 
 	/** Build the current params object. */
@@ -118,6 +120,7 @@
 			claheStrength,
 			vibrance,
 			saturation,
+			sharpen,
 			glow,
 		};
 	}
@@ -157,6 +160,7 @@
 		vibrance = d.vibrance;
 		saturation = d.saturation;
 		glow = d.glow;
+		sharpen = d.sharpen;
 		// Reset is a discrete action — commit immediately so it persists + adds to history.
 		commit();
 	}
@@ -184,6 +188,7 @@
 			claheStrength === DEFAULT_INVERSION_PARAMS.claheStrength &&
 			vibrance === DEFAULT_INVERSION_PARAMS.vibrance &&
 			saturation === DEFAULT_INVERSION_PARAMS.saturation &&
+			sharpen === DEFAULT_INVERSION_PARAMS.sharpen &&
 			glow === DEFAULT_INVERSION_PARAMS.glow,
 	);
 </script>
@@ -585,6 +590,31 @@
 			</div>
 		</section>
 	{/if}
+
+	<!-- ── Detail (Sharpening) ────────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Detail
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-sharpen"
+				label="Sharpen"
+				min={0}
+				max={1}
+				step={0.01}
+				value={sharpen}
+				defaultValue={DEFAULT_INVERSION_PARAMS.sharpen}
+				onchange={(v) => {
+					sharpen = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
+		</div>
+	</section>
 
 	<!-- ── Effects ─────────────────────────────────────────────────────────── -->
 	<section>

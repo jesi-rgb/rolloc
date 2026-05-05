@@ -184,6 +184,14 @@ export interface InversionParams {
 	/** Saturation: uniform saturation adjustment. [-1, +1] */
 	saturation: number;
 
+	// ── Sharpening (unsharp mask on luminance) ────────────────────────────────
+	/**
+	 * Output sharpening amount. Applies unsharp mask to the luminance channel
+	 * (matching negpy's LAB lightness sharpening). Range: 0 (off) to 1 (full).
+	 * Default: 0.25 (negpy default).
+	 */
+	sharpen: number;
+
 	// ── Glow (highlight bloom) ────────────────────────────────────────────────
 	/**
 	 * Glow: all-channel Gaussian bloom of highlights (lens diffusion effect).
@@ -392,6 +400,7 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	claheStrength:    0.25,
 	vibrance:         0.0,
 	saturation:       0.0,
+	sharpen:          0.25,
 	glow:             0.0,
 	filmType:         'C41',
 	e6Normalize:      true,
