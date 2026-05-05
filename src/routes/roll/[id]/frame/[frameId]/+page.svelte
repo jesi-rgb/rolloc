@@ -1090,7 +1090,7 @@
           edit,
           logPerc,
           skipWb: currentRoll.rollEdit.invert,
-          quality: 95,
+          quality: 100,
           scale: exportScale,
         });
       } else {
@@ -1134,7 +1134,7 @@
           width: exportWidth,
           height: exportHeight,
           path: finalPath,
-          quality: 95,
+          quality: 100,
         });
       }
 
