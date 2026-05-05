@@ -46,7 +46,11 @@
  *   vibrance      : f32         @ 116                →  4 bytes
  *   saturation    : f32         @ 120                →  4 bytes
  *   _pad0         : f32         @ 124                →  4 bytes
- *   struct size = 128 bytes
+ *   toneGamma     : f32         @ 128                →  4 bytes
+ *   blackPoint    : f32         @ 132                →  4 bytes
+ *   whitePoint    : f32         @ 136                →  4 bytes
+ *   midtoneCurve  : f32         @ 140                →  4 bytes
+ *   struct size = 144 bytes
  */
 
 // Rec. 709 luminance coefficients (matches negpy's LUMA_R, LUMA_G, LUMA_B)
@@ -72,6 +76,11 @@ struct HDCurveUniforms {
 	vibrance         : f32,
 	saturation       : f32,
 	_pad0            : f32,
+	// ── Tone preset params (vec4 @ 128) ──
+	toneGamma        : f32,
+	blackPoint       : f32,
+	whitePoint       : f32,
+	midtoneCurve     : f32,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -173,10 +182,24 @@ fn hd_channel(
 	// 8. H&D sigmoid → print density
 	let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
 
-	// 9. Density → transmittance → perceptual (gamma 1/2.2)
-	// Matches negpy: transmittance ** (1.0 / gamma) where gamma = 2.2
+	// 9. Density → transmittance → perceptual (gamma from tone preset)
+	// Matches negpy: transmittance ** (1.0 / gamma)
 	let transmittance = pow(10.0, -density);
-	return clamp(pow(max(transmittance, 0.0), 1.0 / 2.2), 0.0, 1.0);
+	var out = clamp(pow(max(transmittance, 0.0), 1.0 / u.toneGamma), 0.0, 1.0);
+
+	// 10. Apply midtone S-curve from tone preset
+	// midtoneCurve > 0 adds contrast, < 0 flattens.
+	// Uses a simple cubic: out = out + strength * out * (1 - out) * (2*out - 1)
+	// This preserves 0 and 1, pushes midtones toward/away from extremes.
+	if (u.midtoneCurve != 0.0) {
+		out = out + u.midtoneCurve * out * (1.0 - out) * (2.0 * out - 1.0);
+		out = clamp(out, 0.0, 1.0);
+	}
+
+	// 11. Apply black/white point from tone preset
+	out = clamp((out - u.blackPoint) / (u.whitePoint - u.blackPoint), 0.0, 1.0);
+
+	return out;
 }
 
 /// Apply vibrance and saturation adjustments.
