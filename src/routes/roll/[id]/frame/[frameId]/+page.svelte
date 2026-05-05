@@ -46,6 +46,7 @@
     EffectiveEdit,
     CropQuad,
     TransformParams,
+    CachedLogPercentiles,
   } from "$lib/types";
   import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
   import CurvesEditor from "$lib/components/CurvesEditor.svelte";
@@ -236,7 +237,13 @@
 
       roll = r ?? null;
       frame = f ?? null;
-      frames = allFrames;
+      // Sort frames by filename with natural/numeric-aware comparison
+      // so navigation order matches the filmstrip grid.
+      const collator = new Intl.Collator(undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+      frames = allFrames.slice().sort((a, b) => collator.compare(a.filename, b.filename));
 
       if (!roll || !frame) {
         loading = false;
@@ -399,6 +406,8 @@
         .then(() => {
           // Capture histogram from lastLogPerc after render completes
           currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+          // Persist log percentiles so batch export can match this preview.
+          persistLogPerc();
         })
         .catch((err: unknown) => {
           console.error("[frame] renderRaw error:", err);
@@ -424,6 +433,39 @@
     } else {
       console.warn("[frame] renderFrame called but no image data available");
     }
+  }
+
+  /**
+   * Persist the pipeline's current log percentiles onto the frame record so
+   * batch export can reproduce the exact same normalization.  Only writes if
+   * the values actually changed (avoids IDB churn on every render).
+   */
+  function persistLogPerc(): void {
+    const lp = pipeline?.lastLogPerc;
+    if (!lp || !frame) return;
+    const cached: CachedLogPercentiles = {
+      floors: lp.floors,
+      ceils: lp.ceils,
+      autoExposure: lp.autoExposure,
+    };
+    // Skip if unchanged.
+    const prev = frame.cachedLogPerc;
+    if (
+      prev &&
+      prev.floors[0] === cached.floors[0] &&
+      prev.floors[1] === cached.floors[1] &&
+      prev.floors[2] === cached.floors[2] &&
+      prev.ceils[0] === cached.ceils[0] &&
+      prev.ceils[1] === cached.ceils[1] &&
+      prev.ceils[2] === cached.ceils[2] &&
+      prev.autoExposure === cached.autoExposure
+    ) {
+      return;
+    }
+    frame.cachedLogPerc = cached;
+    putFrame(structuredClone($state.snapshot(frame))).catch((err: unknown) => {
+      console.error('[frame] persistLogPerc failed:', err);
+    });
   }
 
   // ─── WB picker ────────────────────────────────────────────────────────────
