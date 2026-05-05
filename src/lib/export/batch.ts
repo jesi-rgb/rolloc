@@ -129,11 +129,10 @@ export async function exportFramesBatch(
 				sourcePath,
 				exportPath,
 				edit,
-				// Recompute percentiles from the full-res data — we don't have a
-				// preview rendered here, so passing `null` lets the Rust side
-				// derive them itself (matches behaviour when the editor hasn't
-				// rendered yet).
-				logPerc: null,
+				// Use cached log percentiles from the preview render if available,
+				// so the export matches what the user saw in the editor.  Falls back
+				// to null (Rust recomputes) for frames never opened in the editor.
+				logPerc: frame.cachedLogPerc ?? null,
 				skipWb:  roll.rollEdit.invert,
 				quality,
 				scale,

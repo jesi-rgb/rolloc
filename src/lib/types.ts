@@ -320,6 +320,16 @@ export interface Roll {
 	rollEdit: RollEditParams;
 }
 
+/**
+ * Cached log percentiles from the preview pipeline — stored so batch export
+ * can reproduce the exact same normalization the user saw on screen.
+ */
+export interface CachedLogPercentiles {
+	floors: [number, number, number];
+	ceils:  [number, number, number];
+	autoExposure: number;
+}
+
 export interface Frame {
 	id: string;
 	rollId: string;
@@ -333,6 +343,12 @@ export interface Frame {
 	/** Unix ms from EXIF, null if unavailable. */
 	capturedAt: number | null;
 	frameEdit: FrameEditOverrides;
+	/**
+	 * Log percentiles cached from the last preview render.  Used by batch
+	 * export to match the visual output the user approved in the editor.
+	 * `undefined` if the frame has never been opened in the editor.
+	 */
+	cachedLogPerc?: CachedLogPercentiles;
 }
 
 // ─── Library (image browsing mode) ────────────────────────────────────────────
