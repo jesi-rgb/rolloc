@@ -261,11 +261,11 @@
         const absolutePath = await join(dirPath, frame.filename);
         let rawBuffer: ArrayBuffer;
         try {
-          // Cap at 1500px on the long edge for the editing preview.
+          // Cap at 4000px on the long edge for the editing preview.
           // Full-res decode is deferred to export. Also respect the GPU
           // texture size limit (usually 8192, but can be lower on some devices).
           const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
-          const maxPx = Math.min(1500, gpuLimit);
+          const maxPx = Math.min(4000, gpuLimit);
           rawBuffer = await invoke<ArrayBuffer>("raw_decode", {
             path: absolutePath,
             maxPx,

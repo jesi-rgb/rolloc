@@ -5,7 +5,7 @@
  *
  * Sizes:
  *   THUMB_SIZE   — 300px long edge  → filmstrip
- *   PREVIEW_SIZE — 1200px long edge → lightbox pre-render
+ *   PREVIEW_SIZE — 4000px long edge → lightbox pre-render
  *
  * Generation paths (in order of preference):
  *   1. Native Tauri command (`generate_thumb`) — reads, decodes, resizes, and
@@ -32,7 +32,7 @@ import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 import type { FilmType } from '$lib/types';
 
 export const THUMB_SIZE   = 300;
-export const PREVIEW_SIZE = 1200;
+export const PREVIEW_SIZE = 4000;
 export const JPEG_QUALITY = 0.88;
 
 // ─── Tauri detection ──────────────────────────────────────────────────────────
