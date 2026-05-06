@@ -81,6 +81,48 @@ fn default_true() -> bool {
     true
 }
 
+fn default_tone_preset() -> String {
+    "standard".to_string()
+}
+
+/// Resolved tone preset parameters (gamma, black/white point, midtone curve).
+struct TonePresetParams {
+    gamma: f32,
+    black_point: f32,
+    white_point: f32,
+    midtone_curve: f32,
+}
+
+fn resolve_tone_preset(name: &str) -> TonePresetParams {
+    match name {
+        "soft" => TonePresetParams {
+            gamma: 2.0,
+            black_point: 0.0,
+            white_point: 1.0,
+            midtone_curve: -0.15,
+        },
+        "punch" => TonePresetParams {
+            gamma: 2.4,
+            black_point: 0.02,
+            white_point: 0.98,
+            midtone_curve: 0.2,
+        },
+        "linear" => TonePresetParams {
+            gamma: 1.8,
+            black_point: 0.0,
+            white_point: 1.0,
+            midtone_curve: 0.0,
+        },
+        _ => TonePresetParams {
+            // "standard" or unknown
+            gamma: 2.2,
+            black_point: 0.0,
+            white_point: 1.0,
+            midtone_curve: 0.0,
+        },
+    }
+}
+
 /// Mirrors `EffectiveEdit` from types.ts — the fully resolved edit parameters.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +224,9 @@ pub struct InversionParams {
     #[allow(dead_code)]
     #[serde(default)]
     pub e6_normalize: bool,
+    /// Tone preset: "standard", "soft", "punch", or "linear".
+    #[serde(default = "default_tone_preset")]
+    pub tone_preset: String,
 }
 
 /// Per-channel log-density percentiles for the normalization pass.
@@ -826,7 +871,7 @@ fn hd_channel(
     // 8. H&D sigmoid → print density
     let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
 
-    // 9. Density → transmittance → perceptual gamma (1/2.2)
+    // 9. Density → transmittance → perceptual gamma (from tone preset)
     let transmittance = 10.0_f32.powf(-density);
     transmittance.max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0)
 }
@@ -850,11 +895,17 @@ struct HDParams {
     shoulder_width: f32,
     shadows: f32,
     highlights: f32,
+    // Tone preset
+    gamma: f32,
+    black_point: f32,
+    white_point: f32,
+    midtone_curve: f32,
 }
 
 impl HDParams {
     fn from_inversion(inv: &InversionParams, auto_exposure_adj: f32) -> Self {
         let effective_density = inv.density - auto_exposure_adj;
+        let preset = resolve_tone_preset(&inv.tone_preset);
         Self {
             pivot: 1.0 - (0.01 + effective_density * DENSITY_MULTIPLIER),
             slope: 1.0 + inv.grade * GRADE_MULTIPLIER,
@@ -873,6 +924,10 @@ impl HDParams {
             shoulder_width: inv.shoulder_width,
             shadows: inv.shadows,
             highlights: inv.highlights,
+            gamma: preset.gamma,
+            black_point: preset.black_point,
+            white_point: preset.white_point,
+            midtone_curve: preset.midtone_curve,
         }
     }
 }
@@ -927,12 +982,29 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         D_MAX,
     );
 
+    // Apply tone preset: gamma correction, midtone curve, black/white point.
+    // hd_channel outputs at gamma 2.2; re-gamma to preset gamma: out^(2.2/preset_gamma)
+    let gamma_exp = 2.2 / p.gamma;
+    let apply_preset = |mut v: f32| -> f32 {
+        // Gamma adjustment
+        if gamma_exp != 1.0 {
+            v = v.powf(gamma_exp);
+        }
+        // Midtone S-curve: v + strength * v * (1-v) * (2v-1)
+        if p.midtone_curve != 0.0 {
+            v = (v + p.midtone_curve * v * (1.0 - v) * (2.0 * v - 1.0)).clamp(0.0, 1.0);
+        }
+        // Black/white point remap
+        ((v - p.black_point) / (p.white_point - p.black_point)).clamp(0.0, 1.0)
+    };
+
     // B&W mode: convert to luminance (Rec. 709, same as GPU shader)
     if is_bw {
         let lum = LUMA_R * hr + LUMA_G * hg + LUMA_B * hb;
+        let lum = apply_preset(lum);
         [lum, lum, lum]
     } else {
-        [hr, hg, hb]
+        [apply_preset(hr), apply_preset(hg), apply_preset(hb)]
     }
 }
 
