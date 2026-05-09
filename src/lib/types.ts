@@ -106,6 +106,31 @@ export interface WhiteBalance {
  */
 export type FilmType = 'C41' | 'BW' | 'E6';
 
+/**
+ * Tone presets control the hidden transfer-function parameters applied
+ * during the H&D curve pass — gamma, black/white point, and midtone contrast.
+ * The user-facing sliders (grade, toe, shoulder, etc.) are offsets on top.
+ */
+export type TonePreset = 'standard' | 'soft' | 'punch';
+
+/** Internal parameters derived from a TonePreset. Not exposed to the user. */
+export interface TonePresetParams {
+	/** Output gamma exponent (display gamma). Standard = 2.2. */
+	gamma: number;
+	/** Black point crush — output values below this map to 0. Range [0, 0.05]. */
+	blackPoint: number;
+	/** White point clip — output values above this map to 1. Range [0.95, 1.0]. */
+	whitePoint: number;
+	/** Midtone S-curve strength. 0 = linear, positive = more contrast. */
+	midtoneCurve: number;
+}
+
+export const TONE_PRESETS: Record<TonePreset, TonePresetParams> = {
+	standard: { gamma: 2.2, blackPoint: 0.0, whitePoint: 1.0, midtoneCurve: 0.0 },
+	soft: { gamma: 2.5, blackPoint: 0.00, whitePoint: 1.1, midtoneCurve: -0.45 },
+	punch:    { gamma: 1.9,  blackPoint: 0.00, whitePoint: 1.04, midtoneCurve: 0.2  },
+};
+
 // ─── NegPy inversion parameters ──────────────────────────────────────────────
 
 /**
@@ -215,6 +240,14 @@ export interface InversionParams {
 	 * Only relevant when filmType = 'E6'.
 	 */
 	e6Normalize: boolean;
+
+	// ── Tone preset ──────────────────────────────────────────────────────────
+	/**
+	 * Selects the base transfer function applied during the H&D curve pass.
+	 * Controls hidden gamma, black/white point, and midtone contrast params.
+	 * User sliders are offsets applied on top of this baseline.
+	 */
+	tonePreset: TonePreset;
 }
 
 // ─── Edit parameters ──────────────────────────────────────────────────────────
@@ -326,7 +359,7 @@ export interface Roll {
  */
 export interface CachedLogPercentiles {
 	floors: [number, number, number];
-	ceils:  [number, number, number];
+	ceils: [number, number, number];
 	autoExposure: number;
 }
 
@@ -392,34 +425,35 @@ const identityMatrix: Matrix3x3 = [
 ];
 
 export const DEFAULT_INVERSION_PARAMS: InversionParams = {
-	autoLevels:       true,
-	autoExposure:     true,
-	density:          1.0,
-	grade:            2.5,
-	cmyCyan:          0.0,
-	cmyMagenta:       0.0,
-	cmyYellow:        0.0,
-	shadowCyan:       0.0,
-	shadowMagenta:    0.0,
-	shadowYellow:     0.0,
-	highlightCyan:    0.0,
+	autoLevels: true,
+	autoExposure: true,
+	density: 1.0,
+	grade: 2.5,
+	cmyCyan: 0.0,
+	cmyMagenta: 0.0,
+	cmyYellow: 0.0,
+	shadowCyan: 0.0,
+	shadowMagenta: 0.0,
+	shadowYellow: 0.0,
+	highlightCyan: 0.0,
 	highlightMagenta: 0.0,
-	highlightYellow:  0.0,
-	shadows:          0.0,
-	highlights:       0.0,
-	toe:              0.0,
-	toeWidth:         1.0,
-	toeHardness:      1.0,
-	shoulder:         0.0,
-	shoulderWidth:    1.0,
+	highlightYellow: 0.0,
+	shadows: 0.0,
+	highlights: 0.0,
+	toe: 0.0,
+	toeWidth: 1.0,
+	toeHardness: 1.0,
+	shoulder: 0.0,
+	shoulderWidth: 1.0,
 	shoulderHardness: 1.0,
-	claheStrength:    0.25,
-	vibrance:         0.0,
-	saturation:       0.0,
-	sharpen:          0.25,
-	glow:             0.0,
-	filmType:         'C41',
-	e6Normalize:      true,
+	claheStrength: 0.25,
+	vibrance: 0.0,
+	saturation: 0.0,
+	sharpen: 0.25,
+	glow: 0.0,
+	filmType: 'C41',
+	e6Normalize: true,
+	tonePreset: 'standard',
 };
 
 export const DEFAULT_ROLL_EDIT: RollEditParams = {
@@ -461,9 +495,9 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 	const rawM = r.cameraColorMatrix as unknown;
 	const colorMatrix: Matrix3x3 =
 		Array.isArray(rawM) &&
-		rawM.length === 9 &&
-		(rawM as number[]).every((v) => typeof v === 'number' && isFinite(v)) &&
-		(rawM as number[]).some((v) => v !== 0)
+			rawM.length === 9 &&
+			(rawM as number[]).every((v) => typeof v === 'number' && isFinite(v)) &&
+			(rawM as number[]).some((v) => v !== 0)
 			? (rawM as Matrix3x3)
 			: identityMatrix;
 
@@ -471,25 +505,25 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 	const rawWB = r.ashotWBCoeffs as unknown;
 	const ashotWBCoeffs: [number, number, number] =
 		Array.isArray(rawWB) &&
-		rawWB.length === 3 &&
-		(rawWB as number[]).every((v) => typeof v === 'number' && isFinite(v) && v > 0)
+			rawWB.length === 3 &&
+			(rawWB as number[]).every((v) => typeof v === 'number' && isFinite(v) && v > 0)
 			? (rawWB as [number, number, number])
 			: [1, 1, 1];
 
 	return {
-		rebateRegion:         f.rebateRegion         ?? r.rebateRegion,
-		cameraColorMatrix:    colorMatrix,
+		rebateRegion: f.rebateRegion ?? r.rebateRegion,
+		cameraColorMatrix: colorMatrix,
 		ashotWBCoeffs,
-		lightSourceTemp:      r.lightSourceTemp,
+		lightSourceTemp: r.lightSourceTemp,
 		exposureCompensation: f.exposureCompensation ?? 0,
-		whiteBalance:         f.whiteBalance         ?? DEFAULT_WHITE_BALANCE,
-		toneCurve:            f.toneCurve            ?? r.baseToneCurve ?? identityCurve,
+		whiteBalance: f.whiteBalance ?? DEFAULT_WHITE_BALANCE,
+		toneCurve: f.toneCurve ?? r.baseToneCurve ?? identityCurve,
 		// Guard against old DB records where baseRGBCurves may be missing.
 		rgbCurves:
 			f.rgbCurves ??
 			((r as { baseRGBCurves?: [CurvePoints, CurvePoints, CurvePoints] }).baseRGBCurves ??
 				[identityCurve, identityCurve, identityCurve]),
-		invert:               r.invert,
+		invert: r.invert,
 		// Per-frame override wins; fall back to roll default; guard against old DB records.
 		// Spread DEFAULT_INVERSION_PARAMS first so any fields missing from older
 		// DB records (e.g. claheStrength added later) get sensible defaults.
@@ -531,11 +565,11 @@ export function frameHasEdits(frame: Frame, roll: Roll): boolean {
 	const f = frame.frameEdit;
 	if (
 		f.exposureCompensation !== null ||
-		f.whiteBalance         !== null ||
-		f.toneCurve            !== null ||
-		f.rgbCurves            !== null ||
-		f.cropQuad             !== null ||
-		f.transform            !== null
+		f.whiteBalance !== null ||
+		f.toneCurve !== null ||
+		f.rgbCurves !== null ||
+		f.cropQuad !== null ||
+		f.transform !== null
 	) {
 		return true;
 	}

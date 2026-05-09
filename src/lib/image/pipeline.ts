@@ -42,6 +42,7 @@ import cropWGSL             from './shaders/crop.wgsl?raw';
 import transformWGSL        from './shaders/transform.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import type { CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
+import { TONE_PRESETS } from '$lib/types';
 import { DEFAULT_TRANSFORM } from '$lib/types';
 
 // ─── NegPy constants ───────────────────────────────────────────────────────────
@@ -1047,10 +1048,10 @@ function makeHDCurveUniforms(
 
 	// Create buffer with mixed float32 and uint32 values
 	const buffer = device.createBuffer({
-		size: 128,
+		size: 144,
 		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 	});
-	const data = new ArrayBuffer(128);
+	const data = new ArrayBuffer(144);
 	const floatView = new Float32Array(data);
 	const uintView = new Uint32Array(data);
 
@@ -1097,6 +1098,13 @@ function makeHDCurveUniforms(
 	floatView[29] = inv.vibrance;     // vibrance @ 116
 	floatView[30] = inv.saturation;   // saturation @ 120
 	floatView[31] = 0.0;              // _pad0 @ 124
+
+	// Tone preset params (vec4 @ 128)
+	const preset = TONE_PRESETS[inv.tonePreset];
+	floatView[32] = preset.gamma;        // toneGamma @ 128
+	floatView[33] = preset.blackPoint;   // blackPoint @ 132
+	floatView[34] = preset.whitePoint;   // whitePoint @ 136
+	floatView[35] = preset.midtoneCurve; // midtoneCurve @ 140
 
 	device.queue.writeBuffer(buffer, 0, data);
 	return buffer;

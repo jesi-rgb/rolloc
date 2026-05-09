@@ -50,3 +50,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.rawler]
 opt-level = 3
+# Compile our own crate at opt-level 2 in dev builds.
+# The export pipeline (demosaic, H&D curve, CLAHE, sharpening, glow) is all
+# in app code and runs 10-50× slower at opt-level 0. Level 2 gives ~90% of
+# release speed without the full LTO/codegen-units cost of opt-level 3.
+[profile.dev.package.app]
+opt-level = 2

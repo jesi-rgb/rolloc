@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { InversionParams, FilmType } from "$lib/types";
-	import { DEFAULT_INVERSION_PARAMS } from "$lib/types";
+	import type { InversionParams, FilmType, TonePreset } from "$lib/types";
+	import { DEFAULT_INVERSION_PARAMS, TONE_PRESETS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
 	import JointSlider from "./JointSlider.svelte";
@@ -37,6 +37,7 @@
 	// ─── Local reactive copies (untrack to avoid "only captures initial value" warning) ───
 
 	let filmType = $state<FilmType>(untrack(() => value.filmType));
+	let tonePreset = $state<TonePreset>(untrack(() => value.tonePreset));
 	let autoLevels = $state(untrack(() => value.autoLevels));
 	let autoExposure = $state(untrack(() => value.autoExposure));
 	let e6Normalize = $state(untrack(() => value.e6Normalize));
@@ -66,6 +67,7 @@
 		// Deliberately reading reactive `value` to react to prop changes,
 		// then writing local copies — acceptable pattern per AGENTS.md.
 		filmType = value.filmType;
+		tonePreset = value.tonePreset;
 		autoLevels = value.autoLevels;
 		autoExposure = value.autoExposure;
 		e6Normalize = value.e6Normalize;
@@ -95,6 +97,7 @@
 	function currentParams(): InversionParams {
 		return {
 			filmType,
+			tonePreset,
 			autoLevels,
 			autoExposure,
 			e6Normalize,
@@ -138,6 +141,7 @@
 	function reset(): void {
 		const d = DEFAULT_INVERSION_PARAMS;
 		filmType = d.filmType;
+		tonePreset = d.tonePreset;
 		autoLevels = d.autoLevels;
 		autoExposure = d.autoExposure;
 		e6Normalize = d.e6Normalize;
@@ -167,6 +171,7 @@
 
 	const isDefault = $derived(
 		filmType === DEFAULT_INVERSION_PARAMS.filmType &&
+			tonePreset === DEFAULT_INVERSION_PARAMS.tonePreset &&
 			autoLevels === DEFAULT_INVERSION_PARAMS.autoLevels &&
 			autoExposure === DEFAULT_INVERSION_PARAMS.autoExposure &&
 			e6Normalize === DEFAULT_INVERSION_PARAMS.e6Normalize &&
@@ -231,6 +236,29 @@
 				}}
 			/>
 		</div>
+	</section>
+
+	<!-- ── Tone Preset ────────────────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Tone
+		</h4>
+		<select
+			class="w-full rounded border border-base-subtle bg-surface px-sm
+			py-xs text-sm text-content-muted"
+			value={tonePreset}
+			onchange={(e) => {
+				tonePreset = (e.currentTarget as HTMLSelectElement)
+					.value as TonePreset;
+				commit();
+			}}
+		>
+			<option value="standard">Standard</option>
+			<option value="soft">Soft</option>
+			<option value="punch">Punch</option>
+		</select>
 	</section>
 
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
