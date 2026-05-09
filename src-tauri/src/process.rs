@@ -96,22 +96,16 @@ struct TonePresetParams {
 fn resolve_tone_preset(name: &str) -> TonePresetParams {
     match name {
         "soft" => TonePresetParams {
-            gamma: 2.0,
+            gamma: 2.5,
             black_point: 0.0,
-            white_point: 1.0,
-            midtone_curve: -0.15,
+            white_point: 1.1,
+            midtone_curve: -0.45,
         },
         "punch" => TonePresetParams {
-            gamma: 2.4,
-            black_point: 0.02,
-            white_point: 0.98,
-            midtone_curve: 0.2,
-        },
-        "linear" => TonePresetParams {
-            gamma: 1.8,
+            gamma: 1.9,
             black_point: 0.0,
-            white_point: 1.0,
-            midtone_curve: 0.0,
+            white_point: 1.04,
+            midtone_curve: 0.2,
         },
         _ => TonePresetParams {
             // "standard" or unknown

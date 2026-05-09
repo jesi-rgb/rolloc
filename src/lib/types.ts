@@ -111,7 +111,7 @@ export type FilmType = 'C41' | 'BW' | 'E6';
  * during the H&D curve pass — gamma, black/white point, and midtone contrast.
  * The user-facing sliders (grade, toe, shoulder, etc.) are offsets on top.
  */
-export type TonePreset = 'standard' | 'soft' | 'punch' | 'linear';
+export type TonePreset = 'standard' | 'soft' | 'punch';
 
 /** Internal parameters derived from a TonePreset. Not exposed to the user. */
 export interface TonePresetParams {
@@ -128,8 +128,7 @@ export interface TonePresetParams {
 export const TONE_PRESETS: Record<TonePreset, TonePresetParams> = {
 	standard: { gamma: 2.2, blackPoint: 0.0, whitePoint: 1.0, midtoneCurve: 0.0 },
 	soft: { gamma: 2.5, blackPoint: 0.00, whitePoint: 1.1, midtoneCurve: -0.45 },
-	punch: { gamma: 1.9, blackPoint: 0.00, whitePoint: 1.04, midtoneCurve: 0.2 },
-	linear: { gamma: 2.0, blackPoint: 0.0, whitePoint: 1.0, midtoneCurve: 0.0 },
+	punch:    { gamma: 1.9,  blackPoint: 0.00, whitePoint: 1.04, midtoneCurve: 0.2  },
 };
 
 // ─── NegPy inversion parameters ──────────────────────────────────────────────

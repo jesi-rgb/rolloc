@@ -258,7 +258,6 @@
 			<option value="standard">Standard</option>
 			<option value="soft">Soft</option>
 			<option value="punch">Punch</option>
-			<option value="linear">Linear</option>
 		</select>
 	</section>
 
