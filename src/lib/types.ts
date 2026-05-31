@@ -113,6 +113,12 @@ export type FilmType = 'C41' | 'BW' | 'E6';
  */
 export type TonePreset = 'standard' | 'soft' | 'punch';
 
+/**
+ * Export matting border colour. Currently limited to neutral black or white —
+ * rendered as a solid frame around the photo on export (and in the preview).
+ */
+export type BorderColor = 'black' | 'white';
+
 /** Internal parameters derived from a TonePreset. Not exposed to the user. */
 export interface TonePresetParams {
 	/** Output gamma exponent (display gamma). Standard = 2.2. */
@@ -248,6 +254,18 @@ export interface InversionParams {
 	 * User sliders are offsets applied on top of this baseline.
 	 */
 	tonePreset: TonePreset;
+
+	// ── Export matting border ────────────────────────────────────────────────
+	/**
+	 * Width of the solid matting border drawn around the photo, expressed as a
+	 * percentage of the image's shorter edge. 0 = no border (disabled). The
+	 * border grows the output (matting), it does not cover the photo. Applied as
+	 * the final stage of both the GPU preview and the native export so the two
+	 * stay visually identical at any resolution.
+	 */
+	borderWidth: number;
+	/** Matting border colour — neutral black or white. */
+	borderColor: BorderColor;
 }
 
 // ─── Edit parameters ──────────────────────────────────────────────────────────
@@ -454,6 +472,8 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	filmType: 'C41',
 	e6Normalize: true,
 	tonePreset: 'standard',
+	borderWidth: 0,
+	borderColor: 'black',
 };
 
 export const DEFAULT_ROLL_EDIT: RollEditParams = {

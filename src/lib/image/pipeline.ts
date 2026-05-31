@@ -40,8 +40,9 @@ import sharpenWGSL          from './shaders/sharpen.wgsl?raw';
 import blitWGSL             from './shaders/blit.wgsl?raw';
 import cropWGSL             from './shaders/crop.wgsl?raw';
 import transformWGSL        from './shaders/transform.wgsl?raw';
+import borderWGSL           from './shaders/border.wgsl?raw';
 import { buildCurveLUTs } from './curves';
-import type { CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
+import type { BorderColor, CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
 import { TONE_PRESETS } from '$lib/types';
 import { DEFAULT_TRANSFORM } from '$lib/types';
 
@@ -1172,8 +1173,6 @@ function glowSampleRadiusForImage(width: number, height: number): number {
 	return Math.min(GLOW_BASE_SAMPLE_RADIUS * scale, GLOW_MAX_SAMPLE_RADIUS);
 }
 
-// ─── Transform uniform builder ────────────────────────────────────────────────
-
 /**
  * Check if the GPU transform (rotation, zoom) is effectively a no-op.
  * Note: Flips are not considered here since they're handled via CSS.
@@ -1183,7 +1182,45 @@ function isIdentityTransform(t: TransformParams): boolean {
 	return Math.abs(t.rotation) < 0.001 && Math.abs(zoom - 1) < 0.001;
 }
 
-// ─── Crop uniform builder ─────────────────────────────────────────────────────
+// ─── Border (matting) helpers ──────────────────────────────────────────────────
+
+/**
+ * Compute the matting border thickness in pixels for a content image of the
+ * given dimensions. `borderWidth` is a percentage of the shorter edge. Returns
+ * 0 when disabled. Shared conceptually with `border_pixels` in the Rust export
+ * so the preview and the written file match.
+ */
+function borderPixelsForContent(contentW: number, contentH: number, borderWidth: number): number {
+	if (!(borderWidth > 0)) return 0;
+	return Math.round((borderWidth / 100) * Math.min(contentW, contentH));
+}
+
+/**
+ * Build the border pass uniform buffer.
+ *
+ * BorderUniforms layout (total 32 bytes):
+ *   innerScale  : vec2<f32>  @ 0   (contentW/finalW, contentH/finalH)
+ *   innerOffset : vec2<f32>  @ 8   (bp/finalW,       bp/finalH)
+ *   color       : vec4<f32>  @ 16  (rgb solid matting colour + pad)
+ */
+function makeBorderUniforms(
+	device: GPUDevice,
+	contentW: number,
+	contentH: number,
+	finalW: number,
+	finalH: number,
+	color: BorderColor,
+): GPUBuffer {
+	const bpX = (finalW - contentW) / 2;
+	const bpY = (finalH - contentH) / 2;
+	const c = color === 'white' ? 1 : 0;
+	const data = new Float32Array([
+		contentW / finalW, contentH / finalH,   // innerScale
+		bpX / finalW,      bpY / finalH,         // innerOffset
+		c, c, c, 1,                              // color
+	]);
+	return makeUniformBuffer(device, data);
+}
 
 /**
  * Build the crop pass uniform buffer.
@@ -1385,6 +1422,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	const transformModule = device.createShaderModule({ code: transformWGSL });
 	const transformPipeline = makeRenderPipeline(transformModule, 'rgba16float');
 
+	// ── Border pipeline (matting frame around content) ────────────────────────
+
+	/**
+	 * Border pass composites the rendered content (smaller) into a larger output
+	 * texture, filling the surrounding matte with a solid colour. Renders to the
+	 * final, bordered-size output texture.
+	 */
+	const borderModule = device.createShaderModule({ code: borderWGSL });
+	const borderPipeline = makeRenderPipeline(borderModule, 'rgba16float');
+
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
 	let lastBitmap: ImageBitmap | null = null;
@@ -1412,6 +1459,17 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 * it down to the 8-bit swap chain.
 	 */
 	let outputTexture: GPUTexture | null = null;
+	/**
+	 * Content texture for the border (matting) pass (rgba16float).
+	 * When a border is active, the final content stage renders here at content
+	 * size, then the border pass composites it into the larger `outputTexture`.
+	 * When no border is active this stays null and content renders straight to
+	 * `outputTexture`.
+	 */
+	let contentTexture: GPUTexture | null = null;
+	/** Dimensions `contentTexture` was last sized to (0 = unallocated). */
+	let lastContentW = 0;
+	let lastContentH = 0;
 	/**
 	 * Intermediate texture for the transform pass (rgba16float).
 	 * When transform is active, tonecurve → preTransformTexture → transform → [crop] → outputTexture.
@@ -1497,29 +1555,57 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			outH = cropDims.height;
 		}
 
-		// ── Resize canvas + output textures if dimensions changed ───────────
-		if (outW !== lastOutputWidth || outH !== lastOutputHeight) {
-			canvas.width = outW;
-			canvas.height = outH;
+		// ── Compute matting border + final (bordered) output dimensions ─────
+		// `outW`/`outH` are the *content* size (post-crop/rotate). The matte is
+		// added around it, growing the written/displayed image. `bp` is 0 when
+		// the border is disabled, in which case content renders straight to
+		// `outputTexture`.
+		const contentW = outW;
+		const contentH = outH;
+		const bp = borderPixelsForContent(contentW, contentH, edit.inversionParams.borderWidth);
+		const finalW = contentW + 2 * bp;
+		const finalH = contentH + 2 * bp;
+
+		// ── Resize canvas + output textures (FINAL/bordered size) ───────────
+		if (finalW !== lastOutputWidth || finalH !== lastOutputHeight) {
+			canvas.width = finalW;
+			canvas.height = finalH;
 			context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
 
 			// Rebuild output + readback textures at new size
 			outputTexture?.destroy();
 			outputTexture = device.createTexture({
-				size: [outW, outH],
+				size: [finalW, finalH],
 				format: 'rgba16float',
 				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
 			});
 			readbackTexture?.destroy();
 			readbackTexture = device.createTexture({
-				size: [outW, outH],
+				size: [finalW, finalH],
 				format: 'rgba8unorm',
 				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
 			});
 
-			lastOutputWidth = outW;
-			lastOutputHeight = outH;
+			lastOutputWidth = finalW;
+			lastOutputHeight = finalH;
 		}
+
+		// ── Resize content texture (border pass input) when matte active ────
+		if (bp > 0 && (contentW !== lastContentW || contentH !== lastContentH)) {
+			contentTexture?.destroy();
+			contentTexture = device.createTexture({
+				size: [contentW, contentH],
+				format: 'rgba16float',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+			lastContentW = contentW;
+			lastContentH = contentH;
+		}
+
+		// The final content stage (tonecurve/transform/crop) renders here.
+		// With a matte it's the content-sized texture (composited into
+		// `outputTexture` by the border pass); otherwise straight to output.
+		const finalContentTarget = bp > 0 ? contentTexture! : outputTexture!;
 
 		// ── Resize pre-crop texture if rotation swaps dimensions ────────────
 		// preCropTexture is the transform pass output (and crop pass input).
@@ -1852,7 +1938,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		} else if (hasCrop) {
 			toneCurveTarget = preCropTexture!;
 		} else {
-			toneCurveTarget = outputTexture!;
+			toneCurveTarget = finalContentTarget;
 		}
 
 		const toneCurveBG = device.createBindGroup({
@@ -1883,7 +1969,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			toClean.push(transformUnifBuf);
 
 			// Determine the transform output target
-			const transformTarget = hasCrop ? preCropTexture! : outputTexture!;
+			const transformTarget = hasCrop ? preCropTexture! : finalContentTarget;
 
 			const transformBG = device.createBindGroup({
 				layout: transformPipeline.getBindGroupLayout(0),
@@ -1913,7 +1999,33 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				],
 			});
 
-			drawFullscreenTriangle(encoder, cropPipeline, cropBG, outputTexture!.createView());
+			drawFullscreenTriangle(encoder, cropPipeline, cropBG, finalContentTarget.createView());
+		}
+
+		// ── Optional border (matting) pass → output texture ──────────────────
+		// Composites the content-sized texture into the larger output texture,
+		// filling the surrounding matte with the chosen solid colour.
+		if (bp > 0) {
+			const borderUnifBuf = makeBorderUniforms(
+				device,
+				contentW,
+				contentH,
+				finalW,
+				finalH,
+				edit.inversionParams.borderColor,
+			);
+			toClean.push(borderUnifBuf);
+
+			const borderBG = device.createBindGroup({
+				layout: borderPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: sampler },
+					{ binding: 1, resource: contentTexture!.createView() },
+					{ binding: 2, resource: { buffer: borderUnifBuf } },
+				],
+			});
+
+			drawFullscreenTriangle(encoder, borderPipeline, borderBG, outputTexture!.createView());
 		}
 
 		// Note: Transform (rotation/flip) is applied via CSS in the UI for instant preview.
@@ -2016,6 +2128,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// Reset output dimensions tracking so runMainPasses rebuilds output textures
 		lastOutputWidth = 0;
 		lastOutputHeight = 0;
+		// Reset content (border-input) dimensions tracking so it's rebuilt too
+		lastContentW = 0;
+		lastContentH = 0;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -2200,6 +2315,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		glowBlurTex?.destroy();
 		claheCdfBuffer?.destroy();
 		outputTexture?.destroy();
+		contentTexture?.destroy();
 		preTransformTexture?.destroy();
 		preCropTexture?.destroy();
 		preTransformTexture?.destroy();

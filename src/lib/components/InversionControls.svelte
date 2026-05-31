@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { InversionParams, FilmType, TonePreset } from "$lib/types";
+	import type { InversionParams, FilmType, TonePreset, BorderColor } from "$lib/types";
 	import { DEFAULT_INVERSION_PARAMS, TONE_PRESETS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
@@ -61,6 +61,8 @@
 	let saturation = $state(untrack(() => value.saturation));
 	let glow = $state(untrack(() => value.glow));
 	let sharpen = $state(untrack(() => value.sharpen));
+	let borderWidth = $state(untrack(() => value.borderWidth));
+	let borderColor = $state<BorderColor>(untrack(() => value.borderColor));
 
 	// Re-sync when parent swaps to a different frame / roll
 	$effect(() => {
@@ -91,6 +93,8 @@
 		saturation = value.saturation;
 		glow = value.glow;
 		sharpen = value.sharpen;
+		borderWidth = value.borderWidth;
+		borderColor = value.borderColor;
 	});
 
 	/** Build the current params object. */
@@ -125,6 +129,8 @@
 			saturation,
 			sharpen,
 			glow,
+			borderWidth,
+			borderColor,
 		};
 	}
 
@@ -165,6 +171,8 @@
 		saturation = d.saturation;
 		glow = d.glow;
 		sharpen = d.sharpen;
+		borderWidth = d.borderWidth;
+		borderColor = d.borderColor;
 		// Reset is a discrete action — commit immediately so it persists + adds to history.
 		commit();
 	}
@@ -194,7 +202,9 @@
 			vibrance === DEFAULT_INVERSION_PARAMS.vibrance &&
 			saturation === DEFAULT_INVERSION_PARAMS.saturation &&
 			sharpen === DEFAULT_INVERSION_PARAMS.sharpen &&
-			glow === DEFAULT_INVERSION_PARAMS.glow,
+			glow === DEFAULT_INVERSION_PARAMS.glow &&
+			borderWidth === DEFAULT_INVERSION_PARAMS.borderWidth &&
+			borderColor === DEFAULT_INVERSION_PARAMS.borderColor,
 	);
 </script>
 
@@ -666,6 +676,54 @@
 				}}
 				oncommit={commit}
 			/>
+		</div>
+	</section>
+
+	<!-- ── Export border (matting) ─────────────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Border
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-border-width"
+				label="Width"
+				min={0}
+				max={25}
+				step={0.5}
+				value={borderWidth}
+				defaultValue={DEFAULT_INVERSION_PARAMS.borderWidth}
+				onchange={(v) => {
+					borderWidth = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
+
+			<!-- Black / white colour switch — disabled while width is 0 -->
+			<div class="flex items-center justify-between">
+				<span class="text-xs text-content-subtle">Color</span>
+				<button
+					type="button"
+					aria-label="Toggle border color between black and white"
+					title={borderWidth === 0
+						? "Set a border width to enable"
+						: `Border: ${borderColor} — click to swap`}
+					disabled={borderWidth === 0}
+					onclick={() => {
+						borderColor = borderColor === "black" ? "white" : "black";
+						commit();
+					}}
+					class="h-6 w-6 rounded border border-base-subtle transition
+					disabled:opacity-40 disabled:cursor-not-allowed
+					hover:ring-2 hover:ring-primary"
+					style:background-color={borderColor === "black"
+						? "#000000"
+						: "#ffffff"}
+				></button>
+			</div>
 		</div>
 	</section>
 
