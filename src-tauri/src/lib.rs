@@ -16,6 +16,7 @@ pub fn run() {
       raw::raw_decode,
       export::export_jpeg,
       export::export_native,
+      export::export_image_native,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

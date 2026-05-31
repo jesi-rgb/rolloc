@@ -1136,47 +1136,29 @@
           scale: exportScale,
         });
       } else {
-        // ── JPEG/TIFF path: GPU readback ───────────────────────────
-        if (!currentBitmap) {
-          throw new Error("No image loaded for this frame.");
+        // ── JPEG/TIFF path: full-res native export via Rust ────────
+        // Re-decode the original file at full resolution in Rust (mirrors
+        // the RAW path) and run the same f32 colour pipeline used for the
+        // preview. The cached `currentBitmap` is preview-resolution
+        // (≤PREVIEW_SIZE) and is intentionally NOT used here — that would
+        // silently cap exports of large composites (e.g. pano stitches).
+        const dirPath = await getRollPath(rollId);
+        if (!dirPath) {
+          throw new Error("Roll source directory not found.");
         }
-        console.debug(
-          "[export] JPEG path, rendering bitmap",
-          currentBitmap.width,
-          "x",
-          currentBitmap.height,
-          "edit:",
+        const absolutePath = await join(dirPath, currentFrame.filename);
+
+        // Reuse log percentiles from the preview render so colour
+        // normalization on the invert path is identical to the preview.
+        const logPerc: LogPercentiles | null = pipeline.lastLogPerc ?? null;
+
+        await invoke("export_image_native", {
+          sourcePath: absolutePath,
+          exportPath: finalPath,
           edit,
-        );
-        await pipeline.render(edit, currentBitmap);
-
-        // Get the actual output dimensions (after crop is applied)
-        const exportWidth = pipeline.lastOutputWidth;
-        const exportHeight = pipeline.lastOutputHeight;
-        console.debug(
-          "[export] render complete, output size:",
-          exportWidth,
-          "x",
-          exportHeight,
-        );
-
-        // Readback rendered pixels from GPU
-        const pixels = await pipeline.readPixels(
-          0,
-          0,
-          exportWidth,
-          exportHeight,
-        );
-        if (!pixels) {
-          throw new Error("Failed to read back rendered pixels from GPU.");
-        }
-
-        await invoke("export_jpeg", {
-          pixels: Array.from(pixels),
-          width: exportWidth,
-          height: exportHeight,
-          path: finalPath,
+          logPerc,
           quality: 100,
+          scale: exportScale,
         });
       }
 
