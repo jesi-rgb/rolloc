@@ -1,10 +1,17 @@
 <script lang="ts">
-	import type { TransformParams } from "$lib/types";
+	import type { CropAspect, TransformParams } from "$lib/types";
 	import { DEFAULT_TRANSFORM } from "$lib/types";
 	import { untrack } from "svelte";
+	import { slide } from "svelte/transition";
+	import { cubicOut } from "svelte/easing";
 	import LabeledRange from "./LabeledRange.svelte";
 	import ToggleButton from "./ToggleButton.svelte";
-	import { ArrowCounterClockwiseIcon, ArrowClockwiseIcon, SpinnerIcon } from "phosphor-svelte";
+	import {
+		ArrowCounterClockwiseIcon,
+		ArrowClockwiseIcon,
+		SpinnerIcon,
+		ArrowsClockwiseIcon,
+	} from "phosphor-svelte";
 
 	interface Props {
 		value: TransformParams;
@@ -22,9 +29,25 @@
 		onAutoStraighten?: () => void;
 		/** Whether horizon detection is currently in progress. */
 		detectingHorizon?: boolean;
+		/** When true, the crop aspect-ratio selector is shown (crop mode active). */
+		cropActive?: boolean;
+		/** Currently selected crop aspect ratio (drives the active button state). */
+		cropAspect?: CropAspect;
+		/** Called when the user picks a crop aspect ratio. */
+		onCropAspectChange?: (aspect: CropAspect) => void;
 	}
 
-	let { value, onChange, onCommit, onFineRotateDrag, onAutoStraighten, detectingHorizon = false }: Props = $props();
+	let {
+		value,
+		onChange,
+		onCommit,
+		onFineRotateDrag,
+		onAutoStraighten,
+		detectingHorizon = false,
+		cropActive = false,
+		cropAspect = null,
+		onCropAspectChange,
+	}: Props = $props();
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
 
@@ -143,6 +166,48 @@
 		zoom = z;
 		emit();
 	}
+
+	// ─── Crop aspect ratio ─────────────────────────────────────────────────────
+	//
+	// Ratios are stored in landscape form (width/height ≥ 1). The portrait toggle
+	// emits the reciprocal. `cropAspect` (from the parent) is the source of truth.
+
+	interface RatioOption {
+		label: string;
+		value: number;
+	}
+
+	const RATIOS: RatioOption[] = [
+		{ label: "1:1", value: 1 },
+		{ label: "3:2", value: 3 / 2 },
+		{ label: "4:3", value: 4 / 3 },
+		{ label: "16:9", value: 16 / 9 },
+		{ label: "5:4", value: 5 / 4 },
+	];
+
+	/** True when the active ratio is portrait-oriented (reciprocal < 1). */
+	const portrait = $derived(typeof cropAspect === "number" && cropAspect < 1);
+
+	function approxEq(a: number, b: number): boolean {
+		return Math.abs(a - b) < 1e-4;
+	}
+
+	/** Whether a given landscape ratio is the currently selected one. */
+	function ratioActive(v: number): boolean {
+		if (typeof cropAspect !== "number") return false;
+		return approxEq(cropAspect, v) || approxEq(cropAspect, 1 / v);
+	}
+
+	function selectRatio(v: number): void {
+		const out = portrait && v !== 1 ? 1 / v : v;
+		onCropAspectChange?.(out);
+	}
+
+	function togglePortrait(): void {
+		if (typeof cropAspect !== "number") return;
+		onCropAspectChange?.(1 / cropAspect);
+	}
+
 </script>
 
 <!--
@@ -150,7 +215,60 @@
 	Rotation (90° buttons + fine slider), flip, and zoom controls.
 -->
 
-<div class="flex flex-col gap-base">
+<div class="flex flex-col">
+	<!-- ── Crop aspect ratio (only in crop mode) ────────────────────────────── -->
+	{#if cropActive}
+		<div
+			class="flex flex-col gap-xs mb-base"
+			transition:slide={{ duration: 200, easing: cubicOut }}
+		>
+			<div class="flex items-center justify-between">
+				<span class="text-xs text-content-subtle">Aspect ratio</span>
+				<button
+					onclick={togglePortrait}
+					disabled={typeof cropAspect !== "number" || cropAspect === 1}
+					title="Swap orientation (portrait / landscape)"
+					aria-label="Swap orientation"
+					class="flex items-center gap-xs text-xs transition
+					       text-content-subtle hover:text-content
+					       disabled:opacity-30 disabled:cursor-not-allowed"
+				>
+					<ArrowsClockwiseIcon size={12} />
+					{portrait ? "Portrait" : "Landscape"}
+				</button>
+			</div>
+			<div class="grid grid-cols-4 gap-xs">
+				<ToggleButton
+					active={cropAspect == null}
+					onclick={() => onCropAspectChange?.(null)}
+					title="Free-form crop"
+					block
+				>
+					Free
+				</ToggleButton>
+				<ToggleButton
+					active={cropAspect === "original"}
+					onclick={() => onCropAspectChange?.("original")}
+					title="Lock to the image's native aspect ratio"
+					block
+				>
+					Orig
+				</ToggleButton>
+				{#each RATIOS as ratio (ratio.label)}
+					<ToggleButton
+						active={ratioActive(ratio.value)}
+						onclick={() => selectRatio(ratio.value)}
+						title="Lock to {ratio.label}"
+						block
+					>
+						{ratio.label}
+					</ToggleButton>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<div class="flex flex-col gap-base">
 	<!-- ── Rotation group (buttons + fine slider) ───────────────────────────── -->
 	<div class="flex flex-col gap-xs">
 		<!-- 90° rotation + auto buttons -->
@@ -294,4 +412,5 @@
 			Reset transform
 		</button>
 	{/if}
+	</div>
 </div>

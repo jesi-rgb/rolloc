@@ -18,8 +18,9 @@
 	 * within its parent container. We track both the canvas size and its position
 	 * relative to the parent to ensure the overlay lines up exactly.
 	 */
-	import type { CropQuad, Point2D } from "$lib/types";
+	import type { CropAspect, CropQuad, Point2D } from "$lib/types";
 	import { DEFAULT_CROP_QUAD } from "$lib/types";
+	import { untrack } from "svelte";
 	import { fade } from "svelte/transition";
 
 	interface Props {
@@ -31,9 +32,22 @@
 		onChange?: (quad: CropQuad) => void;
 		/** When true, show more grid lines (10+) for horizon alignment during fine rotation. */
 		fineRotating?: boolean;
+		/**
+		 * Locks the crop to a fixed aspect ratio.
+		 * `null` = free-form, `'original'` = source image ratio, or a numeric
+		 * display width/height ratio. When set, dragging any corner keeps the
+		 * ratio, and selecting a new ratio re-fits the current crop.
+		 */
+		aspectRatio?: CropAspect;
 	}
 
-	let { value, canvas, onChange, fineRotating = false }: Props = $props();
+	let {
+		value,
+		canvas,
+		onChange,
+		fineRotating = false,
+		aspectRatio = null,
+	}: Props = $props();
 
 	// ─── Reactively track canvas size and position ────────────────────────────
 
@@ -128,6 +142,80 @@
 
 	const rect = $derived(quadToRect(value));
 
+	// ─── Aspect-ratio constraint ──────────────────────────────────────────────
+	//
+	// `aspectRatio` is a *display* width/height ratio. To enforce it in normalized
+	// image space we scale by the canvas aspect ratio, since the displayed canvas
+	// preserves the image's pixel aspect (object-contain). `aspectK` is the
+	// resulting normalized width:height ratio (newWidth = aspectK * newHeight).
+
+	const aspectK = $derived.by<number | null>(() => {
+		if (aspectRatio == null || !hasMetrics) return null;
+		if (aspectRatio === "original") return 1;
+		return (aspectRatio * canvasHeight) / canvasWidth;
+	});
+
+	/**
+	 * Re-fit the current crop to a new aspect ratio, keeping its centre.
+	 * Called when the user picks a different ratio.
+	 */
+	function fitRectToAspect(k: number): void {
+		const r = quadToRect(value);
+		const cx = (r.left + r.right) / 2;
+		const cy = (r.top + r.bottom) / 2;
+		const curW = r.right - r.left;
+
+		let newW = curW;
+		let newH = newW / k;
+
+		// Shrink to fit within the image bounds (1×1 normalized).
+		if (newH > 1) {
+			newH = 1;
+			newW = k * newH;
+		}
+		if (newW > 1) {
+			newW = 1;
+			newH = newW / k;
+		}
+
+		let left = cx - newW / 2;
+		let right = cx + newW / 2;
+		let top = cy - newH / 2;
+		let bottom = cy + newH / 2;
+
+		// Shift back inside [0, 1] without changing size.
+		if (left < 0) {
+			right -= left;
+			left = 0;
+		}
+		if (right > 1) {
+			left -= right - 1;
+			right = 1;
+		}
+		if (top < 0) {
+			bottom -= top;
+			top = 0;
+		}
+		if (bottom > 1) {
+			top -= bottom - 1;
+			bottom = 1;
+		}
+
+		onChange?.(rectToQuad({ left, top, right, bottom }));
+	}
+
+	// Re-fit only when the *selected ratio* changes (not on canvas resize).
+	let prevAspect: CropAspect = untrack(() => aspectRatio);
+	$effect(() => {
+		const a = aspectRatio;
+		const k = aspectK;
+		untrack(() => {
+			if (a === prevAspect) return;
+			prevAspect = a;
+			if (a != null && k != null) fitRectToAspect(k);
+		});
+	});
+
 	const tlPx = $derived(toPixel({ x: rect.left, y: rect.top }));
 	const trPx = $derived(toPixel({ x: rect.right, y: rect.top }));
 	const brPx = $derived(toPixel({ x: rect.right, y: rect.bottom }));
@@ -137,6 +225,10 @@
 
 	type Corner = "tl" | "tr" | "br" | "bl";
 	let dragging = $state<Corner | null>(null);
+	/** True while the whole crop rectangle is being dragged (panned). */
+	let moving = $state(false);
+	/** Pointer + rect snapshot captured when a move drag begins. */
+	let moveStart: { px: number; py: number; rect: Rect } | null = null;
 
 	/** Minimum crop size in normalized coords (prevents zero-size crops). */
 	const MIN_SIZE = 0.02;
@@ -149,7 +241,49 @@
 		};
 	}
 
+	/** Begin dragging the entire crop rectangle. */
+	function startMove(e: PointerEvent) {
+		e.preventDefault();
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
+		const raw = clientToNormalized(e);
+		if (!raw) return;
+		moving = true;
+		moveStart = { px: raw.x, py: raw.y, rect: quadToRect(value) };
+	}
+
+	/**
+	 * Convert a pointer event's client coords to *unclamped* normalized coords,
+	 * accounting for any CSS transforms on the SVG via its screen CTM.
+	 */
+	function clientToNormalized(e: PointerEvent): { x: number; y: number } | null {
+		const el = e.currentTarget as SVGGraphicsElement;
+		// currentTarget may be a child element (e.g. the move rect); resolve the
+		// root <svg>, which is the only element exposing createSVGPoint().
+		const svg = (el.ownerSVGElement ?? el) as SVGSVGElement;
+		const ctm = svg.getScreenCTM();
+		if (!ctm || canvasWidth === 0 || canvasHeight === 0) return null;
+		const pt = svg.createSVGPoint();
+		pt.x = e.clientX;
+		pt.y = e.clientY;
+		const svgPt = pt.matrixTransform(ctm.inverse());
+		return { x: svgPt.x / canvasWidth, y: svgPt.y / canvasHeight };
+	}
+
 	function handlePointerMove(e: PointerEvent) {
+		// Whole-rectangle pan: translate while keeping size, clamp to [0, 1].
+		if (moving && moveStart) {
+			const raw = clientToNormalized(e);
+			if (!raw) return;
+			const w = moveStart.rect.right - moveStart.rect.left;
+			const h = moveStart.rect.bottom - moveStart.rect.top;
+			let left = moveStart.rect.left + (raw.x - moveStart.px);
+			let top = moveStart.rect.top + (raw.y - moveStart.py);
+			left = Math.max(0, Math.min(1 - w, left));
+			top = Math.max(0, Math.min(1 - h, top));
+			onChange?.(rectToQuad({ left, top, right: left + w, bottom: top + h }));
+			return;
+		}
+
 		if (!dragging) return;
 
 		// Convert screen coordinates to SVG coordinates.
@@ -165,6 +299,14 @@
 		const svgPt = pt.matrixTransform(ctm.inverse());
 
 		const pos = toNormalized(svgPt.x, svgPt.y);
+
+		// Aspect-locked drag: keep the opposite corner fixed and resize while
+		// preserving the ratio. Falls through to free-form drag when unlocked.
+		const k = aspectK;
+		if (k != null) {
+			onChange?.(rectToQuad(aspectConstrainedRect(dragging, pos, k)));
+			return;
+		}
 
 		// Update the rectangle based on which corner is being dragged.
 		// Each corner controls two edges of the rectangle.
@@ -208,10 +350,82 @@
 	}
 
 	function handlePointerUp(e: PointerEvent) {
-		if (!dragging) return;
+		if (!dragging && !moving) return;
 		(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 		dragging = null;
+		moving = false;
+		moveStart = null;
 		// No commit here — crop is only committed when exiting crop mode
+	}
+
+	/**
+	 * Compute a new rectangle for an aspect-locked corner drag.
+	 * The corner opposite to `corner` stays fixed; the dragged corner follows
+	 * the pointer as closely as possible while keeping `newW = k * newH`.
+	 */
+	function aspectConstrainedRect(corner: Corner, pos: Point2D, k: number): Rect {
+		// Anchor = opposite corner (fixed); signs = drag direction from anchor.
+		let anchorX: number;
+		let anchorY: number;
+		let signX: number;
+		let signY: number;
+		switch (corner) {
+			case "tl":
+				anchorX = rect.right;
+				anchorY = rect.bottom;
+				signX = -1;
+				signY = -1;
+				break;
+			case "tr":
+				anchorX = rect.left;
+				anchorY = rect.bottom;
+				signX = 1;
+				signY = -1;
+				break;
+			case "br":
+				anchorX = rect.left;
+				anchorY = rect.top;
+				signX = 1;
+				signY = 1;
+				break;
+			case "bl":
+				anchorX = rect.right;
+				anchorY = rect.top;
+				signX = -1;
+				signY = 1;
+				break;
+		}
+
+		const desiredW = Math.abs(pos.x - anchorX);
+		const desiredH = Math.abs(pos.y - anchorY);
+
+		// Fit the larger of the two pointer deltas, then derive the other side.
+		let newH = Math.max(desiredH, desiredW / k);
+		let newW = k * newH;
+
+		// Clamp to the space available toward the drag direction, preserving ratio.
+		const maxW = signX > 0 ? 1 - anchorX : anchorX;
+		const maxH = signY > 0 ? 1 - anchorY : anchorY;
+		const scale = Math.min(1, maxW / newW, maxH / newH);
+		newW *= scale;
+		newH *= scale;
+
+		// Enforce a minimum size while keeping the ratio intact.
+		if (newW < MIN_SIZE) {
+			newW = MIN_SIZE;
+			newH = newW / k;
+		}
+		if (newH < MIN_SIZE) {
+			newH = MIN_SIZE;
+			newW = k * newH;
+		}
+
+		const left = signX > 0 ? anchorX : anchorX - newW;
+		const right = signX > 0 ? anchorX + newW : anchorX;
+		const top = signY > 0 ? anchorY : anchorY - newH;
+		const bottom = signY > 0 ? anchorY + newH : anchorY;
+
+		return { left, top, right, bottom };
 	}
 
 	// ─── Reset to full frame ──────────────────────────────────────────────────
@@ -297,7 +511,8 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<svg
 		class="absolute pointer-events-auto"
-		style="left: {canvasOffsetLeft}px; top: {canvasOffsetTop}px; cursor: {dragging
+		style="left: {canvasOffsetLeft}px; top: {canvasOffsetTop}px; cursor: {dragging ||
+		moving
 			? 'grabbing'
 			: 'default'};"
 		width={canvasWidth}
@@ -337,6 +552,17 @@
 			stroke="rgba(0,0,0,0.5)"
 			stroke-width="1"
 			class="pointer-events-none"
+		/>
+
+		<!-- Draggable interior: grab anywhere inside to pan the whole crop -->
+		<rect
+			x={tlPx.x}
+			y={tlPx.y}
+			width={Math.max(0, trPx.x - tlPx.x)}
+			height={Math.max(0, blPx.y - tlPx.y)}
+			fill="transparent"
+			style="cursor: {moving ? 'grabbing' : 'grab'};"
+			onpointerdown={startMove}
 		/>
 
 		<!-- Corner handles (L-shaped brackets) -->

@@ -27,6 +27,18 @@ export interface CropQuad {
 	bl: Point2D;
 }
 
+/**
+ * Crop aspect-ratio lock used by the crop overlay UI.
+ * - `null`        → free-form crop (no constraint)
+ * - `'original'`  → lock to the source image's native aspect ratio
+ * - `number`      → lock to a fixed display ratio expressed as width / height
+ *                   (e.g. 16 / 9 ≈ 1.778 for landscape, 9 / 16 for portrait)
+ *
+ * The value describes the *displayed* width:height ratio. The overlay converts
+ * it into normalized image-space using the canvas dimensions.
+ */
+export type CropAspect = number | 'original' | null;
+
 /** Default identity crop — full image, no perspective correction. */
 export const DEFAULT_CROP_QUAD: CropQuad = {
 	tl: { x: 0, y: 0 },

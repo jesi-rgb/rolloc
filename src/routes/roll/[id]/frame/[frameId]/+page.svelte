@@ -47,6 +47,7 @@
     CropQuad,
     TransformParams,
     CachedLogPercentiles,
+    CropAspect,
   } from "$lib/types";
   import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
   import CurvesEditor from "$lib/components/CurvesEditor.svelte";
@@ -504,6 +505,9 @@
   /** Local crop quad state while editing (not yet committed to frame). */
   let localCropQuad = $state<CropQuad | null>(null);
 
+  /** Selected crop aspect-ratio lock while editing (null = free-form). */
+  let cropAspect = $state<CropAspect>(null);
+
   /** Effective crop quad for the overlay: local state while editing, otherwise from frame. */
   const effectiveCropQuad = $derived.by(() => {
     if (localCropQuad) return localCropQuad;
@@ -532,6 +536,8 @@
     } else {
       // Entering crop mode — show full uncropped image
       cropModeActive = true;
+      // Start each crop session free-form.
+      cropAspect = null;
       // Initialize local quad from saved state (or default if none)
       if (frame && roll) {
         localCropQuad = resolveEdit(roll, frame).cropQuad ?? DEFAULT_CROP_QUAD;
@@ -1471,6 +1477,7 @@
             canvas={canvasEl}
             value={effectiveCropQuad}
             onChange={onCropChange}
+            aspectRatio={cropAspect}
             {fineRotating}
           />
         {/if}
@@ -1633,6 +1640,9 @@
               onFineRotateDrag={(dragging) => (fineRotating = dragging)}
               onAutoStraighten={startHorizonDetection}
               {detectingHorizon}
+              cropActive={cropModeActive}
+              {cropAspect}
+              onCropAspectChange={(a) => (cropAspect = a)}
             />
           </div>
         </SidebarSection>
