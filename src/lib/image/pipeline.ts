@@ -1433,6 +1433,23 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let lastLogPerc: LogPercentiles | null = null;
 
+	/**
+	 * Per-bitmap cache for the non-RAW (JPEG/TIFF) invert path.
+	 *
+	 * `bitmapToF32Pixels()` (OffscreenCanvas draw → getImageData → f32 copy) and
+	 * the subsequent log-percentile computation are expensive (a full GPU→CPU
+	 * readback plus a multi-million-element loop) yet their inputs do not change
+	 * while the user drags sliders: the source bitmap is constant, and the
+	 * percentiles depend only on `filmType` + `autoLevels`. Caching both turns
+	 * them into no-ops on every render except the first for a given bitmap (or
+	 * when filmType/autoLevels change), matching the RAW path's smoothness.
+	 */
+	let cachedF32Bitmap: ImageBitmap | null = null;
+	let cachedF32Pixels: Float32Array | null = null;
+	let cachedInvertLogPerc: LogPercentiles | null = null;
+	let cachedInvertFilmType: string | null = null;
+	let cachedInvertAutoLevels: boolean | null = null;
+
 	/** Track last output dimensions to detect when resize is needed. */
 	let lastOutputWidth = 0;
 	let lastOutputHeight = 0;
@@ -2028,14 +2045,41 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// No color matrix applied — percentiles operate on camera-native data,
 		// matching negpy where rawpy delivers already-converted RGB and
 		// normalization works directly on those values.
+		//
+		// Both the f32 readback and the percentile computation are cached: their
+		// inputs (the bitmap, plus filmType/autoLevels) don't change while the
+		// user drags sliders, so this is a no-op on all but the first render for
+		// a given bitmap. Without the cache, every slider tick paid for a full
+		// GPU→CPU readback and a multi-million-element loop (see bitmapToF32Pixels).
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
-			const f32 = await bitmapToF32Pixels(bitmap);
-			logPerc = computeLogPercentilesFromF32(
-				f32, w, h, 8, undefined,
-				edit.inversionParams.filmType,
-				edit.inversionParams.autoLevels,
-			);
+			const filmType = edit.inversionParams.filmType;
+			const autoLevels = edit.inversionParams.autoLevels;
+
+			// Refresh the f32 snapshot only when the source bitmap changes.
+			if (bitmap !== cachedF32Bitmap || cachedF32Pixels === null) {
+				cachedF32Pixels = await bitmapToF32Pixels(bitmap);
+				cachedF32Bitmap = bitmap;
+				// Force a percentile recompute below.
+				cachedInvertLogPerc = null;
+			}
+
+			// Recompute percentiles only when the inputs that affect them change.
+			if (
+				cachedInvertLogPerc === null ||
+				cachedInvertFilmType !== filmType ||
+				cachedInvertAutoLevels !== autoLevels
+			) {
+				cachedInvertLogPerc = computeLogPercentilesFromF32(
+					cachedF32Pixels, w, h, 8, undefined,
+					filmType,
+					autoLevels,
+				);
+				cachedInvertFilmType = filmType;
+				cachedInvertAutoLevels = autoLevels;
+			}
+
+			logPerc = cachedInvertLogPerc;
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -2160,6 +2204,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		preCropTexture?.destroy();
 		preTransformTexture?.destroy();
 		readbackTexture?.destroy();
+		cachedF32Bitmap = null;
+		cachedF32Pixels = null;
+		cachedInvertLogPerc = null;
 		device.destroy();
 	}
 

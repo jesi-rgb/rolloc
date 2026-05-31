@@ -22,7 +22,9 @@ use std::path::Path;
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 
 use crate::process::{self, EffectiveEdit, LogPercentiles, TransformParams};
-use crate::raw::read_exif_orientation;
+use crate::raw::{apply_orientation, read_exif_orientation};
+
+use rayon::prelude::*;
 
 // ─── Command ──────────────────────────────────────────────────────────────────
 
@@ -612,6 +614,165 @@ fn inner_export_native(
             .ok_or_else(|| "failed to create output ImageBuffer".to_string())?;
 
     // ── JPEG encode + write ──────────────────────────────────────────────────
+    let quality = quality.clamp(1, 100);
+    let mut buf = Cursor::new(Vec::with_capacity(final_w * final_h / 4));
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+    DynamicImage::ImageRgb8(img_buf)
+        .write_with_encoder(encoder)
+        .map_err(|e| format!("JPEG encode failed: {e}"))?;
+
+    if let Some(parent) = Path::new(export_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create parent directory: {e}"))?;
+    }
+
+    std::fs::write(export_path, buf.into_inner())
+        .map_err(|e| format!("failed to write file: {e}"))?;
+
+    Ok(())
+}
+
+// ─── Native export for JPEG/TIFF/PNG (full-res, f32 pipeline, no GPU) ─────────
+
+/// Inverse sRGB transfer (companding): sRGB [0,1] → linear-light [0,1].
+/// Mirrors `srgb_to_linear` in `invert.wgsl` so the Rust export path produces
+/// the same upstream input the GPU pipeline sees when `isLinear = 0`.
+#[inline]
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Decode a non-RAW image (JPEG/TIFF/PNG/…) at full resolution, sRGB-expand to
+/// linear f32, run it through the full `process_image` pipeline, apply transform
+/// and crop, optionally downscale, and write the result as a high-quality JPEG.
+///
+/// This mirrors `export_native` for RAW files: the goal is parity between what
+/// the user sees in the GPU preview (which decodes the cached ≤4000px preview
+/// JPEG, lifts it to linear via the invert shader's `isLinear = 0` branch, and
+/// runs the same colour pipeline) and the exported file at native resolution.
+/// The cached preview bitmap is never touched here — the original file is
+/// re-decoded so panos and other large composites export at full pixel count.
+///
+/// - `source_path` — absolute path to the original JPEG/TIFF/PNG on disk.
+/// - `export_path` — user-chosen destination path for the JPEG.
+/// - `edit`        — fully-resolved edit parameters (matches preview).
+/// - `log_perc`    — log percentiles from the preview render (preserved so
+///                   colour normalization on the invert path matches what the
+///                   user sees). When None, `process_image` will recompute
+///                   from the full-res data.
+/// - `quality`     — JPEG quality 1–100.
+/// - `scale`       — output scale factor (0.25, 0.5, or 1.0). Defaults to 1.0.
+#[tauri::command]
+pub async fn export_image_native(
+    source_path: String,
+    export_path: String,
+    edit: EffectiveEdit,
+    log_perc: Option<LogPercentiles>,
+    quality: u8,
+    scale: Option<f32>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        inner_export_image_native(
+            &source_path,
+            &export_path,
+            &edit,
+            log_perc.as_ref(),
+            quality,
+            scale.unwrap_or(1.0),
+        )
+    })
+    .await
+    .map_err(|e| format!("task panicked: {:?}", e))?
+}
+
+fn inner_export_image_native(
+    source_path: &str,
+    export_path: &str,
+    edit: &EffectiveEdit,
+    log_perc: Option<&LogPercentiles>,
+    quality: u8,
+    scale: f32,
+) -> Result<(), String> {
+    let scale = if scale <= 0.0 || scale > 1.0 {
+        1.0_f32
+    } else {
+        scale
+    };
+
+    // ── Decode at full resolution ────────────────────────────────────────────
+    // `image::open` handles JPEG, TIFF (including 16-bit), PNG, BMP, WebP, …
+    // It does NOT auto-apply EXIF orientation, so we do it ourselves below.
+    let img = image::open(source_path).map_err(|e| format!("decode failed: {e}"))?;
+
+    // ── EXIF orientation (matches preview-generation path in thumb.rs) ──────
+    let orientation = read_exif_orientation(source_path);
+    let img = if orientation != 1 && orientation != 0 {
+        apply_orientation(img, orientation)
+    } else {
+        img
+    };
+
+    // ── Convert to sRGB-encoded RGB8, then sRGB-expand to linear f32 ────────
+    // This matches the GPU pipeline: when `isLinear = 0`, the invert shader
+    // does sRGB→linear before any downstream stage. `process_image` expects
+    // linear input (the RAW path produces linear from demosaic).
+    let rgb8 = img.to_rgb8();
+    let final_w = rgb8.width() as usize;
+    let final_h = rgb8.height() as usize;
+
+    // Precompute an 8-bit sRGB→linear LUT (256 entries). Source pixels are u8.
+    let lut: [f32; 256] = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
+
+    let mut rgb_f32: Vec<f32> = rgb8.as_raw().par_iter().map(|&b| lut[b as usize]).collect();
+    drop(rgb8);
+
+    // ── Process through the CPU pipeline (same code path as RAW export) ─────
+    process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
+
+    // ── Transform + crop (rotation, flips, crop quad) ───────────────────────
+    let crop = edit
+        .crop_quad
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(full_image_crop);
+    let (final_w, final_h, rgb_f32) =
+        apply_transform_and_crop(&rgb_f32, final_w, final_h, &crop, &edit.transform);
+
+    // ── Optional downscale (0.25, 0.5) ──────────────────────────────────────
+    let (final_w, final_h, rgb_f32) = if scale < 1.0 {
+        let scaled_w = ((final_w as f32 * scale).round() as usize).max(1);
+        let scaled_h = ((final_h as f32 * scale).round() as usize).max(1);
+        let downscaled = downscale_bilinear(&rgb_f32, final_w, final_h, scaled_w, scaled_h);
+        (scaled_w, scaled_h, downscaled)
+    } else {
+        (final_w, final_h, rgb_f32)
+    };
+
+    // ── f32 [0,1] sRGB → u8 with 8×8 Bayer ordered dither ───────────────────
+    let u8_data: Vec<u8> = rgb_f32
+        .chunks(3)
+        .enumerate()
+        .flat_map(|(i, pixel)| {
+            let x = i % final_w;
+            let y = i / final_w;
+            let dither = bayer_8x8(x, y);
+            [
+                f32_to_u8_dithered(pixel[0], dither),
+                f32_to_u8_dithered(pixel[1], dither),
+                f32_to_u8_dithered(pixel[2], dither),
+            ]
+        })
+        .collect();
+
+    let img_buf: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(final_w as u32, final_h as u32, u8_data)
+            .ok_or_else(|| "failed to create output ImageBuffer".to_string())?;
+
+    // ── JPEG encode + write ─────────────────────────────────────────────────
     let quality = quality.clamp(1, 100);
     let mut buf = Cursor::new(Vec::with_capacity(final_w * final_h / 4));
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
