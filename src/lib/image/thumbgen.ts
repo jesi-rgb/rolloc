@@ -31,8 +31,8 @@ import { isRawExtension } from '$lib/fs/directory';
 import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 import type { FilmType } from '$lib/types';
 
-export const THUMB_SIZE   = 300;
-export const PREVIEW_SIZE = 4000;
+export const THUMB_SIZE = 300;
+export const PREVIEW_SIZE = 3000;
 export const JPEG_QUALITY = 0.88;
 
 // ─── Tauri detection ──────────────────────────────────────────────────────────
@@ -63,9 +63,9 @@ async function generateThumbNative(
 	filmType?: FilmType | null,
 ): Promise<Blob> {
 	const buf = await invoke<ArrayBuffer>('generate_thumb', {
-		path:     absolutePath,
+		path: absolutePath,
 		maxPx,
-		quality:  Math.round(JPEG_QUALITY * 100),
+		quality: Math.round(JPEG_QUALITY * 100),
 		filmType: filmType ?? '',
 	});
 	return new Blob([buf], { type: 'image/jpeg' });
@@ -78,7 +78,7 @@ async function generateThumbNative(
  */
 async function generateRawThumbNative(absolutePath: string, maxPx: number): Promise<Blob> {
 	const buf = await invoke<ArrayBuffer>('raw_thumb', {
-		path:    absolutePath,
+		path: absolutePath,
 		maxPx,
 		quality: Math.round(JPEG_QUALITY * 100),
 	});
@@ -219,9 +219,9 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
 
 	// Scale from logical (post-rotation) dimensions.
 	const logicalW = swapped ? height : width;
-	const logicalH = swapped ? width  : height;
+	const logicalH = swapped ? width : height;
 	const scale = Math.min(1, maxPx / Math.max(logicalW, logicalH));
-	const w = Math.round(width  * scale);
+	const w = Math.round(width * scale);
 	const h = Math.round(height * scale);
 
 	const bitmap = await createImageBitmap(file, {
@@ -244,7 +244,7 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
 		blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY });
 	} else {
 		const canvas = document.createElement('canvas');
-		canvas.width  = outW;
+		canvas.width = outW;
 		canvas.height = outH;
 		const ctx = canvas.getContext('2d')!;
 		applyOrientationTransform(ctx, orientation, w, h);
