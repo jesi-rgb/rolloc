@@ -20,13 +20,234 @@ use std::io::Cursor;
 use std::path::Path;
 
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+use serde::Deserialize;
 
 use crate::process::{self, EffectiveEdit, LogPercentiles, TransformParams};
 use crate::raw::{apply_orientation, read_exif_orientation};
 
 use rayon::prelude::*;
 
-// ─── Command ──────────────────────────────────────────────────────────────────
+// ─── EXIF metadata ────────────────────────────────────────────────────────────
+
+/// User-provided roll metadata to embed in exported JPEGs via EXIF tags.
+/// All fields are optional — missing or null values are silently skipped.
+#[derive(Debug, Deserialize, Default)]
+pub struct ExifMetadata {
+    /// Film camera body (e.g. "Nikon FM2"). Written to EXIF `Model`.
+    pub camera:     Option<String>,
+    /// Lens used (e.g. "Nikkor 50mm f/1.4"). Written to EXIF `LensModel`.
+    pub lens:       Option<String>,
+    /// Film stock display name (e.g. "Kodak Portra 400"). Written to `ImageDescription`.
+    pub film_stock: Option<String>,
+    /// Nominal ISO/ASA box speed. Written to EXIF `ISO`. Skipped when 0 or absent.
+    pub iso:        Option<u32>,
+    /// Unix milliseconds when the scan file was created (`frame.capturedAt`).
+    /// Converted to `"YYYY:MM:DD HH:MM:SS"` and written to `CreateDate`
+    /// (EXIF `DateTimeDigitized`) — the semantically correct tag for the
+    /// digitization timestamp of analog content.
+    /// `DateTimeOriginal` is intentionally not written: we don't know when the
+    /// analog frame was actually exposed.
+    pub scanned_at: Option<i64>,
+}
+
+/// Inject EXIF metadata into an already-written JPEG file at `path`.
+///
+/// Uses `little_exif` to build a fresh EXIF block with only the user-provided
+/// fields. No source EXIF is read or carried over — all scanner metadata
+/// (shutter speed, aperture, etc.) is from the digital scanning camera and
+/// therefore semantically incorrect for an analog film frame.
+///
+/// Failures are logged but do not propagate: a missing EXIF block must never
+/// cause the export to fail.
+fn inject_exif(path: &str, meta: &ExifMetadata) {
+    use little_exif::metadata::Metadata;
+    use little_exif::exif_tag::ExifTag;
+
+    let mut exif = Metadata::new();
+
+    // Software tag — always written so the file is identifiable.
+    exif.set_tag(ExifTag::Software("Rolloc".to_string()));
+
+    if let Some(camera) = meta.camera.as_deref().filter(|s| !s.is_empty()) {
+        exif.set_tag(ExifTag::Model(camera.to_string()));
+    }
+
+    if let Some(lens) = meta.lens.as_deref().filter(|s| !s.is_empty()) {
+        exif.set_tag(ExifTag::LensModel(lens.to_string()));
+    }
+
+    if let Some(iso) = meta.iso.filter(|&v| v > 0) {
+        // ISO is an INT16U field; clamp to u16 range just in case.
+        exif.set_tag(ExifTag::ISO(vec![(iso.min(65535)) as u16]));
+    }
+
+    if let Some(ms) = meta.scanned_at {
+        // Convert unix milliseconds to EXIF datetime string "YYYY:MM:DD HH:MM:SS".
+        let secs = ms / 1000;
+        let dt = unix_secs_to_exif_datetime(secs);
+        // CreateDate = DateTimeDigitized — when the analog content was digitized.
+        // Kept (in addition to the XMP ScanDate below) so photo managers that
+        // sort by capture/digitized date still order scans correctly.
+        exif.set_tag(ExifTag::CreateDate(dt));
+    }
+
+    if let Err(e) = exif.write_to_file(Path::new(path)) {
+        eprintln!("WARN inject_exif: failed to write EXIF to {path}: {e}");
+    }
+
+    // ── Custom XMP block for human-friendly labels ───────────────────────────
+    // Standard EXIF has no "Film Stock" or "Scan Date" tag, and the labels of
+    // existing tags (ImageDescription, CreateDate) are fixed by the spec. We
+    // therefore expose these two fields under a custom XMP namespace so tools
+    // like exiftool display them as "Film Stock" and "Scan Date".
+    let film_stock = meta.film_stock.as_deref().filter(|s| !s.is_empty());
+    let scan_date  = meta
+        .scanned_at
+        .map(|ms| unix_secs_to_iso8601(ms / 1000));
+    if film_stock.is_some() || scan_date.is_some() {
+        if let Err(e) = inject_xmp(path, film_stock, scan_date.as_deref()) {
+            eprintln!("WARN inject_exif: failed to write XMP to {path}: {e}");
+        }
+    }
+}
+
+/// Build a custom XMP packet and insert it as an APP1 segment into the JPEG at
+/// `path`. Uses a `rolloc` namespace so properties surface with friendly labels
+/// (e.g. `rolloc:FilmStock` → "Film Stock", `rolloc:ScanDate` → "Scan Date").
+///
+/// The segment is inserted immediately after the SOI marker, ahead of any
+/// existing APP0/APP1 segments. JPEG readers accept APP segments in any order,
+/// and a separate XMP APP1 coexists fine with the EXIF APP1 little_exif wrote.
+fn inject_xmp(
+    path: &str,
+    film_stock: Option<&str>,
+    scan_date_iso: Option<&str>,
+) -> Result<(), String> {
+    // XMP APP1 signature (NUL-terminated namespace URI).
+    const XMP_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+
+    // Build the property lines.
+    let mut props = String::new();
+    if let Some(film) = film_stock {
+        props.push_str(&format!(
+            "    <rolloc:FilmStock>{}</rolloc:FilmStock>\n",
+            xml_escape(film)
+        ));
+    }
+    if let Some(date) = scan_date_iso {
+        props.push_str(&format!(
+            "    <rolloc:ScanDate>{}</rolloc:ScanDate>\n",
+            xml_escape(date)
+        ));
+    }
+
+    let packet = format!(
+        "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n\
+         <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+         <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+         <rdf:Description rdf:about=\"\" xmlns:rolloc=\"http://rolloc.app/ns/1.0/\">\n\
+         {props}\
+         </rdf:Description>\n\
+         </rdf:RDF>\n\
+         </x:xmpmeta>\n\
+         <?xpacket end=\"w\"?>"
+    );
+
+    let payload_len = XMP_SIG.len() + packet.len();
+    // APP1 length field is 2 bytes and counts itself + payload; cap at u16.
+    if payload_len + 2 > u16::MAX as usize {
+        return Err("XMP packet too large for a single APP1 segment".to_string());
+    }
+    let seg_len = (payload_len + 2) as u16;
+
+    // Assemble the APP1 segment: FF E1 <len_hi> <len_lo> <sig> <packet>.
+    let mut segment = Vec::with_capacity(payload_len + 4);
+    segment.push(0xFF);
+    segment.push(0xE1);
+    segment.extend_from_slice(&seg_len.to_be_bytes());
+    segment.extend_from_slice(XMP_SIG);
+    segment.extend_from_slice(packet.as_bytes());
+
+    // Read the existing JPEG, validate the SOI marker, and splice the segment in.
+    let jpeg = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+    if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+        return Err("not a JPEG (missing SOI marker)".to_string());
+    }
+
+    let mut out = Vec::with_capacity(jpeg.len() + segment.len());
+    out.extend_from_slice(&jpeg[0..2]); // SOI
+    out.extend_from_slice(&segment);    // our XMP APP1
+    out.extend_from_slice(&jpeg[2..]);  // rest of the original file
+
+    std::fs::write(path, out).map_err(|e| format!("write failed: {e}"))?;
+    Ok(())
+}
+
+/// Minimal XML text escaping for XMP string values.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Convert a Unix timestamp (seconds) to ISO 8601 `"YYYY-MM-DDTHH:MM:SS"` —
+/// the conventional XMP date format.
+fn unix_secs_to_iso8601(secs: i64) -> String {
+    let (y, mo, d, h, mi, s) = unix_secs_to_ymdhms(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
+}
+
+/// Decompose a Unix timestamp (seconds) into `(year, month, day, hour, min, sec)`
+/// in UTC, using only `std` (no chrono dependency).
+fn unix_secs_to_ymdhms(secs: i64) -> (u64, u64, u64, u64, u64, u64) {
+    // Days from Unix epoch to each month start (non-leap year)
+    const DAYS_IN_MONTH: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    let secs = secs.max(0) as u64;
+    let time_of_day = secs % 86400;
+    let total_days  = secs / 86400;
+
+    let hour = time_of_day / 3600;
+    let min  = (time_of_day % 3600) / 60;
+    let sec  = time_of_day % 60;
+
+    // Gregorian calendar calculation from day count.
+    let mut year = 1970u64;
+    let mut days = total_days;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let mut month = 1u64;
+    for (m, &d) in DAYS_IN_MONTH.iter().enumerate() {
+        let dim = if m == 1 && is_leap(year) { 29 } else { d };
+        if days < dim { break; }
+        days -= dim;
+        month += 1;
+    }
+    let day = days + 1;
+
+    (year, month, day, hour, min, sec)
+}
+
+/// Convert a Unix timestamp (seconds) to the EXIF datetime format
+/// `"YYYY:MM:DD HH:MM:SS"`.
+fn unix_secs_to_exif_datetime(secs: i64) -> String {
+    let (y, mo, d, h, mi, s) = unix_secs_to_ymdhms(secs);
+    format!("{y:04}:{mo:02}:{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+#[inline]
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+
 
 /// Encode an RGBA8 pixel buffer as JPEG and write it to `path`.
 ///
@@ -433,6 +654,7 @@ pub async fn export_native(
     skip_wb: Option<bool>,
     quality: u8,
     scale: Option<f32>,
+    metadata: Option<ExifMetadata>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         inner_export_native(
@@ -443,6 +665,7 @@ pub async fn export_native(
             skip_wb.unwrap_or(false),
             quality,
             scale.unwrap_or(1.0),
+            metadata.as_ref(),
         )
     })
     .await
@@ -457,6 +680,7 @@ fn inner_export_native(
     skip_wb: bool,
     quality: u8,
     scale: f32,
+    metadata: Option<&ExifMetadata>,
 ) -> Result<(), String> {
     // Validate scale factor — must be one of the supported values.
     let scale = if scale <= 0.0 || scale > 1.0 {
@@ -683,6 +907,11 @@ fn inner_export_native(
     std::fs::write(export_path, buf.into_inner())
         .map_err(|e| format!("failed to write file: {e}"))?;
 
+    // ── Inject EXIF metadata ─────────────────────────────────────────────────
+    if let Some(meta) = metadata {
+        inject_exif(export_path, meta);
+    }
+
     Ok(())
 }
 
@@ -728,6 +957,7 @@ pub async fn export_image_native(
     log_perc: Option<LogPercentiles>,
     quality: u8,
     scale: Option<f32>,
+    metadata: Option<ExifMetadata>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         inner_export_image_native(
@@ -737,6 +967,7 @@ pub async fn export_image_native(
             log_perc.as_ref(),
             quality,
             scale.unwrap_or(1.0),
+            metadata.as_ref(),
         )
     })
     .await
@@ -750,6 +981,7 @@ fn inner_export_image_native(
     log_perc: Option<&LogPercentiles>,
     quality: u8,
     scale: f32,
+    metadata: Option<&ExifMetadata>,
 ) -> Result<(), String> {
     let scale = if scale <= 0.0 || scale > 1.0 {
         1.0_f32
@@ -851,6 +1083,11 @@ fn inner_export_image_native(
 
     std::fs::write(export_path, buf.into_inner())
         .map_err(|e| format!("failed to write file: {e}"))?;
+
+    // ── Inject EXIF metadata ─────────────────────────────────────────────────
+    if let Some(meta) = metadata {
+        inject_exif(export_path, meta);
+    }
 
     Ok(())
 }

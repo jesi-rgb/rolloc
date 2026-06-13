@@ -55,6 +55,19 @@ export interface BatchExportOptions {
 	signal?:     { aborted: boolean };
 }
 
+/**
+ * Metadata derived from the Roll record to embed in exported JPEGs via EXIF.
+ * Fields are `null` when the user left them blank — Rust skips null entries.
+ */
+interface ExifMetadata {
+	camera:     string | null;
+	lens:       string | null;
+	film_stock: string | null;
+	iso:        number | null;
+	/** Unix milliseconds — Rust converts to EXIF DateTimeDigitized. */
+	scanned_at: number | null;
+}
+
 export interface BatchExportResult {
 	exported: number;
 	skipped:  number;
@@ -125,6 +138,14 @@ export async function exportFramesBatch(
 
 			const edit = resolveEdit(roll, frame);
 
+			const metadata: ExifMetadata = {
+				camera:     roll.camera    || null,
+				lens:       (roll.lens     ?? '') || null,
+				film_stock: roll.filmStock || null,
+				iso:        (roll.iso ?? 0) > 0 ? roll.iso : null,
+				scanned_at: frame.capturedAt ?? null,
+			};
+
 			await invoke('export_native', {
 				sourcePath,
 				exportPath,
@@ -136,6 +157,7 @@ export async function exportFramesBatch(
 				skipWb:  roll.rollEdit.invert,
 				quality,
 				scale,
+				metadata,
 			});
 
 			progress.exported++;

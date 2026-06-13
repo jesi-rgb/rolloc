@@ -29,6 +29,7 @@ tauri-plugin-fs = "2"
 # Only JPEG and TIFF codecs are enabled to keep compile time small.
 image = { version = "0.25", default-features = false, features = ["jpeg", "tiff"] }
 kamadak-exif = "0.5"
+little_exif  = "0.6"
 rayon = "1.10"
 # tokio is a transitive dep of tauri; we declare it explicitly to use
 # spawn_blocking for off-thread CPU work in async commands.
