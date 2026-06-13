@@ -369,6 +369,50 @@ fn f32_to_u8_dithered(v: f32, dither: f32) -> u8 {
     ((v * 255.0 + dither).round()).clamp(0.0, 255.0) as u8
 }
 
+// ─── Matting border ───────────────────────────────────────────────────────────
+
+/// Compute the matting border thickness in pixels for a content image of the
+/// given dimensions. `border_width` is a percentage of the shorter edge.
+/// Returns 0 when disabled. Mirrors `borderPixelsForContent` in the GPU pipeline.
+fn border_pixels(content_w: usize, content_h: usize, border_width: f32) -> usize {
+    if !(border_width > 0.0) {
+        return 0;
+    }
+    let shorter = content_w.min(content_h) as f32;
+    ((border_width / 100.0) * shorter).round() as usize
+}
+
+/// Composite an f32 RGB content image into a larger image with a solid matte
+/// around it. Returns `(final_w, final_h, rgb)`; when `bp == 0` the input is
+/// returned unchanged. `color` is "black" or "white" (anything else → black).
+/// Mirrors the GPU `border.wgsl` pass so preview and export match.
+fn add_border(
+    src: &[f32],
+    content_w: usize,
+    content_h: usize,
+    border_width: f32,
+    color: &str,
+) -> (usize, usize, Vec<f32>) {
+    let bp = border_pixels(content_w, content_h, border_width);
+    if bp == 0 {
+        return (content_w, content_h, src.to_vec());
+    }
+
+    let final_w = content_w + 2 * bp;
+    let final_h = content_h + 2 * bp;
+    let fill = if color == "white" { 1.0_f32 } else { 0.0_f32 };
+
+    let mut dst = vec![fill; final_w * final_h * 3];
+    for y in 0..content_h {
+        let src_row = y * content_w * 3;
+        let dst_row = ((y + bp) * final_w + bp) * 3;
+        dst[dst_row..dst_row + content_w * 3]
+            .copy_from_slice(&src[src_row..src_row + content_w * 3]);
+    }
+
+    (final_w, final_h, dst)
+}
+
 /// Decode a RAW file at full sensor resolution, process it through the CPU-side
 /// colour pipeline in f32 precision, and write the result as a high-quality JPEG.
 ///
@@ -591,6 +635,16 @@ fn inner_export_native(
         (final_w, final_h, rgb_f32)
     };
 
+    // ── Optional matting border (applied after downscale so the matte is a
+    // consistent percentage of the final exported resolution) ────────────────
+    let (final_w, final_h, rgb_f32) = add_border(
+        &rgb_f32,
+        final_w,
+        final_h,
+        edit.inversion_params.border_width,
+        &edit.inversion_params.border_color,
+    );
+
     // ── Convert f32 [0,1] sRGB → u8 [0,255] with ordered dithering ─────────
     // Uses an 8×8 Bayer matrix to break up banding in smooth gradients
     // (sky, skin tones, etc.) that would otherwise appear after quantization.
@@ -751,6 +805,16 @@ fn inner_export_image_native(
     } else {
         (final_w, final_h, rgb_f32)
     };
+
+    // ── Optional matting border (applied after downscale so the matte is a
+    // consistent percentage of the final exported resolution) ────────────────
+    let (final_w, final_h, rgb_f32) = add_border(
+        &rgb_f32,
+        final_w,
+        final_h,
+        edit.inversion_params.border_width,
+        &edit.inversion_params.border_color,
+    );
 
     // ── f32 [0,1] sRGB → u8 with 8×8 Bayer ordered dither ───────────────────
     let u8_data: Vec<u8> = rgb_f32

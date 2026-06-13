@@ -520,13 +520,23 @@
    * Keeps transforms (rotation/flip) active so user sees the final orientation
    * while editing the crop. The CropOverlay transforms coordinates to/from
    * original image space.
+   *
+   * The matting border is also disabled here: it grows the output around the
+   * photo, so leaving it on would make the crop overlay (which maps 0–1 over
+   * the whole canvas) appear to crop into the border. The committed border is
+   * restored when crop mode exits and renderFrame() runs normally.
    */
   function renderUncropped(): void {
     if (!pipeline || !roll || !frame) return;
     const edit = resolveEdit(roll, frame);
-    // Render with cropQuad = null but KEEP transforms
-    // The crop overlay will transform its coordinates to match
-    renderFrame({ ...edit, cropQuad: null });
+    // Render with cropQuad = null but KEEP transforms.
+    // Disable the border so the overlay aligns with the photo content.
+    // The crop overlay will transform its coordinates to match.
+    renderFrame({
+      ...edit,
+      cropQuad: null,
+      inversionParams: { ...edit.inversionParams, borderWidth: 0 },
+    });
   }
 
   function toggleCropMode(): void {

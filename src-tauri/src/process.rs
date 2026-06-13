@@ -85,6 +85,10 @@ fn default_tone_preset() -> String {
     "standard".to_string()
 }
 
+fn default_border_color() -> String {
+    "black".to_string()
+}
+
 /// Resolved tone preset parameters (gamma, black/white point, midtone curve).
 struct TonePresetParams {
     gamma: f32,
@@ -221,6 +225,13 @@ pub struct InversionParams {
     /// Tone preset: "standard", "soft", "punch", or "linear".
     #[serde(default = "default_tone_preset")]
     pub tone_preset: String,
+    /// Matting border width as a percentage of the image's shorter edge.
+    /// 0 = disabled. Mirrors the GPU preview's border pass.
+    #[serde(default)]
+    pub border_width: f32,
+    /// Matting border colour: "black" or "white". Defaults to black.
+    #[serde(default = "default_border_color")]
+    pub border_color: String,
 }
 
 /// Per-channel log-density percentiles for the normalization pass.
