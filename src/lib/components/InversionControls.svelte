@@ -1,5 +1,10 @@
 <script lang="ts">
-	import type { InversionParams, FilmType, TonePreset, BorderColor } from "$lib/types";
+	import type {
+		InversionParams,
+		FilmType,
+		TonePreset,
+		BorderColor,
+	} from "$lib/types";
 	import { DEFAULT_INVERSION_PARAMS, TONE_PRESETS } from "$lib/types";
 	import { untrack } from "svelte";
 	import LabeledRange from "./LabeledRange.svelte";
@@ -686,10 +691,34 @@
 		>
 			Border
 		</h4>
-		<div class="flex flex-col gap-sm">
+		<div class="flex gap-sm w-full">
+			<!-- Black / white colour switch — disabled while width is 0 -->
+			<div class="flex items-center justify-between gap-xs shrink">
+				<span class="text-xs text-content-muted">Color</span>
+				<button
+					type="button"
+					aria-label="Toggle border color between black and white"
+					title={borderWidth === 0
+						? "Set a border width to enable"
+						: `Border: ${borderColor} — click to swap`}
+					disabled={borderWidth === 0}
+					onclick={() => {
+						borderColor =
+							borderColor === "black" ? "white" : "black";
+						commit();
+					}}
+					class="h-3.5 min-w-xl shrink-0 rounded border border-base-subtle transition
+					disabled:opacity-40 disabled:cursor-not-allowed
+					hover:ring-2 hover:ring-primary"
+					style:background-color={borderColor === "black"
+						? "#000000"
+						: "#ffffff"}
+				></button>
+			</div>
+
 			<LabeledRange
 				id="inv-border-width"
-				label="Width"
+				layout="inline"
 				min={0}
 				max={25}
 				step={0.5}
@@ -701,29 +730,6 @@
 				}}
 				oncommit={commit}
 			/>
-
-			<!-- Black / white colour switch — disabled while width is 0 -->
-			<div class="flex items-center justify-between">
-				<span class="text-xs text-content-subtle">Color</span>
-				<button
-					type="button"
-					aria-label="Toggle border color between black and white"
-					title={borderWidth === 0
-						? "Set a border width to enable"
-						: `Border: ${borderColor} — click to swap`}
-					disabled={borderWidth === 0}
-					onclick={() => {
-						borderColor = borderColor === "black" ? "white" : "black";
-						commit();
-					}}
-					class="h-6 w-6 rounded border border-base-subtle transition
-					disabled:opacity-40 disabled:cursor-not-allowed
-					hover:ring-2 hover:ring-primary"
-					style:background-color={borderColor === "black"
-						? "#000000"
-						: "#ffffff"}
-				></button>
-			</div>
 		</div>
 	</section>
 

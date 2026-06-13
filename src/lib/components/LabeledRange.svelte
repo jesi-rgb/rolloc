@@ -1,7 +1,7 @@
 <script lang="ts">
 	interface Props {
 		id: string;
-		label: string;
+		label?: string;
 		min: number;
 		max: number;
 		step: number;
@@ -78,9 +78,7 @@
 	 *  Clamped — when min/max don't straddle zero, fill grows from min. */
 	const zeroFrac = $derived(Math.max(0, Math.min(1, valueToFrac(0))));
 
-	const frac = $derived(
-		Math.max(0, Math.min(1, valueToFrac(value))),
-	);
+	const frac = $derived(Math.max(0, Math.min(1, valueToFrac(value))));
 	const fillLeft = $derived(Math.min(frac, zeroFrac));
 	const fillRight = $derived(Math.max(frac, zeroFrac));
 
@@ -225,9 +223,12 @@
 	<div class="flex flex-col gap-xs">
 		{#if !hideHeader}
 			<div class="flex items-center justify-between">
-				<label for={id} class="{textSize} font-medium {labelClass}"
-					>{label}</label
-				>
+				{#if label}
+					<label for={id} class="{textSize} font-medium {labelClass}"
+						>{label}</label
+					>
+				{/if}
+
 				<span class="{textSize} text-content font-mono tabular-nums"
 					>{fmt(value)}</span
 				>
@@ -236,11 +237,13 @@
 		{@render rangeInput("w-full")}
 	</div>
 {:else}
-	<div class="flex items-center gap-sm">
-		<label for={id} class="text-[10px] w-12 shrink-0 {labelClass}"
-			>{label}</label
-		>
-		{@render rangeInput("flex-1")}
+	<div class="flex items-center gap-sm flex-1 min-w-0">
+		{#if label}
+			<label for={id} class="text-[10px] w-12 shrink-0 {labelClass}"
+				>{label}</label
+			>
+		{/if}
+		{@render rangeInput("flex-1 min-w-0")}
 		<span
 			class="text-[10px] text-content font-mono tabular-nums w-10 text-right"
 			>{fmt(value)}</span
