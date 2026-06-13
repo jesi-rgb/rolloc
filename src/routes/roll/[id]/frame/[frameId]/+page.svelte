@@ -1096,6 +1096,15 @@
       const currentRoll = roll;
       const edit = resolveEdit(currentRoll, currentFrame);
 
+      // EXIF metadata embedded into the exported JPEG. Mirrors batch export.
+      const metadata = {
+        camera: currentRoll.camera || null,
+        lens: (currentRoll.lens ?? "") || null,
+        film_stock: currentRoll.filmStock || null,
+        iso: (currentRoll.iso ?? 0) > 0 ? currentRoll.iso : null,
+        scanned_at: currentFrame.capturedAt ?? null,
+      };
+
       // ── Suggest a default filename ─────────────────────────────────
       const stem = (
         await basename(currentFrame.filename).catch(() => currentFrame.filename)
@@ -1150,6 +1159,7 @@
           skipWb: currentRoll.rollEdit.invert,
           quality: 100,
           scale: exportScale,
+          metadata,
         });
       } else {
         // ── JPEG/TIFF path: full-res native export via Rust ────────
@@ -1175,6 +1185,7 @@
           logPerc,
           quality: 100,
           scale: exportScale,
+          metadata,
         });
       }
 

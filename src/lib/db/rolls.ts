@@ -22,7 +22,11 @@ import { DEFAULT_FRAME_EDIT, DEFAULT_ROLL_EDIT, DEFAULT_INVERSION_PARAMS } from 
 export interface CreateRollOptions {
 	label: string;
 	filmStock?: string;
+	/** Nominal box speed in ISO/ASA. 0 = unset. */
+	iso?: number;
 	camera?: string;
+	/** Lens used for this roll (freeform). */
+	lens?: string;
 	notes?: string;
 	path: string;  // Absolute directory path
 	/**
@@ -45,7 +49,9 @@ export async function createRoll(opts: CreateRollOptions): Promise<Roll> {
 		createdAt: Date.now(),
 		label: opts.label,
 		filmStock: opts.filmStock ?? '',
+		iso: opts.iso ?? 0,
 		camera: opts.camera ?? '',
+		lens: opts.lens ?? '',
 		notes: opts.notes ?? '',
 		rollEdit: { ...DEFAULT_ROLL_EDIT },
 	};

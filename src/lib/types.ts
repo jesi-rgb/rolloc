@@ -378,7 +378,18 @@ export interface Roll {
 	createdAt: number; // unix ms
 	label: string;
 	filmStock: string;
+	/**
+	 * Nominal box speed of the film stock in ISO/ASA.
+	 * 0 = unset / unknown. Old DB records that lack this field
+	 * should be read with `roll.iso ?? 0`.
+	 */
+	iso: number;
 	camera: string;
+	/**
+	 * Lens used for this roll (freeform, e.g. "Nikkor 50mm f/1.4").
+	 * Old DB records that lack this field should be read with `roll.lens ?? ''`.
+	 */
+	lens: string;
 	notes: string;
 	rollEdit: RollEditParams;
 }

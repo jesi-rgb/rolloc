@@ -2,9 +2,11 @@
 	import { pickDirectory } from '$lib/fs/directory';
 	import { createRoll } from '$lib/db/rolls';
 	import type { Roll, FilmType } from '$lib/types';
+	import type { FilmStock } from '$lib/data/film-stocks';
 	import ColorFilmButton from './ColorFilmButton.svelte';
 	import BlackWhiteFilmButton from './BlackWhiteFilmButton.svelte';
 	import SlideFilmButton from './SlideFilmButton.svelte';
+	import FilmStockInput from './FilmStockInput.svelte';
 
 	/** Film type options for the selector. 'mixed' means leave default per-frame. */
 	type FilmTypeOption = FilmType | 'mixed';
@@ -18,9 +20,13 @@
 
 	let label     = $state('');
 	let filmStock = $state('');
+	let iso       = $state<number | ''>('');
 	let camera    = $state('');
+	let lens      = $state('');
 	let notes     = $state('');
 	let filmType  = $state<FilmTypeOption>('C41');
+	/** True once the user has manually clicked a film type button. */
+	let filmTypeManuallySet = $state(false);
 	let dirPath   = $state<string | null>(null);
 	let dirName   = $state('');
 	let busy      = $state(false);
@@ -44,6 +50,19 @@
 		}
 	}
 
+	function handleStockSelect(stock: FilmStock) {
+		iso = stock.iso;
+		// Only switch film type if the user hasn't explicitly changed it.
+		if (!filmTypeManuallySet) {
+			filmType = stock.type;
+		}
+	}
+
+	function handleFilmTypeClick(type: FilmTypeOption) {
+		filmType = type;
+		filmTypeManuallySet = true;
+	}
+
 	async function submit() {
 		if (!dirPath) { error = 'Please select a directory.'; return; }
 		if (!label.trim()) { error = 'Label is required.'; return; }
@@ -52,12 +71,14 @@
 		error = '';
 		try {
 			const roll = await createRoll({
-				label: label.trim(),
+				label:     label.trim(),
 				filmStock,
+				iso:       iso === '' ? 0 : iso,
 				camera,
+				lens,
 				notes,
-				path: dirPath,
-				filmType: filmType === 'mixed' ? undefined : filmType,
+				path:      dirPath,
+				filmType:  filmType === 'mixed' ? undefined : filmType,
 			});
 			onCreated(roll);
 		} catch (e) {
@@ -121,17 +142,32 @@
 					       focus:outline-none focus:border-primary transition"
 				/>
 			</label>
-			<label class="block">
+
+			<!-- Film stock + ISO on the same row -->
+			<div>
 				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Film stock</span>
-				<input
-					bind:value={filmStock}
-					type="text"
-					placeholder="e.g. Kodak Portra 400"
-					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
-					       text-content placeholder-content-subtle
-					       focus:outline-none focus:border-primary transition"
-				/>
-			</label>
+				<div class="flex gap-2 items-start">
+					<div class="flex-1">
+						<FilmStockInput bind:value={filmStock} onSelect={handleStockSelect} />
+					</div>
+					<label class="block w-24 shrink-0">
+						<span class="sr-only">ISO</span>
+						<div class="mt-1 relative">
+							<input
+								bind:value={iso}
+								type="number"
+								min="1"
+								max="25600"
+								placeholder="ISO"
+								class="w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
+								       text-content placeholder-content-subtle
+								       focus:outline-none focus:border-primary transition"
+							/>
+						</div>
+					</label>
+				</div>
+			</div>
+
 			<label class="block">
 				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Camera</span>
 				<input
@@ -143,6 +179,19 @@
 					       focus:outline-none focus:border-primary transition"
 				/>
 			</label>
+
+			<label class="block">
+				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Lens</span>
+				<input
+					bind:value={lens}
+					type="text"
+					placeholder="e.g. Nikkor 50mm f/1.4"
+					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
+					       text-content placeholder-content-subtle
+					       focus:outline-none focus:border-primary transition"
+				/>
+			</label>
+
 			<label class="block">
 				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Notes</span>
 				<textarea
@@ -161,20 +210,20 @@
 				<div class="flex gap-sm mt-1">
 					<ColorFilmButton
 						selected={filmType === 'C41'}
-						onclick={() => { filmType = 'C41'; }}
+						onclick={() => { handleFilmTypeClick('C41'); }}
 					/>
 					<BlackWhiteFilmButton
 						selected={filmType === 'BW'}
-						onclick={() => { filmType = 'BW'; }}
+						onclick={() => { handleFilmTypeClick('BW'); }}
 					/>
 					<SlideFilmButton
 						selected={filmType === 'E6'}
-						onclick={() => { filmType = 'E6'; }}
+						onclick={() => { handleFilmTypeClick('E6'); }}
 					/>
 					<!-- Mixed: neutral styling -->
 					<button
 						type="button"
-						onclick={() => { filmType = 'mixed'; }}
+						onclick={() => { handleFilmTypeClick('mixed'); }}
 						class="flex-1 h-12 text-sm font-bold rounded overflow-hidden transition-all
 							{filmType === 'mixed'
 							? 'bg-content text-base ring-2 ring-white ring-offset-2 ring-offset-base-muted scale-105'

@@ -20,13 +20,126 @@ use std::io::Cursor;
 use std::path::Path;
 
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+use serde::Deserialize;
 
 use crate::process::{self, EffectiveEdit, LogPercentiles, TransformParams};
 use crate::raw::{apply_orientation, read_exif_orientation};
 
 use rayon::prelude::*;
 
-// ─── Command ──────────────────────────────────────────────────────────────────
+// ─── EXIF metadata ────────────────────────────────────────────────────────────
+
+/// User-provided roll metadata to embed in exported JPEGs via EXIF tags.
+/// All fields are optional — missing or null values are silently skipped.
+#[derive(Debug, Deserialize, Default)]
+pub struct ExifMetadata {
+    /// Film camera body (e.g. "Nikon FM2"). Written to EXIF `Model`.
+    pub camera:     Option<String>,
+    /// Lens used (e.g. "Nikkor 50mm f/1.4"). Written to EXIF `LensModel`.
+    pub lens:       Option<String>,
+    /// Film stock display name (e.g. "Kodak Portra 400"). Written to `ImageDescription`.
+    pub film_stock: Option<String>,
+    /// Nominal ISO/ASA box speed. Written to EXIF `ISO`. Skipped when 0 or absent.
+    pub iso:        Option<u32>,
+    /// Unix milliseconds when the scan file was created (`frame.capturedAt`).
+    /// Converted to `"YYYY:MM:DD HH:MM:SS"` and written to `CreateDate`
+    /// (EXIF `DateTimeDigitized`) — the semantically correct tag for the
+    /// digitization timestamp of analog content.
+    /// `DateTimeOriginal` is intentionally not written: we don't know when the
+    /// analog frame was actually exposed.
+    pub scanned_at: Option<i64>,
+}
+
+/// Inject EXIF metadata into an already-written JPEG file at `path`.
+///
+/// Uses `little_exif` to build a fresh EXIF block with only the user-provided
+/// fields. No source EXIF is read or carried over — all scanner metadata
+/// (shutter speed, aperture, etc.) is from the digital scanning camera and
+/// therefore semantically incorrect for an analog film frame.
+///
+/// Failures are logged but do not propagate: a missing EXIF block must never
+/// cause the export to fail.
+fn inject_exif(path: &str, meta: &ExifMetadata) {
+    use little_exif::metadata::Metadata;
+    use little_exif::exif_tag::ExifTag;
+
+    let mut exif = Metadata::new();
+
+    // Software tag — always written so the file is identifiable.
+    exif.set_tag(ExifTag::Software("Rolloc".to_string()));
+
+    if let Some(camera) = meta.camera.as_deref().filter(|s| !s.is_empty()) {
+        exif.set_tag(ExifTag::Model(camera.to_string()));
+    }
+
+    if let Some(lens) = meta.lens.as_deref().filter(|s| !s.is_empty()) {
+        exif.set_tag(ExifTag::LensModel(lens.to_string()));
+    }
+
+    if let Some(film) = meta.film_stock.as_deref().filter(|s| !s.is_empty()) {
+        exif.set_tag(ExifTag::ImageDescription(film.to_string()));
+    }
+
+    if let Some(iso) = meta.iso.filter(|&v| v > 0) {
+        // ISO is an INT16U field; clamp to u16 range just in case.
+        exif.set_tag(ExifTag::ISO(vec![(iso.min(65535)) as u16]));
+    }
+
+    if let Some(ms) = meta.scanned_at {
+        // Convert unix milliseconds to EXIF datetime string "YYYY:MM:DD HH:MM:SS".
+        let secs = ms / 1000;
+        let dt = unix_secs_to_exif_datetime(secs);
+        // CreateDate = DateTimeDigitized — when the analog content was digitized.
+        exif.set_tag(ExifTag::CreateDate(dt));
+    }
+
+    if let Err(e) = exif.write_to_file(Path::new(path)) {
+        eprintln!("WARN inject_exif: failed to write EXIF to {path}: {e}");
+    }
+}
+
+/// Convert a Unix timestamp (seconds) to the EXIF datetime format
+/// `"YYYY:MM:DD HH:MM:SS"` using only `std` (no chrono dependency).
+fn unix_secs_to_exif_datetime(secs: i64) -> String {
+    // Days from Unix epoch to each month start (non-leap year)
+    const DAYS_IN_MONTH: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    let secs = secs.max(0) as u64;
+    let time_of_day = secs % 86400;
+    let total_days  = secs / 86400;
+
+    let hour = time_of_day / 3600;
+    let min  = (time_of_day % 3600) / 60;
+    let sec  = time_of_day % 60;
+
+    // Gregorian calendar calculation from day count.
+    let mut year = 1970u64;
+    let mut days = total_days;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let mut month = 1u64;
+    for (m, &d) in DAYS_IN_MONTH.iter().enumerate() {
+        let dim = if m == 1 && is_leap(year) { 29 } else { d };
+        if days < dim { break; }
+        days -= dim;
+        month += 1;
+    }
+    let day = days + 1;
+
+    format!("{year:04}:{month:02}:{day:02} {hour:02}:{min:02}:{sec:02}")
+}
+
+#[inline]
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+
 
 /// Encode an RGBA8 pixel buffer as JPEG and write it to `path`.
 ///
@@ -433,6 +546,7 @@ pub async fn export_native(
     skip_wb: Option<bool>,
     quality: u8,
     scale: Option<f32>,
+    metadata: Option<ExifMetadata>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         inner_export_native(
@@ -443,6 +557,7 @@ pub async fn export_native(
             skip_wb.unwrap_or(false),
             quality,
             scale.unwrap_or(1.0),
+            metadata.as_ref(),
         )
     })
     .await
@@ -457,6 +572,7 @@ fn inner_export_native(
     skip_wb: bool,
     quality: u8,
     scale: f32,
+    metadata: Option<&ExifMetadata>,
 ) -> Result<(), String> {
     // Validate scale factor — must be one of the supported values.
     let scale = if scale <= 0.0 || scale > 1.0 {
@@ -683,6 +799,11 @@ fn inner_export_native(
     std::fs::write(export_path, buf.into_inner())
         .map_err(|e| format!("failed to write file: {e}"))?;
 
+    // ── Inject EXIF metadata ─────────────────────────────────────────────────
+    if let Some(meta) = metadata {
+        inject_exif(export_path, meta);
+    }
+
     Ok(())
 }
 
@@ -728,6 +849,7 @@ pub async fn export_image_native(
     log_perc: Option<LogPercentiles>,
     quality: u8,
     scale: Option<f32>,
+    metadata: Option<ExifMetadata>,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         inner_export_image_native(
@@ -737,6 +859,7 @@ pub async fn export_image_native(
             log_perc.as_ref(),
             quality,
             scale.unwrap_or(1.0),
+            metadata.as_ref(),
         )
     })
     .await
@@ -750,6 +873,7 @@ fn inner_export_image_native(
     log_perc: Option<&LogPercentiles>,
     quality: u8,
     scale: f32,
+    metadata: Option<&ExifMetadata>,
 ) -> Result<(), String> {
     let scale = if scale <= 0.0 || scale > 1.0 {
         1.0_f32
@@ -851,6 +975,11 @@ fn inner_export_image_native(
 
     std::fs::write(export_path, buf.into_inner())
         .map_err(|e| format!("failed to write file: {e}"))?;
+
+    // ── Inject EXIF metadata ─────────────────────────────────────────────────
+    if let Some(meta) = metadata {
+        inject_exif(export_path, meta);
+    }
 
     Ok(())
 }
