@@ -11,6 +11,18 @@
     "dialog:allow-open",
     "dialog:allow-save",
     {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "allow": [
+        { "path": "**" }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "**" }
+      ]
+    },
+    {
       "identifier": "fs:allow-read-dir",
       "allow": [
         { "path": "**" }

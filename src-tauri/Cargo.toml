@@ -39,6 +39,7 @@ tokio = { version = "1", features = ["rt"] }
 # (b) full linear 16-bit demosaic for the editor pipeline.
 rawler = { version = "0.7", default-features = false }
 tauri-plugin-updater = "2.10.0"
+tauri-plugin-opener = "2.5.4"
 
 # Compile image-processing crates at full optimisation even in debug builds.
 # This brings dev-mode thumbnail performance to parity with release without

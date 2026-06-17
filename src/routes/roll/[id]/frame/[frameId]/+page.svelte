@@ -20,9 +20,9 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getRoll, getRollPath, updateRoll } from "$lib/db/rolls";
-  import { join, basename } from "@tauri-apps/api/path";
+  import { join } from "@tauri-apps/api/path";
   import { invoke } from "@tauri-apps/api/core";
-  import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+  import { startExport } from "$lib/jobs.svelte";
   import { getFrame, getFrames, putFrame } from "$lib/db/idb";
   import { readPreview, readThumb } from "$lib/fs/opfs";
   import { ensurePreview } from "$lib/image/thumbgen";
@@ -34,7 +34,7 @@
     DEFAULT_TRANSFORM,
   } from "$lib/types";
   import { isRawExtension } from "$lib/fs/directory";
-  import type { GpuPipeline, LogPercentiles } from "$lib/image/pipeline";
+  import type { GpuPipeline } from "$lib/image/pipeline";
   import type {
     Roll,
     Frame,
@@ -68,7 +68,6 @@
     ArrowFatUpIcon,
     CommandIcon,
     EyedropperSampleIcon,
-    CropIcon,
     ArrowArcLeftIcon,
     ArrowArcRightIcon,
   } from "phosphor-svelte";
@@ -244,7 +243,9 @@
         numeric: true,
         sensitivity: "base",
       });
-      frames = allFrames.slice().sort((a, b) => collator.compare(a.filename, b.filename));
+      frames = allFrames
+        .slice()
+        .sort((a, b) => collator.compare(a.filename, b.filename));
 
       if (!roll || !frame) {
         loading = false;
@@ -385,8 +386,7 @@
       (currentBitmap || currentRawBuffer) &&
       roll &&
       frame &&
-      !loading &&
-      !exporting
+      !loading
     ) {
       renderFrame();
     }
@@ -426,6 +426,8 @@
         .then(() => {
           // Capture histogram from lastLogPerc after render completes
           currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+          // Persist log percentiles so background export can match this preview.
+          persistLogPerc();
         })
         .catch((err: unknown) => {
           console.error("[frame] render error:", err);
@@ -465,7 +467,7 @@
     }
     frame.cachedLogPerc = cached;
     putFrame(structuredClone($state.snapshot(frame))).catch((err: unknown) => {
-      console.error('[frame] persistLogPerc failed:', err);
+      console.error("[frame] persistLogPerc failed:", err);
     });
   }
 
@@ -1066,143 +1068,38 @@
 
   // ─── Export ────────────────────────────────────────────────────────────────
 
-  let exporting = $state(false);
-  let exportError = $state<string | null>(null);
-  let exportSuccess = $state(false);
   /** Export scale factor: 0.25, 0.5, or 1 (default). */
   let exportScale = $state<0.25 | 0.5 | 1>(1);
 
   /**
    * Export the current frame as a full-quality JPEG.
    *
-   * RAW frames: call `export_native` which decodes the RAW at full sensor
-   * resolution and processes entirely in Rust at f32 precision — no GPU
-   * texture size limits, no 8-bit quantization until the final JPEG encode.
-   * Log percentiles from the preview render are passed so colour normalization
-   * matches what the user sees.
+   * Hands off to the global background-jobs queue (same path as batch export
+   * from the roll page): the file is written to `<rollDir>/exports/` at quality
+   * 100, and progress/results surface in the app-wide BackgroundJobsDock rather
+   * than inline here.  RAW frames go through `export_native`; JPEG/TIFF/PNG go
+   * through `export_image_native` — both at full source resolution.
    *
-   * JPEG/TIFF frames: re-render the existing bitmap through the GPU pipeline,
-   * readback pixels, and encode via `export_jpeg`.
+   * Cached log percentiles (persisted after each preview render) are reused so
+   * the export matches what the user sees in the editor.
    */
   async function exportFrame(): Promise<void> {
-    if (!pipeline || !frame || !roll || exporting) return;
+    if (!frame || !roll) return;
 
-    exporting = true;
-    exportError = null;
-    exportSuccess = false;
-
-    try {
-      const currentFrame = frame;
-      const currentRoll = roll;
-      const edit = resolveEdit(currentRoll, currentFrame);
-
-      // EXIF metadata embedded into the exported JPEG. Mirrors batch export.
-      const metadata = {
-        camera: currentRoll.camera || null,
-        lens: (currentRoll.lens ?? "") || null,
-        film_stock: currentRoll.filmStock || null,
-        iso: (currentRoll.iso ?? 0) > 0 ? currentRoll.iso : null,
-        scanned_at: currentFrame.capturedAt ?? null,
-      };
-
-      // ── Suggest a default filename ─────────────────────────────────
-      const stem = (
-        await basename(currentFrame.filename).catch(() => currentFrame.filename)
-      ).replace(/\.[^.]+$/, "");
-      const sizeSuffix =
-        exportScale === 0.25 ? "_sm" : exportScale === 0.5 ? "_md" : "";
-      const defaultFileName = `${stem}${sizeSuffix}.jpg`;
-
-      // ── Default to an "exports" subfolder inside the roll's source dir ──
-      let defaultPath = defaultFileName;
-      const rollDirPath = await getRollPath(rollId);
-      if (rollDirPath) {
-        const exportsDir = await join(rollDirPath, "exports");
-        defaultPath = await join(exportsDir, defaultFileName);
-      }
-
-      // ── Open native Save As dialog ─────────────────────────────────
-      const savePath = await saveDialog({
-        title: "Export JPEG",
-        defaultPath,
-        filters: [{ name: "JPEG Image", extensions: ["jpg", "jpeg"] }],
-      });
-
-      if (!savePath) {
-        // User cancelled.
-        return;
-      }
-
-      // Ensure .jpg extension on the path (dialog may or may not append it).
-      const finalPath =
-        savePath.endsWith(".jpg") || savePath.endsWith(".jpeg")
-          ? savePath
-          : `${savePath}.jpg`;
-
-      if (isRawExtension(currentFrame.filename)) {
-        // ── RAW path: native f32 export via Rust ───────────────────
-        const dirPath = await getRollPath(rollId);
-        if (!dirPath) {
-          throw new Error("Roll source directory not found.");
-        }
-        const absolutePath = await join(dirPath, currentFrame.filename);
-
-        // Reuse log percentiles from the preview render so the
-        // colour normalization is identical to what the user sees.
-        const logPerc: LogPercentiles | null = pipeline.lastLogPerc ?? null;
-
-        await invoke("export_native", {
-          sourcePath: absolutePath,
-          exportPath: finalPath,
-          edit,
-          logPerc,
-          skipWb: currentRoll.rollEdit.invert,
-          quality: 100,
-          scale: exportScale,
-          metadata,
-        });
-      } else {
-        // ── JPEG/TIFF path: full-res native export via Rust ────────
-        // Re-decode the original file at full resolution in Rust (mirrors
-        // the RAW path) and run the same f32 colour pipeline used for the
-        // preview. The cached `currentBitmap` is preview-resolution
-        // (≤PREVIEW_SIZE) and is intentionally NOT used here — that would
-        // silently cap exports of large composites (e.g. pano stitches).
-        const dirPath = await getRollPath(rollId);
-        if (!dirPath) {
-          throw new Error("Roll source directory not found.");
-        }
-        const absolutePath = await join(dirPath, currentFrame.filename);
-
-        // Reuse log percentiles from the preview render so colour
-        // normalization on the invert path is identical to the preview.
-        const logPerc: LogPercentiles | null = pipeline.lastLogPerc ?? null;
-
-        await invoke("export_image_native", {
-          sourcePath: absolutePath,
-          exportPath: finalPath,
-          edit,
-          logPerc,
-          quality: 100,
-          scale: exportScale,
-          metadata,
-        });
-      }
-
-      exportSuccess = true;
-      // Auto-clear the success message after 3 seconds.
-      setTimeout(() => {
-        exportSuccess = false;
-      }, 3000);
-
-      // Re-render at the current (preview) resolution so the canvas shows
-      // the editing preview again.
-      renderFrame();
-    } catch (err: unknown) {
-      exportError = err instanceof Error ? err.message : String(err);
-    } finally {
-      exporting = false;
+    const dirPath = await getRollPath(rollId);
+    if (!dirPath) {
+      console.error("[frame] export: roll source directory not found.");
+      return;
     }
+
+    startExport({
+      rollId,
+      rollLabel: roll.label,
+      roll,
+      frames: [frame],
+      dirPath,
+      scale: exportScale,
+    });
   }
 
   // ─── Navigation ────────────────────────────────────────────────────────────
@@ -1586,7 +1483,7 @@
 
     <!-- Edit panel sidebar -->
     <aside
-      class="w-72 shrink-0 border-l border-base-subtle bg-base
+      class="w-75 shrink-0 border-l border-base-subtle bg-base
 			       overflow-y-auto flex flex-col"
     >
       {#if roll && frame}
@@ -1594,10 +1491,7 @@
         <SidebarSection>
           <ExportControls
             {exportScale}
-            {exporting}
-            {exportSuccess}
-            {exportError}
-            disabled={exporting || loading || !pipeline}
+            disabled={loading || !pipeline}
             onExport={exportFrame}
             onScaleChange={(s) => (exportScale = s)}
           />
@@ -1639,33 +1533,18 @@
 
         <!-- Transform controls (rotation, flip, crop) -->
         <SidebarSection alternate>
-          <h3
-            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
-          >
-            Transform
-          </h3>
-          <ToggleButton
-            active={cropModeActive}
-            onclick={toggleCropMode}
-            title="Toggle crop mode (C)"
-            block
-          >
-            <CropIcon size={14} />
-            {cropModeActive ? "Exit Crop" : "Crop"}
-          </ToggleButton>
-          <div class="mt-base">
-            <TransformControls
-              value={effectiveTransform}
-              onChange={onTransformChange}
-              onCommit={onTransformCommit}
-              onFineRotateDrag={(dragging) => (fineRotating = dragging)}
-              onAutoStraighten={startHorizonDetection}
-              {detectingHorizon}
-              cropActive={cropModeActive}
-              {cropAspect}
-              onCropAspectChange={(a) => (cropAspect = a)}
-            />
-          </div>
+          <TransformControls
+            value={effectiveTransform}
+            onChange={onTransformChange}
+            onCommit={onTransformCommit}
+            onFineRotateDrag={(dragging) => (fineRotating = dragging)}
+            onAutoStraighten={startHorizonDetection}
+            {detectingHorizon}
+            onToggleCrop={toggleCropMode}
+            cropActive={cropModeActive}
+            {cropAspect}
+            onCropAspectChange={(a) => (cropAspect = a)}
+          />
         </SidebarSection>
 
         <!-- NegPy inversion controls (only when invert = true) -->

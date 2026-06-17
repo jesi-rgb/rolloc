@@ -9,9 +9,11 @@
  * The pure-Rust path means we don't need a `GpuPipeline` instance on the roll
  * page — batch export works without ever opening the per-frame editor.
  *
- * Non-RAW frames (JPEG/TIFF) are skipped: they require GPU readback to honour
- * edits, which would mean spinning up a full WebGPU pipeline here.  That's a
- * follow-up; for now the bar reports them as `skipped`.
+ * Non-RAW frames (JPEG/TIFF/PNG/…) are handled by `export_image_native`, which
+ * re-decodes the original at full resolution and runs the same f32 colour
+ * pipeline used for the preview — no GPU readback required.  This means both
+ * batch export and single-frame export (which now routes through here) cover
+ * every supported frame type identically.
  *
  * Files are always written to `<rollDirPath>/exports/<stem><suffix>.jpg`.
  * Existing files are silently overwritten (the OS-level "save dialog" approval
@@ -47,7 +49,7 @@ export interface BatchExportOptions {
 	/** Absolute path of the roll's source directory. */
 	dirPath:     string;
 	scale:       ExportScale;
-	/** JPEG quality 1–100. Defaults to 95 (matches single-frame export). */
+	/** JPEG quality 1–100. Defaults to 100 (matches single-frame export). */
 	quality?:    number;
 	/** Called after each frame finishes, with a fresh progress snapshot. */
 	onProgress?: (p: BatchExportProgress) => void;
@@ -91,7 +93,7 @@ export async function exportFramesBatch(
 		frames,
 		dirPath,
 		scale,
-		quality = 95,
+		quality = 100,
 		onProgress,
 		signal,
 	} = opts;
@@ -123,14 +125,6 @@ export async function exportFramesBatch(
 		// path-like values that may have crept in from older DB records.
 		const leaf = await basename(frame.filename).catch(() => frame.filename);
 
-		if (!isRawExtension(leaf)) {
-			progress.skipped++;
-			progress.processed++;
-			progress.current = null;
-			onProgress?.({ ...progress });
-			continue;
-		}
-
 		try {
 			const sourcePath = await join(dirPath, frame.filename);
 			const outName    = exportFilenameFor(leaf, scale);
@@ -146,19 +140,34 @@ export async function exportFramesBatch(
 				scanned_at: frame.capturedAt ?? null,
 			};
 
-			await invoke('export_native', {
-				sourcePath,
-				exportPath,
-				edit,
-				// Use cached log percentiles from the preview render if available,
-				// so the export matches what the user saw in the editor.  Falls back
-				// to null (Rust recomputes) for frames never opened in the editor.
-				logPerc: frame.cachedLogPerc ?? null,
-				skipWb:  roll.rollEdit.invert,
-				quality,
-				scale,
-				metadata,
-			});
+			// Use cached log percentiles from the preview render if available, so the
+			// export matches what the user saw in the editor.  Falls back to null
+			// (Rust recomputes from full-res) for frames never opened in the editor.
+			const logPerc = frame.cachedLogPerc ?? null;
+
+			if (isRawExtension(leaf)) {
+				await invoke('export_native', {
+					sourcePath,
+					exportPath,
+					edit,
+					logPerc,
+					skipWb: roll.rollEdit.invert,
+					quality,
+					scale,
+					metadata,
+				});
+			} else {
+				// JPEG/TIFF/PNG/… — full-res native re-decode + f32 pipeline.
+				await invoke('export_image_native', {
+					sourcePath,
+					exportPath,
+					edit,
+					logPerc,
+					quality,
+					scale,
+					metadata,
+				});
+			}
 
 			progress.exported++;
 		} catch (err: unknown) {

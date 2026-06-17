@@ -57,6 +57,8 @@ export interface ExportJob {
 	kind:       'export';
 	rollId:     string;
 	rollLabel:  string;
+	/** Absolute path of the roll's source directory (parent of `exports/`). */
+	dirPath:    string;
 	scale:      ExportScale;
 	startedAt:  number;
 	finishedAt: number | null;
@@ -141,6 +143,7 @@ export function startExport(opts: StartExportOptions): string {
 		kind:       'export',
 		rollId:     opts.rollId,
 		rollLabel:  opts.rollLabel,
+		dirPath:    opts.dirPath,
 		scale:      opts.scale,
 		startedAt:  Date.now(),
 		finishedAt: null,

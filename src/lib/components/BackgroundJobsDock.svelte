@@ -12,11 +12,14 @@
 	 * through the store's exported functions.
 	 */
 	import { goto } from "$app/navigation";
+	import { join } from "@tauri-apps/api/path";
+	import { openPath } from "@tauri-apps/plugin-opener";
 	import {
 		CheckIcon,
 		XIcon,
 		WarningIcon,
 		FilmStripIcon,
+		FolderOpenIcon,
 	} from "phosphor-svelte";
 	import { fly } from "svelte/transition";
 	import { cubicOut, quintIn, quintOut } from "svelte/easing";
@@ -62,6 +65,19 @@
 
 	function openRoll(job: ExportJob): void {
 		void goto(`/roll/${job.rollId}`);
+	}
+
+	/**
+	 * Open the roll's `exports/` folder in the OS file manager so the user can
+	 * see the JPEG(s) just written.
+	 */
+	async function revealExports(job: ExportJob): Promise<void> {
+		try {
+			const exportsDir = await join(job.dirPath, "exports");
+			await openPath(exportsDir);
+		} catch (err) {
+			console.error("[dock] failed to open exports folder:", err);
+		}
 	}
 </script>
 
@@ -235,6 +251,19 @@
 										</span>
 										failed
 									</span>
+								{/if}
+
+								{#if (job.result?.exported ?? 0) > 0}
+									<button
+										type="button"
+										onclick={() => revealExports(job)}
+										title="Open the exports folder"
+										class="flex items-center gap-1 ml-auto
+										       text-content-muted hover:text-primary transition"
+									>
+										<FolderOpenIcon size={12} />
+										Show in folder
+									</button>
 								{/if}
 							</div>
 						{/if}
