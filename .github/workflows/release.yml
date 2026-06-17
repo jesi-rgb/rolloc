@@ -55,6 +55,10 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # Pad to semver (MAJOR.MINOR.PATCH) if only two parts given (e.g. 0.5 -> 0.5.0)
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            VERSION="${VERSION}.0"
+          fi
           echo "Setting version to $VERSION"
           
           # Update tauri.conf.json
