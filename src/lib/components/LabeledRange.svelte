@@ -39,6 +39,8 @@
 		negativeColor?: string;
 		/** Hide the label + value header row (show only the slider). */
 		hideHeader?: boolean;
+		/** Render a taller (fatter) track — useful for prominent controls. */
+		fat?: boolean;
 	}
 
 	let {
@@ -61,6 +63,7 @@
 		trackColor,
 		negativeColor,
 		hideHeader = false,
+		fat = false,
 	}: Props = $props();
 
 	function fmt(v: number): string {
@@ -178,7 +181,7 @@
 {#snippet rangeInput(extraClass: string)}
 	<div
 		{id}
-		class="track {extraClass}"
+		class="track {extraClass} {fat ? 'fat' : ''}"
 		role="slider"
 		tabindex="0"
 		aria-label={label}
@@ -244,8 +247,7 @@
 			>
 		{/if}
 		{@render rangeInput("flex-1 min-w-0")}
-		<span
-			class="text-[10px] text-content font-mono tabular-nums w-10 text-right"
+		<span class="text-[10px] text-content font-mono tabular-nums text-right"
 			>{fmt(value)}</span
 		>
 	</div>
@@ -254,13 +256,18 @@
 <style>
 	.track {
 		position: relative;
-		height: 0.875rem; /* fatter than the previous 0.5rem */
+		height: 0.875rem;
 		border-radius: 0.3125rem;
 		border: 1px solid var(--color-base-subtle);
 		background-color: var(--color-base);
 		cursor: ew-resize;
 		touch-action: none;
 		overflow: hidden;
+	}
+
+	.track.fat {
+		height: 1.5rem;
+		border-radius: 0.5rem;
 	}
 
 	.track:focus-visible {

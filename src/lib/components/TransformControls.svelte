@@ -11,6 +11,7 @@
 		ArrowClockwiseIcon,
 		SpinnerIcon,
 		ArrowsClockwiseIcon,
+		CropIcon,
 	} from "phosphor-svelte";
 
 	interface Props {
@@ -29,6 +30,8 @@
 		onAutoStraighten?: () => void;
 		/** Whether horizon detection is currently in progress. */
 		detectingHorizon?: boolean;
+		/** Called when the user clicks the Crop button to toggle crop mode. */
+		onToggleCrop?: () => void;
 		/** When true, the crop aspect-ratio selector is shown (crop mode active). */
 		cropActive?: boolean;
 		/** Currently selected crop aspect ratio (drives the active button state). */
@@ -44,6 +47,7 @@
 		onFineRotateDrag,
 		onAutoStraighten,
 		detectingHorizon = false,
+		onToggleCrop,
 		cropActive = false,
 		cropAspect = null,
 		onCropAspectChange,
@@ -215,11 +219,41 @@
 	Rotation (90° buttons + fine slider), flip, and zoom controls.
 -->
 
-<div class="flex flex-col">
+<div class="flex flex-col gap-base">
+	<!-- ── Header: section title + inline reset ─────────────────────────────── -->
+	<div class="flex items-center justify-between">
+		<h3
+			class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
+		>
+			Transform
+		</h3>
+		{#if !isDefault}
+			<button
+				onclick={reset}
+				class="text-xs text-content-subtle hover:text-content transition"
+			>
+				Reset
+			</button>
+		{/if}
+	</div>
+
+	<!-- ── Crop toggle button ────────────────────────────────────────────────── -->
+	{#if onToggleCrop}
+		<ToggleButton
+			active={cropActive}
+			onclick={onToggleCrop}
+			title="Toggle crop mode (C)"
+			block
+		>
+			<CropIcon size={14} />
+			{cropActive ? "Exit Crop" : "Crop"}
+		</ToggleButton>
+	{/if}
+
 	<!-- ── Crop aspect ratio (only in crop mode) ────────────────────────────── -->
 	{#if cropActive}
 		<div
-			class="flex flex-col gap-xs mb-base"
+			class="flex flex-col gap-xs"
 			transition:slide={{ duration: 200, easing: cubicOut }}
 		>
 			<div class="flex items-center justify-between">
@@ -268,7 +302,6 @@
 		</div>
 	{/if}
 
-	<div class="flex flex-col gap-base">
 	<!-- ── Rotation group (buttons + fine slider) ───────────────────────────── -->
 	<div class="flex flex-col gap-xs">
 		<!-- 90° rotation + auto buttons -->
@@ -403,14 +436,4 @@
 		oncommit={commit}
 	/>
 
-	<!-- ── Reset ────────────────────────────────────────────────────────────── -->
-	{#if !isDefault}
-		<button
-			onclick={reset}
-			class="self-start text-xs text-content-subtle hover:text-content transition"
-		>
-			Reset transform
-		</button>
-	{/if}
-	</div>
 </div>

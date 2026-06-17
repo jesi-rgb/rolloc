@@ -19,7 +19,6 @@
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
 	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
-	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
 	import RollExportBar from "$lib/components/RollExportBar.svelte";
 	import { type ExportScale } from "$lib/export/batch";
 	import {
@@ -385,7 +384,7 @@
 	{:else}
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
 
-		<div class="relative h-full py-xl">
+		<div class="relative flex-1 min-h-0 py-xl">
 			<!-- Loading overlay — blocks interaction until all thumbs are ready -->
 			{#if !thumbsReady}
 				<div
@@ -420,9 +419,9 @@
 			{/if}
 
 			<!-- Grid — pointer events blocked by inert while loading -->
-			<div inert={!thumbsReady || undefined} class="h-full">
-				<VirtualGrid items={frames} gap={6} overscan={3}>
-					{#snippet item(frame, i)}
+			<div inert={!thumbsReady || undefined} class="overflow-y-auto h-full">
+				<div class="px-l grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-1.5">
+					{#each frames as frame, i (frame.id)}
 						<FrameThumb
 							{frame}
 							dirPath={dirPath!}
@@ -434,8 +433,8 @@
 								: selectFrame}
 							onDblClick={selecting ? undefined : openFrame}
 						/>
-					{/snippet}
-				</VirtualGrid>
+					{/each}
+				</div>
 			</div>
 		</div>
 
