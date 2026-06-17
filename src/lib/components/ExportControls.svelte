@@ -1,23 +1,12 @@
 <script lang="ts">
   interface Props {
     exportScale: 0.25 | 0.5 | 1;
-    exporting: boolean;
-    exportSuccess: boolean;
-    exportError: string | null;
     disabled: boolean;
     onExport: () => void;
     onScaleChange: (scale: 0.25 | 0.5 | 1) => void;
   }
 
-  let {
-    exportScale,
-    exporting,
-    exportSuccess,
-    exportError,
-    disabled,
-    onExport,
-    onScaleChange,
-  }: Props = $props();
+  let { exportScale, disabled, onExport, onScaleChange }: Props = $props();
 </script>
 
 <section>
@@ -70,28 +59,13 @@
 
     <button
       onclick={onExport}
-      disabled={disabled || exporting}
+      {disabled}
       class="w-full flex items-center justify-center gap-sm
                    px-sm py-xs rounded-b border text-sm transition
-                   {exporting
-        ? 'border-base-subtle text-content-muted cursor-wait'
-        : exportSuccess
-          ? 'border-base-subtle text-content-muted'
-          : 'border-primary text-primary hover:bg-primary/10 disabled:opacity-40 disabled:cursor-not-allowed'}"
+                   border-primary text-primary hover:bg-primary/10
+                   disabled:opacity-40 disabled:cursor-not-allowed"
     >
-      {#if exporting}
-        Exporting…
-      {:else if exportSuccess}
-        Saved successfully.
-      {:else}
-        Export to JPEG
-      {/if}
+      Export to JPEG
     </button>
   </div>
-
-  {#if exportError}
-    <p class="mt-sm text-xs text-red-500 break-all">
-      {exportError}
-    </p>
-  {/if}
 </section>
