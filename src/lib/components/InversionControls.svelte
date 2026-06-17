@@ -220,7 +220,7 @@
 	Shadows/Highlights, Toe, Shoulder).
 -->
 
-<div class="flex flex-col gap-l">
+<div class="flex flex-col gap-l select-none">
 	<!-- ── Film Type ───────────────────────────────────────────────────────── -->
 	<section>
 		<h4
@@ -341,38 +341,133 @@
 		/>
 	</section>
 
-	<!-- ── Density + Grade ─────────────────────────────────────────────────── -->
+	<!-- ── Brightness + Contrast ──────────────────────────────────────────── -->
+	<!--
+		Brightness is the visual inverse of density: brighter = lower density.
+		We display brightness = DEFAULT_DENSITY − density so that:
+		  • 0   = default exposure  (density 1.0)
+		  • +ve = brighter          (density < 1.0)
+		  • −ve = darker            (density > 1.0)
+		Range: [−9, +1] (mirrors the full 0–10 density range, centred on default).
+	-->
 	<section>
 		<h4
 			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
 		>
-			Print
+			Light
 		</h4>
-		<div class="flex flex-col gap-sm">
+		<div class="grid grid-cols-2 gap-sm">
 			<LabeledRange
-				id="inv-density"
-				label="Density"
-				min={0}
-				max={10}
+				id="inv-brightness"
+				label="Brightness"
+				min={DEFAULT_INVERSION_PARAMS.density - 4}
+				max={DEFAULT_INVERSION_PARAMS.density + 2}
 				step={0.01}
-				value={density}
-				defaultValue={DEFAULT_INVERSION_PARAMS.density}
+				signed
+				fat
+				value={DEFAULT_INVERSION_PARAMS.density - density}
+				defaultValue={0}
 				onchange={(v) => {
-					density = v;
+					density = DEFAULT_INVERSION_PARAMS.density - v;
 					emit();
 				}}
 				oncommit={commit}
 			/>
 			<LabeledRange
-				id="inv-grade"
-				label="Grade"
+				id="inv-contrast"
+				label="Contrast"
 				min={0}
 				max={10}
 				step={0.1}
+				fat
 				value={grade}
 				defaultValue={DEFAULT_INVERSION_PARAMS.grade}
 				onchange={(v) => {
 					grade = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
+		</div>
+	</section>
+
+	<!-- ── Color (Vibrance & Saturation) ──────────────────────────────────── -->
+	{#if filmType !== "BW"}
+		<section>
+			<h4
+				class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			>
+				Color
+			</h4>
+			<div class="grid grid-cols-2 gap-sm">
+				<LabeledRange
+					id="inv-vibrance"
+					label="Vibrance"
+					min={-1}
+					max={1}
+					step={0.01}
+					fat
+					value={vibrance}
+					defaultValue={DEFAULT_INVERSION_PARAMS.vibrance}
+					onchange={(v) => {
+						vibrance = v;
+						emit();
+					}}
+					oncommit={commit}
+					signed
+				/>
+				<LabeledRange
+					id="inv-saturation"
+					label="Saturation"
+					min={-1}
+					max={1}
+					step={0.01}
+					fat
+					value={saturation}
+					defaultValue={DEFAULT_INVERSION_PARAMS.saturation}
+					onchange={(v) => {
+						saturation = v;
+						emit();
+					}}
+					oncommit={commit}
+					signed
+				/>
+			</div>
+		</section>
+	{/if}
+
+	<!-- ── Detail (Clarity + Sharpening) ─────────────────────────────────── -->
+	<section>
+		<h4
+			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+		>
+			Detail
+		</h4>
+		<div class="flex flex-col gap-sm">
+			<LabeledRange
+				id="inv-clahe"
+				label="Clarity"
+				min={0}
+				max={1}
+				step={0.01}
+				value={claheStrength}
+				defaultValue={DEFAULT_INVERSION_PARAMS.claheStrength}
+				onchange={(v) => {
+					claheStrength = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
+			<LabeledRange
+				id="inv-sharpen"
+				label="Sharpen"
+				min={0}
+				max={1}
+				step={0.01}
+				value={sharpen}
+				defaultValue={DEFAULT_INVERSION_PARAMS.sharpen}
+				onchange={(v) => {
+					sharpen = v;
 					emit();
 				}}
 				oncommit={commit}
@@ -403,22 +498,6 @@
 				oncommit={commit}
 				signed
 			/>
-			<LabeledRange
-				id="inv-toe"
-				label="Toe"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={toe}
-				defaultValue={DEFAULT_INVERSION_PARAMS.toe}
-				onchange={(v) => {
-					toe = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-			/>
-
 			<!-- Shadow CMY tint -->
 			<div class="flex flex-col gap-xs">
 				<span class="text-xs text-content-subtle">Shadow tint</span>
@@ -495,22 +574,6 @@
 				oncommit={commit}
 				signed
 			/>
-			<LabeledRange
-				id="inv-shoulder"
-				label="Shoulder"
-				min={-1}
-				max={1}
-				step={0.01}
-				value={shoulder}
-				defaultValue={DEFAULT_INVERSION_PARAMS.shoulder}
-				onchange={(v) => {
-					shoulder = v;
-					emit();
-				}}
-				oncommit={commit}
-				signed
-			/>
-
 			<!-- Highlight CMY tint -->
 			<div class="flex flex-col gap-xs">
 				<span class="text-xs text-content-subtle">Highlight tint</span>
@@ -563,99 +626,6 @@
 					}}
 				/>
 			</div>
-		</div>
-	</section>
-
-	<!-- ── Local Contrast (CLAHE) ─────────────────────────────────────────── -->
-	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Local contrast
-		</h4>
-		<div class="flex flex-col gap-sm">
-			<LabeledRange
-				id="inv-clahe"
-				label="Clarity"
-				min={0}
-				max={1}
-				step={0.01}
-				value={claheStrength}
-				defaultValue={DEFAULT_INVERSION_PARAMS.claheStrength}
-				onchange={(v) => {
-					claheStrength = v;
-					emit();
-				}}
-				oncommit={commit}
-			/>
-		</div>
-	</section>
-
-	<!-- ── Color (Vibrance & Saturation) ──────────────────────────────────── -->
-	{#if filmType !== "BW"}
-		<section>
-			<h4
-				class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-			>
-				Color
-			</h4>
-			<div class="flex flex-col gap-sm">
-				<LabeledRange
-					id="inv-vibrance"
-					label="Vibrance"
-					min={-1}
-					max={1}
-					step={0.01}
-					value={vibrance}
-					defaultValue={DEFAULT_INVERSION_PARAMS.vibrance}
-					onchange={(v) => {
-						vibrance = v;
-						emit();
-					}}
-					oncommit={commit}
-					signed
-				/>
-				<LabeledRange
-					id="inv-saturation"
-					label="Saturation"
-					min={-1}
-					max={1}
-					step={0.01}
-					value={saturation}
-					defaultValue={DEFAULT_INVERSION_PARAMS.saturation}
-					onchange={(v) => {
-						saturation = v;
-						emit();
-					}}
-					oncommit={commit}
-					signed
-				/>
-			</div>
-		</section>
-	{/if}
-
-	<!-- ── Detail (Sharpening) ────────────────────────────────────────────── -->
-	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Detail
-		</h4>
-		<div class="flex flex-col gap-sm">
-			<LabeledRange
-				id="inv-sharpen"
-				label="Sharpen"
-				min={0}
-				max={1}
-				step={0.01}
-				value={sharpen}
-				defaultValue={DEFAULT_INVERSION_PARAMS.sharpen}
-				onchange={(v) => {
-					sharpen = v;
-					emit();
-				}}
-				oncommit={commit}
-			/>
 		</div>
 	</section>
 

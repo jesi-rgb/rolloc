@@ -204,7 +204,7 @@
 	/* Base surfaces — dark end of zinc */
 	--base: oklch(11% 0.005 264);
 	/* ≈ zinc-950 */
-	--base-muted: oklch(16% 0.006 264);
+	--base-muted: oklch(18% 0.006 264);
 	/* ≈ zinc-900 */
 	--base-subtle: oklch(22% 0.008 264);
 	/* ≈ zinc-800 */
