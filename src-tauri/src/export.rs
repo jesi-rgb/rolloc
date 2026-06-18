@@ -990,9 +990,11 @@ fn inner_export_image_native(
     };
 
     // ── Decode at full resolution ────────────────────────────────────────────
-    // `image::open` handles JPEG, TIFF (including 16-bit), PNG, BMP, WebP, …
+    // Handles JPEG, TIFF (including 16-bit), PNG, BMP, WebP, … with raised
+    // allocation limits so full-res 16-bit panos decode (the default 512 MiB
+    // `image` cap rejects them).
     // It does NOT auto-apply EXIF orientation, so we do it ourselves below.
-    let img = image::open(source_path).map_err(|e| format!("decode failed: {e}"))?;
+    let img = crate::decode::decode_image(source_path)?;
 
     // ── EXIF orientation (matches preview-generation path in thumb.rs) ──────
     let orientation = read_exif_orientation(source_path);
@@ -1002,19 +1004,46 @@ fn inner_export_image_native(
         img
     };
 
-    // ── Convert to sRGB-encoded RGB8, then sRGB-expand to linear f32 ────────
+    // ── sRGB-expand to linear f32 ──────────────────────────────────────────
     // This matches the GPU pipeline: when `isLinear = 0`, the invert shader
     // does sRGB→linear before any downstream stage. `process_image` expects
     // linear input (the RAW path produces linear from demosaic).
-    let rgb8 = img.to_rgb8();
-    let final_w = rgb8.width() as usize;
-    let final_h = rgb8.height() as usize;
+    //
+    // For 16-bit sources we expand directly from the 16-bit samples with a
+    // 65536-entry LUT so the full tonal precision survives into the f32
+    // pipeline.  This matters for C-41 negatives: the orange mask squeezes the
+    // blue channel into a tiny band near black, and an intermediate 8-bit
+    // round-trip (`to_rgb8`) would posterise it before the per-channel
+    // normalization stretch, reintroducing banding.  8-bit sources keep the
+    // fast 256-entry path.
+    let is_16bit = matches!(
+        img.color(),
+        image::ColorType::Rgb16
+            | image::ColorType::Rgba16
+            | image::ColorType::L16
+            | image::ColorType::La16
+    );
 
-    // Precompute an 8-bit sRGB→linear LUT (256 entries). Source pixels are u8.
-    let lut: [f32; 256] = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
-
-    let mut rgb_f32: Vec<f32> = rgb8.as_raw().par_iter().map(|&b| lut[b as usize]).collect();
-    drop(rgb8);
+    let (final_w, final_h, mut rgb_f32) = if is_16bit {
+        let rgb16 = img.to_rgb16();
+        let w = rgb16.width() as usize;
+        let h = rgb16.height() as usize;
+        // 65536-entry sRGB→linear LUT keyed on the 16-bit sample value.
+        let lut: Vec<f32> = (0..=u16::MAX)
+            .map(|v| srgb_to_linear(v as f32 / 65535.0))
+            .collect();
+        let f32s: Vec<f32> = rgb16.as_raw().par_iter().map(|&v| lut[v as usize]).collect();
+        (w, h, f32s)
+    } else {
+        let rgb8 = img.to_rgb8();
+        let w = rgb8.width() as usize;
+        let h = rgb8.height() as usize;
+        // 256-entry sRGB→linear LUT. Source pixels are u8.
+        let lut: [f32; 256] = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
+        let f32s: Vec<f32> = rgb8.as_raw().par_iter().map(|&b| lut[b as usize]).collect();
+        (w, h, f32s)
+    };
+    drop(img);
 
     // ── Process through the CPU pipeline (same code path as RAW export) ─────
     process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);

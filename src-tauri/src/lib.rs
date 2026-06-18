@@ -1,3 +1,4 @@
+pub mod decode;
 mod demosaic;
 mod export;
 mod process;

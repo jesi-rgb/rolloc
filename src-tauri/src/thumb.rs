@@ -400,7 +400,9 @@ pub fn apply_e6_normalize(img: &mut image::RgbImage) {
 
 fn inner_generate(path: String, max_px: u32, quality: u8, film_type: &str) -> Result<Vec<u8>, String> {
     // ── Decode ────────────────────────────────────────────────────────────────
-    let img = image::open(&path).map_err(|e| format!("decode failed: {e}"))?;
+    // Raised allocation limits so large 16-bit TIFFs (e.g. stitched panos)
+    // decode instead of failing the `image` crate's default 512 MiB cap.
+    let img = crate::decode::decode_image(&path)?;
 
     // ── EXIF orientation ──────────────────────────────────────────────────────
     let orientation = read_exif_orientation(&path);
