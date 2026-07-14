@@ -140,8 +140,14 @@ async function writeCache(
 	await writable.close();
 }
 
+// Preview cache file key. Version is baked into the filename so any change to
+// PREVIEW_SIZE, JPEG_QUALITY, or the encode pipeline automatically invalidates
+// stale cached previews while leaving thumbs untouched.
+const PREVIEW_VERSION = 2;
+const previewCacheFilename = (frameId: string): string => `${frameId}.v${PREVIEW_VERSION}.jpg`;
+
 export async function writePreview(frameId: string, blob: Blob): Promise<void> {
-	await writeCache(getPreviewsDir, `${frameId}.jpg`, blob);
+	await writeCache(getPreviewsDir, previewCacheFilename(frameId), blob);
 }
 
 export async function writeThumb(frameId: string, blob: Blob): Promise<void> {
@@ -167,7 +173,7 @@ async function readCache(
 }
 
 export async function readPreview(frameId: string): Promise<Blob | null> {
-	return readCache(getPreviewsDir, `${frameId}.jpg`);
+	return readCache(getPreviewsDir, previewCacheFilename(frameId));
 }
 
 export async function readThumb(frameId: string): Promise<Blob | null> {
@@ -190,6 +196,8 @@ async function removeCache(
 
 export async function deleteFrameCache(frameId: string): Promise<void> {
 	await Promise.all([
+		removeCache(getPreviewsDir, previewCacheFilename(frameId)),
+		// Older preview formats may still be around; clean them up too.
 		removeCache(getPreviewsDir, `${frameId}.jpg`),
 		removeCache(getThumbsDir, `${frameId}.jpg`),
 	]);
@@ -218,5 +226,10 @@ export async function thumbURL(frameId: string): Promise<string | null> {
 
 export async function previewURL(frameId: string): Promise<string | null> {
 	const blob = await readPreview(frameId);
+	return blob ? URL.createObjectURL(blob) : null;
+}
+
+export async function legacyUnversionedPreviewURL(frameId: string): Promise<string | null> {
+	const blob = await readCache(getPreviewsDir, `${frameId}.jpg`);
 	return blob ? URL.createObjectURL(blob) : null;
 }

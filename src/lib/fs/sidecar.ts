@@ -169,9 +169,15 @@ export async function writeThumb(rollPath: string, frameId: string, blob: Blob):
 	await writeFile(path, await blobToBytes(blob));
 }
 
+// Preview cache file key. Version is baked into the filename so any change to
+// PREVIEW_SIZE, JPEG_QUALITY, or the encode pipeline automatically invalidates
+// stale cached previews while leaving thumbs untouched.
+const PREVIEW_VERSION = 2;
+const previewCacheFilename = (frameId: string): string => `${frameId}.v${PREVIEW_VERSION}.jpg`;
+
 export async function writePreview(rollPath: string, frameId: string, blob: Blob): Promise<void> {
 	await ensureDirs(rollPath);
-	const path = await join(await previewsDirPath(rollPath), `${frameId}.jpg`);
+	const path = await join(await previewsDirPath(rollPath), previewCacheFilename(frameId));
 	await writeFile(path, await blobToBytes(blob));
 }
 
@@ -187,6 +193,16 @@ export async function readThumb(rollPath: string, frameId: string): Promise<Blob
 
 export async function readPreview(rollPath: string, frameId: string): Promise<Blob | null> {
 	try {
+		const path = await join(await previewsDirPath(rollPath), previewCacheFilename(frameId));
+		const bytes = await readFile(path);
+		return new Blob([bytes], { type: 'image/jpeg' });
+	} catch {
+		return null;
+	}
+}
+
+export async function readLegacyUnversionedPreview(rollPath: string, frameId: string): Promise<Blob | null> {
+	try {
 		const path = await join(await previewsDirPath(rollPath), `${frameId}.jpg`);
 		const bytes = await readFile(path);
 		return new Blob([bytes], { type: 'image/jpeg' });
@@ -197,10 +213,12 @@ export async function readPreview(rollPath: string, frameId: string): Promise<Bl
 
 export async function deleteFrameCache(rollPath: string, frameId: string): Promise<void> {
 	const thumbPath = await join(await thumbsDirPath(rollPath), `${frameId}.jpg`);
-	const previewPath = await join(await previewsDirPath(rollPath), `${frameId}.jpg`);
+	const previewPath = await join(await previewsDirPath(rollPath), previewCacheFilename(frameId));
+	const legacyPreviewPath = await join(await previewsDirPath(rollPath), `${frameId}.jpg`);
 	await Promise.all([
 		remove(thumbPath).catch(() => undefined),
 		remove(previewPath).catch(() => undefined),
+		remove(legacyPreviewPath).catch(() => undefined),
 	]);
 }
 
