@@ -20,7 +20,8 @@
  */
 
 import { thumbCache } from './thumb-cache';
-import { thumbURL } from '$lib/fs/opfs';
+import { thumbURL as opfsThumbURL } from '$lib/fs/opfs';
+import { thumbURL as sidecarThumbURL, isTauriEnv } from '$lib/fs/sidecar';
 import { getThumbURL } from './thumbgen';
 import { join } from '@tauri-apps/api/path';
 import type { FilmType } from '$lib/types';
@@ -36,8 +37,19 @@ interface QueueEntry {
 	priority: ThumbPriority;
 	/** Film processing mode for rolls. Null/undefined for libraries. */
 	filmType: FilmType | null;
+	/** Roll directory path — when set, cache lives in `<rollPath>/.rolloc-meta/`. */
+	rollPath: string | null;
 	resolve: (url: string) => void;
 	reject: (err: unknown) => void;
+}
+
+/**
+ * Reads a cached thumbnail URL, preferring the roll's sidecar folder when
+ * `rollPath` is given (and running under Tauri), otherwise OPFS.
+ */
+async function cachedThumbURL(imageId: string, rollPath: string | null): Promise<string | null> {
+	if (rollPath && isTauriEnv()) return sidecarThumbURL(rollPath, imageId);
+	return opfsThumbURL(imageId);
 }
 
 // ─── Progress state ───────────────────────────────────────────────────────────
@@ -106,10 +118,10 @@ function dequeueNext(): QueueEntry | undefined {
 }
 
 async function processEntry(entry: QueueEntry): Promise<void> {
-	const { imageId, absolutePath, filmType, resolve, reject } = entry;
+	const { imageId, absolutePath, filmType, rollPath, resolve, reject } = entry;
 	try {
-		// Layer 2: OPFS cache hit
-		const cachedUrl = await thumbURL(imageId);
+		// Layer 2: sidecar/OPFS cache hit
+		const cachedUrl = await cachedThumbURL(imageId, rollPath);
 		if (cachedUrl) {
 			thumbCache.set(imageId, cachedUrl);
 			if (!_countedAsCached.has(imageId)) {
@@ -124,7 +136,7 @@ async function processEntry(entry: QueueEntry): Promise<void> {
 		// Layer 3: generate from source (native Tauri path preferred)
 		thumbQueueProgress.generating++;
 		notifyProgress();
-		const url = await getThumbURL(imageId, { absolutePath }, filmType);
+		const url = await getThumbURL(imageId, { absolutePath }, filmType, rollPath ?? undefined);
 		thumbCache.set(imageId, url);
 		if (!_countedAsCached.has(imageId)) {
 			_countedAsCached.add(imageId);
@@ -171,12 +183,16 @@ function maybeSpawnWorker(): void {
  *                     - 'BW'  — B&W negative (inversion + grayscale)
  *                     - 'E6'  — slide/reversal (normalize only, no inversion)
  *                     - null/undefined — no processing (for libraries)
+ * @param rollPath     Absolute path to the roll's directory. When provided
+ *                     (and running under Tauri), the cache lives in
+ *                     `<rollPath>/.rolloc-meta/` instead of OPFS. Omit for libraries.
  */
 export function requestThumb(
 	imageId: string,
 	absolutePath: string,
 	priority: ThumbPriority = 'high',
 	filmType: FilmType | null = null,
+	rollPath: string | null = null,
 ): Promise<string> {
 	// Layer 1: module-level cache — synchronous
 	const cached = thumbCache.get(imageId);
@@ -189,7 +205,7 @@ export function requestThumb(
 	if (existing) return existing;
 
 	const promise = new Promise<string>((resolve, reject) => {
-		queue.push({ imageId, absolutePath, priority, filmType, resolve, reject });
+		queue.push({ imageId, absolutePath, priority, filmType, rollPath, resolve, reject });
 		// Only increment total if this ID was not pre-counted by initThumbQueueForLibrary.
 		if (!_initialisedIds.has(imageId)) {
 			thumbQueueProgress.total++;
@@ -237,7 +253,10 @@ export function resetThumbQueueProgress(): void {
  * `total`, and uses `_countedAsCached` so `processEntry` completions that race
  * with the OPFS scan do not double-count `cached`.
  */
-export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void> {
+export async function initThumbQueueForLibrary(
+	imageIds: string[],
+	rollPath: string | null = null,
+): Promise<void> {
 	thumbQueueProgress.total      = imageIds.length;
 	thumbQueueProgress.cached     = 0;
 	thumbQueueProgress.generating = 0;
@@ -246,10 +265,10 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
 	for (const id of imageIds) _initialisedIds.add(id);
 	notifyProgress();
 
-	// Check in-memory cache synchronously first, then fire all OPFS reads
-	// concurrently. OPFS supports parallel reads on separate files and this
-	// warms the cache as fast as possible so IntersectionObserver hits are
-	// served from memory rather than waiting on sequential IO.
+	// Check in-memory cache synchronously first, then fire all sidecar/OPFS
+	// reads concurrently. Both support parallel reads on separate files and
+	// this warms the cache as fast as possible so IntersectionObserver hits
+	// are served from memory rather than waiting on sequential IO.
 	await Promise.all(
 		imageIds.map(async (id) => {
 			if (_countedAsCached.has(id)) return;
@@ -259,7 +278,7 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
 				notifyProgress();
 				return;
 			}
-			const url = await thumbURL(id);
+			const url = await cachedThumbURL(id, rollPath);
 			if (url) {
 				thumbCache.set(id, url);
 				_countedAsCached.add(id);
@@ -289,11 +308,15 @@ export async function initThumbQueueForLibrary(imageIds: string[]): Promise<void
  *                 - 'BW'  — B&W negative (inversion + grayscale)
  *                 - 'E6'  — slide/reversal (normalize only, no inversion)
  *                 - null/undefined — no processing (for libraries)
+ * @param useSidecar When true, `dirPath` is treated as a roll's own directory
+ *                 and the cache is read/written to `<dirPath>/.rolloc-meta/`
+ *                 instead of OPFS. Pass false for libraries.
  */
 export async function prefetchThumbs(
 	images: Array<{ id: string; relativePath: string; filmType?: FilmType | null }>,
 	dirPath: string,
 	filmType: FilmType | null = null,
+	useSidecar = false,
 ): Promise<void> {
 	const READ_CONCURRENCY = 4;
 
@@ -311,7 +334,13 @@ export async function prefetchThumbs(
 				try {
 					const absolutePath = await join(dirPath, image.relativePath);
 					// Per-image filmType overrides the default if provided
-					void requestThumb(image.id, absolutePath, 'low', image.filmType ?? filmType);
+					void requestThumb(
+						image.id,
+						absolutePath,
+						'low',
+						image.filmType ?? filmType,
+						useSidecar ? dirPath : null,
+					);
 				} catch (err) {
 					console.error(`[prefetchThumbs] Failed to build path for ${image.relativePath}:`, err);
 				}

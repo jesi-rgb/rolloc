@@ -19,14 +19,19 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { getRoll, getRollPath, updateRoll } from "$lib/db/rolls";
+  import { getRoll, getRollPath, updateRoll, putFrame } from "$lib/db/rolls";
   import { join } from "@tauri-apps/api/path";
   import { invoke } from "@tauri-apps/api/core";
   import { startExport } from "$lib/jobs.svelte";
-  import { getFrame, getFrames, putFrame } from "$lib/db/idb";
+  import { getFrame, getFrames } from "$lib/db/idb";
   import { readPreview, readThumb } from "$lib/fs/opfs";
+  import { readPreview as readSidecarPreview, readThumb as readSidecarThumb, isTauriEnv } from "$lib/fs/sidecar";
   import { ensurePreview } from "$lib/image/thumbgen";
-  import { createPipeline, parseRawDecodeBuffer } from "$lib/image/pipeline";
+  import {
+    createPipeline,
+    parseRawDecodeBuffer,
+    parseDecodeImageRgbBuffer,
+  } from "$lib/image/pipeline";
   import {
     resolveEdit,
     DEFAULT_INVERSION_PARAMS,
@@ -115,6 +120,8 @@
   let currentBitmap = $state<ImageBitmap | null>(null);
   /** Raw binary payload from `raw_decode`; non-null only for RAW frames. */
   let currentRawBuffer = $state<ArrayBuffer | null>(null);
+  /** Decoded RGBA8 binary payload from `decode_image_rgba`; non-null only when editing non-RAW frames in Tauri. */
+  let currentDecodedBuffer = $state<ArrayBuffer | null>(null);
   /** Original image dimensions (before any transforms). */
   let originalWidth = $state(1);
   let originalHeight = $state(1);
@@ -288,6 +295,7 @@
 
         currentBitmap?.close();
         currentBitmap = null;
+        currentDecodedBuffer = null;
         currentRawBuffer = rawBuffer;
 
         // Track original dimensions for crop overlay coordinate transforms
@@ -338,35 +346,71 @@
 
         loading = false;
       } else {
-        // JPEG / TIFF path — generate preview blob → ImageBitmap.
-        let blob: Blob | null = null;
+        // JPEG / TIFF path — render straight from the original file when
+        // running under Tauri. This bypasses the lossy cached preview so the
+        // editor shows the clearest possible image, capped only by the GPU
+        // texture limit.
+        let directBuffer: ArrayBuffer | null = null;
+        let fallbackBitmap: ImageBitmap | null = null;
 
-        if (dirPath) {
+        if (dirPath && isTauriEnv()) {
           try {
             const absolutePath = await join(dirPath, frame.filename);
-            blob = await ensurePreview(frame.id, { absolutePath });
-          } catch {
-            // File missing — try OPFS cache.
+            const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
+            directBuffer = await invoke<ArrayBuffer>("decode_image_rgba", {
+              path: absolutePath,
+              maxPx: gpuLimit,
+            });
+          } catch (err) {
+            console.warn(
+              "[frame] Direct decode failed, falling back to cached preview:",
+              err,
+            );
           }
         }
 
-        if (!blob) blob = await readPreview(frame.id);
-        if (!blob) blob = await readThumb(frame.id);
+        if (directBuffer) {
+          const { width: decW, height: decH } = parseDecodeImageRgbBuffer(directBuffer);
+          currentBitmap?.close();
+          currentBitmap = null;
+          currentRawBuffer = null;
+          currentDecodedBuffer = directBuffer;
+          originalWidth = decW;
+          originalHeight = decH;
+        } else {
+          // Fallback to cached preview blob → ImageBitmap (browser / missing file).
+          let blob: Blob | null = null;
 
-        if (!blob) {
-          renderError =
-            "No preview cached for this frame. Open the roll to generate thumbnails first.";
-          loading = false;
-          return;
+          if (dirPath) {
+            try {
+              const absolutePath = await join(dirPath, frame.filename);
+              blob = await ensurePreview(frame.id, { absolutePath }, undefined, dirPath);
+            } catch {
+              // File missing — try sidecar/OPFS cache.
+            }
+          }
+
+          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarPreview(dirPath, frame.id);
+          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarThumb(dirPath, frame.id);
+          if (!blob) blob = await readPreview(frame.id);
+          if (!blob) blob = await readThumb(frame.id);
+
+          if (!blob) {
+            renderError =
+              "No preview cached for this frame. Open the roll to generate thumbnails first.";
+            loading = false;
+            return;
+          }
+
+          fallbackBitmap = await createImageBitmap(blob);
+          currentBitmap?.close();
+          currentBitmap = fallbackBitmap;
+          currentRawBuffer = null;
+          currentDecodedBuffer = null;
+          // Track original dimensions for crop overlay coordinate transforms
+          originalWidth = fallbackBitmap.width;
+          originalHeight = fallbackBitmap.height;
         }
-
-        const newBitmap = await createImageBitmap(blob);
-        currentBitmap?.close();
-        currentBitmap = newBitmap;
-        currentRawBuffer = null;
-        // Track original dimensions for crop overlay coordinate transforms
-        originalWidth = newBitmap.width;
-        originalHeight = newBitmap.height;
       }
 
       loading = false;
@@ -383,7 +427,7 @@
   $effect(() => {
     if (
       pipeline &&
-      (currentBitmap || currentRawBuffer) &&
+      (currentBitmap || currentRawBuffer || currentDecodedBuffer) &&
       roll &&
       frame &&
       !loading
@@ -412,6 +456,22 @@
         })
         .catch((err: unknown) => {
           console.error("[frame] renderRaw error:", err);
+          renderError = err instanceof Error ? err.message : String(err);
+        });
+    } else if (currentDecodedBuffer) {
+      console.debug(
+        "[frame] renderFrame: decoded RGBA path, byteLength =",
+        currentDecodedBuffer.byteLength,
+      );
+      pipeline
+        .renderDecodedRgba(edit, currentDecodedBuffer)
+        .then(() => {
+          // Capture histogram from lastLogPerc after render completes
+          currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
+          persistLogPerc();
+        })
+        .catch((err: unknown) => {
+          console.error("[frame] renderDecodedRgba error:", err);
           renderError = err instanceof Error ? err.message : String(err);
         });
     } else if (currentBitmap) {

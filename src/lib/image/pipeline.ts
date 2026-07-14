@@ -812,11 +812,42 @@ export function parseRawDecodeBuffer(buffer: ArrayBuffer): RawDecodeResult {
 	return { width, height, pixels, meta };
 }
 
+/** Parsed result from the `decode_image_rgba` Tauri command. */
+export interface DecodeImageRgbResult {
+	width: number;
+	height: number;
+	/** Uint8ClampedArray view of the RGBA pixel data (length = width * height * 4). */
+	pixels: Uint8ClampedArray;
+}
+
+/**
+ * Parse the binary payload returned by the `decode_image_rgba` Tauri command.
+ *
+ * Layout:
+ *   [0..4]   width  : u32 LE
+ *   [4..8]   height : u32 LE
+ *   [8 .. ]  RGBA u8 bytes
+ */
+export function parseDecodeImageRgbBuffer(buffer: ArrayBuffer): DecodeImageRgbResult {
+	const view = new DataView(buffer);
+	const width = view.getUint32(0, true);
+	const height = view.getUint32(4, true);
+	const pixelsOffset = 8;
+	const pixels = new Uint8ClampedArray(buffer, pixelsOffset, width * height * 4);
+	return { width, height, pixels };
+}
+
 export interface GpuPipeline {
 	/**
 	 * Re-render the canvas from a JPEG/TIFF source (ImageBitmap, sRGB-encoded).
 	 */
 	render(edit: EffectiveEdit, bitmap: ImageBitmap): Promise<void>;
+	/**
+	 * Re-render the canvas from a decoded-image RGBA8 buffer returned by the
+	 * `decode_image_rgba` Tauri command. This avoids the lossy cached JPEG
+	 * preview and renders straight from the original file.
+	 */
+	renderDecodedRgba(edit: EffectiveEdit, rgbaBuffer: ArrayBuffer): Promise<void>;
 	/**
 	 * Re-render the canvas from a RAW linear source.
 	 * `rawBuffer` is the ArrayBuffer returned by the `raw_decode` Tauri command.
@@ -2105,8 +2136,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				usage: GPUBufferUsage.STORAGE,
 			});
 		}
-		// Pre-transform texture at source resolution (tone curve renders here when transform is active)
-		preTransformTexture?.destroy();
+	// Pre-transform texture at source resolution (tone curve renders here when transform is active).
+	// After ensureRgba8Source sets sourceTexture, the non-null assertion below is safe.
+	preTransformTexture?.destroy();
 		preTransformTexture = device.createTexture({
 			size: [srcW, srcH],
 			format: 'rgba16float',
@@ -2135,25 +2167,34 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	// ─────────────────────────────────────────────────────────────────────────
 
+	/**
+	 * Shared setup: ensure source texture is `rgba8unorm` at (w,h) and upload
+	 * the given RGBA u8 pixel data. Used by `render` (from ImageBitmap) and
+	 * `renderDecodedRgba` (from Tauri decode command).
+	 */
+	function ensureRgba8Source(w: number, h: number): void {
+		sourceTexture?.destroy();
+		sourceTexture = device.createTexture({
+			size: [w, h],
+			format: 'rgba8unorm',
+			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+		});
+		ensureIntermediates(w, h, true);
+	}
+
 	async function render(edit: EffectiveEdit, bitmap: ImageBitmap): Promise<void> {
 		const w = bitmap.width;
 		const h = bitmap.height;
 
 		// Re-upload source texture only when the bitmap changes
 		if (bitmap !== lastBitmap) {
-			sourceTexture?.destroy();
-			sourceTexture = device.createTexture({
-				size: [w, h],
-				format: 'rgba8unorm',
-				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-			});
-			device.queue.copyExternalImageToTexture(
-				{ source: bitmap },
-				{ texture: sourceTexture },
-				[w, h],
-			);
-			lastBitmap = bitmap;
-			ensureIntermediates(w, h, true);
+		ensureRgba8Source(w, h);
+		device.queue.copyExternalImageToTexture(
+			{ source: bitmap },
+			{ texture: sourceTexture! },
+			[w, h],
+		);
+		lastBitmap = bitmap;
 		}
 
 		// Compute log percentiles for the NegPy normalization pass.
@@ -2165,7 +2206,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// inputs (the bitmap, plus filmType/autoLevels) don't change while the
 		// user drags sliders, so this is a no-op on all but the first render for
 		// a given bitmap. Without the cache, every slider tick paid for a full
-		// GPU→CPU readback and a multi-million-element loop (see bitmapToF32Pixels).
+		// GPU→CPU readback plus a multi-million-element loop (see bitmapToF32Pixels).
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
 			const filmType = edit.inversionParams.filmType;
@@ -2195,6 +2236,60 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			}
 
 			logPerc = cachedInvertLogPerc;
+		}
+
+		await runMainPasses(edit, w, h, false, logPerc);
+	}
+
+	// ─── Decoded-image render path ────────────────────────────────────────────
+
+	async function renderDecodedRgba(edit: EffectiveEdit, rgbaBuffer: ArrayBuffer): Promise<void> {
+		const { width: w, height: h, pixels } = parseDecodeImageRgbBuffer(rgbaBuffer);
+
+		// Invalidate ImageBitmap cache so the next render() call re-uploads.
+		lastBitmap = null;
+		cachedF32Bitmap = null;
+		cachedF32Pixels = null;
+		cachedInvertLogPerc = null;
+
+		ensureRgba8Source(w, h);
+		// bytesPerRow must be 256-aligned for writeTexture.
+		const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+		let uploadData: ArrayBuffer;
+		if (bytesPerRow === w * 4) {
+			uploadData = (pixels.buffer as ArrayBuffer).slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+		} else {
+			const buf = new ArrayBuffer(bytesPerRow * h);
+			const dst = new Uint8Array(buf);
+			for (let row = 0; row < h; row++) {
+				dst.set(
+					new Uint8Array(pixels.buffer, pixels.byteOffset + row * w * 4, w * 4),
+					row * bytesPerRow,
+				);
+			}
+			uploadData = buf;
+		}
+
+		device.queue.writeTexture(
+			{ texture: sourceTexture! },
+			uploadData,
+			{ bytesPerRow },
+			[w, h],
+		);
+
+		// Compute log percentiles for the NegPy normalization pass.
+		let logPerc: LogPercentiles | null = null;
+		if (edit.invert) {
+			const f32 = new Float32Array(pixels.length);
+			const u8 = pixels as Uint8ClampedArray;
+			for (let i = 0; i < pixels.length; i++) {
+				f32[i] = u8[i] / 255.0;
+			}
+			logPerc = computeLogPercentilesFromF32(
+				f32, w, h, 8, undefined,
+				edit.inversionParams.filmType,
+				edit.inversionParams.autoLevels,
+			);
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -2370,6 +2465,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	return {
 		render,
+		renderDecodedRgba,
 		renderRaw,
 		readPixels,
 		destroy,

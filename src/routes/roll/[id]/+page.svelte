@@ -11,8 +11,8 @@
 	import { onMount, onDestroy } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { getRoll, getRollPath } from "$lib/db/rolls";
-	import { getFrames, putFrame } from "$lib/db/idb";
+	import { getRoll, getRollPath, putFrame } from "$lib/db/rolls";
+	import { getFrames } from "$lib/db/idb";
 	import type { Roll, Frame, FrameFlag, FilmType } from "$lib/types";
 	import { DEFAULT_INVERSION_PARAMS, frameHasEdits } from "$lib/types";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
@@ -204,6 +204,8 @@
 					filmType: f.frameEdit.inversionParams?.filmType ?? DEFAULT_INVERSION_PARAMS.filmType,
 				})),
 				dirPath,
+				null,
+				true,
 			);
 		}
 	});

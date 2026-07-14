@@ -84,7 +84,7 @@
 			// requestThumb routes through the worker pool + LRU cache.
 			// The cache owns the object URL — do NOT revoke it here.
 			// Pass the frame's film type for correct processing.
-			const objUrl = await requestThumb(frame.id, absolutePath, "high", getFilmType());
+			const objUrl = await requestThumb(frame.id, absolutePath, "high", getFilmType(), dirPath);
 			url = objUrl;
 			status = "ready";
 		} catch {
