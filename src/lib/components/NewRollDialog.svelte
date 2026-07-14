@@ -82,7 +82,9 @@
 		error = '';
 		try {
 			if (foundSidecar) {
-				const roll = await restoreRoll(foundSidecar, dirPath);
+				// Snapshot the reactive `$state` proxy to a plain object before it
+				// crosses into the db layer (IndexedDB can't structured-clone a proxy).
+				const roll = await restoreRoll($state.snapshot(foundSidecar) as SidecarMeta, dirPath);
 				onCreated(roll);
 				return;
 			}

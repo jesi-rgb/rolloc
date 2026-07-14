@@ -14,8 +14,9 @@ import {
 	getFrames,
 	putFrame as idbPutFrame,
 	putFrames as idbPutFrames,
+	deleteFrame as idbDeleteFrame,
 } from './idb';
-import { listImageFiles, verifyPermission } from '$lib/fs/directory';
+import { listImageFiles, verifyPermission, isIgnoredPath } from '$lib/fs/directory';
 import type { Roll, Frame, FilmType } from '$lib/types';
 import { DEFAULT_FRAME_EDIT, DEFAULT_ROLL_EDIT, DEFAULT_INVERSION_PARAMS } from '$lib/types';
 import {
@@ -127,22 +128,43 @@ export async function checkForSidecar(path: string): Promise<SidecarMeta | null>
  * Reuses the original roll/frame ids from the sidecar so the roll is
  * recognized as the same project on reopen. Reconciles the sidecar's frame
  * list against a fresh directory scan:
+ *   - frames whose `filename` points inside an ignored directory (`exports/`,
+ *     `.rolloc-meta/`) are dropped and their IDB records deleted — these are
+ *     stale entries from before directory scanning excluded generated data
+ *     (see `isIgnoredPath`), never legitimate source frames
  *   - files present on disk but not in the sidecar are appended as new frames
- *   - frames in the sidecar whose file is no longer on disk are kept but
- *     flagged 'missing' rather than silently dropped
+ *   - remaining frames in the sidecar whose file is no longer on disk are
+ *     kept but flagged 'missing' rather than silently dropped
  *
  * Writes the reconciled roll+frames back into IndexedDB (the local index)
  * and refreshes the sidecar's `meta.json` to reflect the reconciliation.
  */
 export async function restoreRoll(meta: SidecarMeta, path: string): Promise<Roll> {
+	// De-proxy: callers may pass a Svelte 5 `$state` proxy (e.g. from the new
+	// roll dialog). IndexedDB `.put()` structured-clones its argument and throws
+	// a DataCloneError ("The object can not be cloned." on WKWebView) when given
+	// a reactive proxy. A JSON round-trip is lossless here because SidecarMeta is
+	// pure JSON, and yields plain, cloneable objects.
+	meta = JSON.parse(JSON.stringify(meta)) as SidecarMeta;
+
+	// Drop stale frames that point into `exports/` or `.rolloc-meta/` — these
+	// were only ever created by an older version of the scanner and are
+	// never legitimate source frames. Purge their IDB records too so they
+	// don't linger after being dropped from the reconciled list below.
+	const staleFrames = meta.frames.filter((f) => isIgnoredPath(f.filename));
+	const cleanFrames = meta.frames.filter((f) => !isIgnoredPath(f.filename));
+	if (staleFrames.length) {
+		await Promise.all(staleFrames.map((f) => idbDeleteFrame(f.id)));
+	}
+
 	const files = await listImageFiles(path);
 	const byRelPath = new Map(files.map((f) => [f.relativePath, f]));
 
-	const existingByFilename = new Map(meta.frames.map((f) => [f.filename, f]));
+	const existingByFilename = new Map(cleanFrames.map((f) => [f.filename, f]));
 
 	// Keep existing frames (in their original order/index), flagging any whose
 	// backing file is no longer present on disk.
-	const reconciled: Frame[] = meta.frames.map((f) => {
+	const reconciled: Frame[] = cleanFrames.map((f) => {
 		const stillExists = byRelPath.has(f.filename);
 		const hasMissingFlag = f.flags.includes('missing');
 		if (stillExists === !hasMissingFlag) return f;
