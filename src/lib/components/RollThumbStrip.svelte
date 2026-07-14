@@ -2,7 +2,8 @@
 	import { onDestroy, onMount } from "svelte";
 	import { getFrames } from "$lib/db/idb";
 	import { getRollPath } from "$lib/db/rolls";
-	import { thumbURL } from "$lib/fs/opfs";
+	import { thumbURL as opfsThumbURL } from "$lib/fs/opfs";
+	import { thumbURL as sidecarThumbURL, isTauriEnv } from "$lib/fs/sidecar";
 	import { getThumbURL } from "$lib/image/thumbgen";
 	import { join } from "@tauri-apps/api/path";
 	import type { Frame } from "$lib/types";
@@ -35,22 +36,24 @@
 		for (let i = 0; i < frames.length; i++) {
 			const frame = frames[i];
 
-			// Try OPFS cache first (no path needed)
-			let url = await thumbURL(frame.id);
+			// Lazily acquire the directory path so we can check the sidecar cache first.
+			if (!dirPath) dirPath = await getRollPath(rollId);
 
-			if (!url) {
-				// Lazily acquire the directory path
-				if (!dirPath) dirPath = await getRollPath(rollId);
-				if (dirPath) {
-					try {
-						const absolutePath = await join(
-							dirPath,
-							frame.filename,
-						);
-						url = await getThumbURL(frame.id, { absolutePath });
-					} catch {
-						// leave null — thumbnail stays as skeleton
-					}
+			// Try sidecar (if we know the roll path) or OPFS cache first.
+			let url =
+				dirPath && isTauriEnv()
+					? await sidecarThumbURL(dirPath, frame.id)
+					: await opfsThumbURL(frame.id);
+
+			if (!url && dirPath) {
+				try {
+					const absolutePath = await join(
+						dirPath,
+						frame.filename,
+					);
+					url = await getThumbURL(frame.id, { absolutePath }, undefined, dirPath);
+				} catch {
+					// leave null — thumbnail stays as skeleton
 				}
 			}
 

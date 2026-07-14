@@ -698,6 +698,18 @@ fn inner_export_native(
     let blacks = raw.blacklevel.as_bayer_array();
     let whites = raw.whitelevel.as_bayer_array();
 
+    // Usable image area (excludes masked/black sensor borders). Matches the
+    // logic in `raw_decode` (raw.rs): the full sensor buffer includes
+    // optically-black edge columns/rows that invert to a bright white band, so
+    // the demosaicked output is cropped to this rectangle further below.
+    let usable = raw.crop_area.or(raw.active_area);
+    let (crop_x, crop_y, crop_w, crop_h) = match usable {
+        Some(r) if r.d.w > 0 && r.d.h > 0 && r.p.x + r.d.w <= pw && r.p.y + r.d.h <= ph => {
+            (r.p.x, r.p.y, r.d.w, r.d.h)
+        }
+        _ => (0usize, 0usize, pw, ph),
+    };
+
     // As-shot WB (same logic as raw_decode in raw.rs)
     let wb_raw = raw.wb_coeffs;
     let wb_g = if wb_raw[1].is_finite() && wb_raw[1] > 0.001 {
@@ -797,6 +809,44 @@ fn inner_export_native(
             eprintln!("DEBUG export: superpixel output {}x{}", result.0, result.1);
             result
         }
+    };
+
+    // ── Crop to the usable sensor area ───────────────────────────────────────
+    // Map the usable sensor rectangle into demosaic-output coordinates and drop
+    // the masked border (which would otherwise invert to a bright white band).
+    // Different demosaic paths trim a border or downsample, so account for the
+    // per-path origin offset (`off`) and pixel divisor (`div`).
+    let (off_x, off_y, div_x, div_y) = if raw.cpp == 3 {
+        (0usize, 0usize, 1usize, 1usize)
+    } else {
+        let cfa = &raw.camera.cfa;
+        if (cfa.width == 2 && cfa.height == 2) || (cfa.width == 6 && cfa.height == 6) {
+            // AHD / X-Trans bilinear both trim a 3-pixel border on each side.
+            (3, 3, 1, 1)
+        } else {
+            // Superpixel fallback: one output pixel per CFA tile.
+            (0, 0, cfa.width, cfa.height)
+        }
+    };
+
+    let ox0 = crop_x.saturating_sub(off_x) / div_x;
+    let oy0 = crop_y.saturating_sub(off_y) / div_y;
+    let ox1 = ((crop_x + crop_w).saturating_sub(off_x) / div_x).min(out_w);
+    let oy1 = ((crop_y + crop_h).saturating_sub(off_y) / div_y).min(out_h);
+
+    let (out_w, out_h, rgb_f32) = if ox0 < ox1 && oy0 < oy1 && (ox0 > 0 || oy0 > 0 || ox1 < out_w || oy1 < out_h) {
+        let cw = ox1 - ox0;
+        let ch = oy1 - oy0;
+        let mut cropped = vec![0.0_f32; cw * ch * 3];
+        for y in 0..ch {
+            let src_row = ((oy0 + y) * out_w + ox0) * 3;
+            let dst_row = (y * cw) * 3;
+            cropped[dst_row..dst_row + cw * 3]
+                .copy_from_slice(&rgb_f32[src_row..src_row + cw * 3]);
+        }
+        (cw, ch, cropped)
+    } else {
+        (out_w, out_h, rgb_f32)
     };
 
     // ── EXIF orientation ─────────────────────────────────────────────────────

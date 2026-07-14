@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { getRolls, deleteRoll } from "$lib/db/rolls";
+	import { getRolls, deleteRoll, purgeRollFolderData } from "$lib/db/rolls";
 	import { getLibraries, deleteLibrary } from "$lib/db/libraries";
+	import { TrashIcon, FolderMinusIcon } from "phosphor-svelte";
 	import NewRollDialog from "$lib/components/NewRollDialog.svelte";
 	import NewLibraryDialog from "$lib/components/NewLibraryDialog.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
@@ -18,6 +19,7 @@
 	let showNewRoll = $state(false);
 	let showNewLibrary = $state(false);
 	let deleting = $state<string | null>(null);
+	let purging = $state<string | null>(null);
 
 	onMount(async () => {
 		const [r, l] = await Promise.all([getRolls(), getLibraries()]);
@@ -46,6 +48,28 @@
 		await deleteRoll(roll.id);
 		rolls = rolls.filter((r) => r.id !== roll.id);
 		deleting = null;
+	}
+
+	/**
+	 * Permanently deletes the roll's `.rolloc-meta` sidecar folder (cached
+	 * edits + thumbnails) from disk, without removing the roll from the UI.
+	 * A separate, more deliberate action from "Delete roll" above — the
+	 * original image files are never touched by either action.
+	 */
+	async function confirmPurgeRollFolder(roll: Roll) {
+		if (
+			!confirm(
+				`Permanently delete cached edits and thumbnails for "${roll.label}" from its folder (.rolloc-meta)? ` +
+					`The original photos are never touched, but this cannot be undone.`,
+			)
+		)
+			return;
+		purging = roll.id;
+		try {
+			await purgeRollFolderData(roll.id);
+		} finally {
+			purging = null;
+		}
 	}
 
 	async function confirmDeleteLibrary(library: Library) {
@@ -216,6 +240,22 @@
 								>
 							</a>
 
+							<!-- Purge folder cache button (shown on hover) -->
+							<button
+								onclick={() => confirmPurgeRollFolder(roll)}
+								disabled={purging === roll.id}
+								aria-label="Delete cached edits and thumbnails from folder"
+								title="Permanently delete cached edits/thumbnails from this roll's folder"
+								class="absolute bottom-3 right-11 opacity-0 group-hover:opacity-100 transition
+							       p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle"
+							>
+								{#if purging === roll.id}
+									<span class="text-xs">…</span>
+								{:else}
+									<FolderMinusIcon size={16} weight="bold" />
+								{/if}
+							</button>
+
 							<!-- Delete button (shown on hover) -->
 							<button
 								onclick={() => confirmDeleteRoll(roll)}
@@ -227,17 +267,7 @@
 								{#if deleting === roll.id}
 									<span class="text-xs">…</span>
 								{:else}
-									<svg
-										class="w-4 h-4"
-										viewBox="0 0 16 16"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-									>
-										<path
-											d="M3 4h10M6 4V3h4v1M5 4l.5 9h5l.5-9"
-										/>
-									</svg>
+									<TrashIcon size={16} weight="bold" />
 								{/if}
 							</button>
 						</li>
@@ -324,17 +354,7 @@
 								{#if deleting === library.id}
 									<span class="text-xs">…</span>
 								{:else}
-									<svg
-										class="w-4 h-4"
-										viewBox="0 0 16 16"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-									>
-										<path
-											d="M3 4h10M6 4V3h4v1M5 4l.5 9h5l.5-9"
-										/>
-									</svg>
+									<TrashIcon size={16} weight="bold" />
 								{/if}
 							</button>
 						</li>

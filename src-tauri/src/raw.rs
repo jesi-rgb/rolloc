@@ -404,6 +404,21 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
         };
         let pf = |yy: usize, xx: usize| pixels[yy * pw + xx] as f32;
 
+        // ── Usable image area (exclude masked/black sensor borders) ──────────
+        // The full sensor buffer (pw × ph) includes optically-black / masked
+        // columns and rows along the edges. In a film negative these read as
+        // near-black, and after the inversion pipeline they invert to a bright
+        // white band (typically along the right/bottom edge). rawler exposes the
+        // recommended crop (`crop_area`) and the non-masked `active_area`;
+        // restrict processing to that usable rectangle so the band disappears.
+        let usable = raw.crop_area.or(raw.active_area);
+        let (crop_x, crop_y, crop_w, crop_h) = match usable {
+            Some(r) if r.d.w > 0 && r.d.h > 0 && r.p.x + r.d.w <= pw && r.p.y + r.d.h <= ph => {
+                (r.p.x, r.p.y, r.d.w, r.d.h)
+            }
+            _ => (0usize, 0usize, pw, ph),
+        };
+
         let (out_w, out_h, rgba) = if raw.cpp == 3 {
             // ── Already-demosaiced RGB (some DNGs) ───────────────────────────
             let bl = blacks[0];
@@ -412,15 +427,15 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
             // Optionally stride for downscale.
             let stride = if let Some(limit) = max_px {
                 let limit = limit as usize;
-                ((pw.max(ph) + limit - 1) / limit).max(1)
+                ((crop_w.max(crop_h) + limit - 1) / limit).max(1)
             } else { 1 };
-            let ow = (pw + stride - 1) / stride;
-            let oh = (ph + stride - 1) / stride;
+            let ow = (crop_w + stride - 1) / stride;
+            let oh = (crop_h + stride - 1) / stride;
             let mut buf = vec![0u16; ow * oh * 4];
             for oy in 0..oh {
                 for ox in 0..ow {
-                    let sy = (oy * stride).min(ph - 1);
-                    let sx = (ox * stride).min(pw - 1);
+                    let sy = (crop_y + oy * stride).min(crop_y + crop_h - 1);
+                    let sx = (crop_x + ox * stride).min(crop_x + crop_w - 1);
                     let i = sy * pw + sx;
                     let r = (((pixels[i * 3]     as f32 - bl).max(0.0) / range) * wb_for_ch(0) * 65535.0).min(65535.0) as u16;
                     let g = (((pixels[i * 3 + 1] as f32 - bl).max(0.0) / range) * wb_for_ch(1) * 65535.0).min(65535.0) as u16;
@@ -439,9 +454,19 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
             let cfa_w = cfa.width;
             let cfa_h = cfa.height;
 
-            // Number of complete CFA tiles in each axis.
-            let tiles_x = pw / cfa_w;
-            let tiles_y = ph / cfa_h;
+            // Restrict to whole CFA tiles that fall inside the usable crop area.
+            // Tile origins stay aligned to the sensor CFA grid (multiples of
+            // cfa_w/cfa_h) so `cfa.color_at(dy, dx)` keeps the correct absolute
+            // colour phase; we simply skip the tiles that lie in the masked
+            // border region.
+            let start_tx = (crop_x + cfa_w - 1) / cfa_w;
+            let start_ty = (crop_y + cfa_h - 1) / cfa_h;
+            let end_tx   = (crop_x + crop_w) / cfa_w;
+            let end_ty   = (crop_y + crop_h) / cfa_h;
+
+            // Number of complete CFA tiles in each axis within the crop area.
+            let tiles_x = end_tx.saturating_sub(start_tx).max(1);
+            let tiles_y = end_ty.saturating_sub(start_ty).max(1);
 
             // Stride in tile units to respect max_px.
             let tile_stride = if let Some(limit) = max_px {
@@ -456,9 +481,9 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
 
             for oty in 0..oh {
                 for otx in 0..ow {
-                    // Source tile origin in CFA pixel coordinates.
-                    let ty = (oty * tile_stride).min(tiles_y - 1);
-                    let tx = (otx * tile_stride).min(tiles_x - 1);
+                    // Source tile origin in CFA pixel coordinates (grid-aligned).
+                    let ty = (start_ty + oty * tile_stride).min(end_ty.saturating_sub(1));
+                    let tx = (start_tx + otx * tile_stride).min(end_tx.saturating_sub(1));
                     let origin_y = ty * cfa_h;
                     let origin_x = tx * cfa_w;
 

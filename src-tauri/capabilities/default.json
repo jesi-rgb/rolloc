@@ -25,31 +25,81 @@
     {
       "identifier": "fs:allow-read-dir",
       "allow": [
-        { "path": "**" }
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
       ]
     },
     {
       "identifier": "fs:allow-read-file",
       "allow": [
-        { "path": "**" }
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
       ]
     },
     {
       "identifier": "fs:allow-stat",
       "allow": [
-        { "path": "**" }
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
       ]
     },
     {
       "identifier": "fs:allow-write-file",
       "allow": [
-        { "path": "**" }
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
       ]
     },
     {
       "identifier": "fs:allow-mkdir",
       "allow": [
-        { "path": "**" }
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-rename",
+      "allow": [
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "**" },
+        { "path": "**/.rolloc-meta" },
+        { "path": "**/.rolloc-meta/**" }
       ]
     },
     "updater:default"

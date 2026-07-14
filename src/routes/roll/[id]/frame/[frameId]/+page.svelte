@@ -19,12 +19,13 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { getRoll, getRollPath, updateRoll } from "$lib/db/rolls";
+  import { getRoll, getRollPath, updateRoll, putFrame } from "$lib/db/rolls";
   import { join } from "@tauri-apps/api/path";
   import { invoke } from "@tauri-apps/api/core";
   import { startExport } from "$lib/jobs.svelte";
-  import { getFrame, getFrames, putFrame } from "$lib/db/idb";
+  import { getFrame, getFrames } from "$lib/db/idb";
   import { readPreview, readThumb } from "$lib/fs/opfs";
+  import { readPreview as readSidecarPreview, readThumb as readSidecarThumb, isTauriEnv } from "$lib/fs/sidecar";
   import { ensurePreview } from "$lib/image/thumbgen";
   import { createPipeline, parseRawDecodeBuffer } from "$lib/image/pipeline";
   import {
@@ -344,12 +345,14 @@
         if (dirPath) {
           try {
             const absolutePath = await join(dirPath, frame.filename);
-            blob = await ensurePreview(frame.id, { absolutePath });
+            blob = await ensurePreview(frame.id, { absolutePath }, undefined, dirPath);
           } catch {
-            // File missing — try OPFS cache.
+            // File missing — try sidecar/OPFS cache.
           }
         }
 
+        if (!blob && dirPath && isTauriEnv()) blob = await readSidecarPreview(dirPath, frame.id);
+        if (!blob && dirPath && isTauriEnv()) blob = await readSidecarThumb(dirPath, frame.id);
         if (!blob) blob = await readPreview(frame.id);
         if (!blob) blob = await readThumb(frame.id);
 

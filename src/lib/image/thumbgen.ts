@@ -20,7 +20,8 @@
  *      when both Worker and OffscreenCanvas are unavailable.
  */
 
-import { writeThumb, writePreview, readThumb, readPreview } from '$lib/fs/opfs';
+import * as opfs from '$lib/fs/opfs';
+import * as sidecar from '$lib/fs/sidecar';
 import { invoke } from '@tauri-apps/api/core';
 import {
 	readExifOrientation,
@@ -265,6 +266,39 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
+ * Reads a cached thumb/preview, preferring the roll's sidecar folder
+ * (`.rolloc-meta/`) when a `rollPath` is given and we're running under Tauri.
+ * Falls back to OPFS otherwise (browser/test context, or libraries).
+ */
+async function readCached(
+	kind: 'thumb' | 'preview',
+	frameId: string,
+	rollPath?: string,
+): Promise<Blob | null> {
+	if (rollPath && isTauri()) {
+		return kind === 'thumb'
+			? sidecar.readThumb(rollPath, frameId)
+			: sidecar.readPreview(rollPath, frameId);
+	}
+	return kind === 'thumb' ? opfs.readThumb(frameId) : opfs.readPreview(frameId);
+}
+
+async function writeCached(
+	kind: 'thumb' | 'preview',
+	frameId: string,
+	blob: Blob,
+	rollPath?: string,
+): Promise<void> {
+	if (rollPath && isTauri()) {
+		await (kind === 'thumb'
+			? sidecar.writeThumb(rollPath, frameId, blob)
+			: sidecar.writePreview(rollPath, frameId, blob));
+		return;
+	}
+	await (kind === 'thumb' ? opfs.writeThumb(frameId, blob) : opfs.writePreview(frameId, blob));
+}
+
+/**
  * Generates and caches a thumbnail for a frame.
  * No-ops if a thumb is already cached.
  * Returns the cached-or-newly-generated blob.
@@ -280,13 +314,18 @@ async function generateResizedFromBlob(file: File | Blob, maxPx: number): Promis
  *                 - 'BW'  — B&W negative (inversion + grayscale)
  *                 - 'E6'  — slide/reversal (normalize only, no inversion)
  *                 - undefined/null — no processing (for libraries)
+ * @param rollPath Absolute path to the roll's directory. When provided (and
+ *                 running under Tauri), the cache is read from/written to
+ *                 `<rollPath>/.rolloc-meta/thumbs/` instead of OPFS, making
+ *                 the roll folder self-contained. Omit for libraries.
  */
 export async function ensureThumb(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
 	filmType?: FilmType | null,
+	rollPath?: string,
 ): Promise<Blob> {
-	const existing = await readThumb(frameId);
+	const existing = await readCached('thumb', frameId, rollPath);
 	if (existing) return existing;
 
 	let blob: Blob;
@@ -302,7 +341,7 @@ export async function ensureThumb(
 		blob = await generateResizedFromBlob(file, THUMB_SIZE);
 	}
 
-	await writeThumb(frameId, blob);
+	await writeCached('thumb', frameId, blob, rollPath);
 	return blob;
 }
 
@@ -317,13 +356,15 @@ export async function ensureThumb(
  *                 - 'BW'  — B&W negative (inversion + grayscale)
  *                 - 'E6'  — slide/reversal (normalize only, no inversion)
  *                 - undefined/null — no processing (for libraries)
+ * @param rollPath Absolute path to the roll's directory. See `ensureThumb`.
  */
 export async function ensurePreview(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
 	filmType?: FilmType | null,
+	rollPath?: string,
 ): Promise<Blob> {
-	const existing = await readPreview(frameId);
+	const existing = await readCached('preview', frameId, rollPath);
 	if (existing) return existing;
 
 	let blob: Blob;
@@ -339,7 +380,7 @@ export async function ensurePreview(
 		blob = await generateResizedFromBlob(file, PREVIEW_SIZE);
 	}
 
-	await writePreview(frameId, blob);
+	await writeCached('preview', frameId, blob, rollPath);
 	return blob;
 }
 
@@ -355,13 +396,15 @@ export async function ensurePreview(
  *                 - 'BW'  — B&W negative (inversion + grayscale)
  *                 - 'E6'  — slide/reversal (normalize only, no inversion)
  *                 - undefined/null — no processing (for libraries)
+ * @param rollPath Absolute path to the roll's directory. See `ensureThumb`.
  */
 export async function getThumbURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
 	filmType?: FilmType | null,
+	rollPath?: string,
 ): Promise<string> {
-	const blob = await ensureThumb(frameId, source, filmType);
+	const blob = await ensureThumb(frameId, source, filmType, rollPath);
 	return URL.createObjectURL(blob);
 }
 
@@ -377,13 +420,15 @@ export async function getThumbURL(
  *                 - 'BW'  — B&W negative (inversion + grayscale)
  *                 - 'E6'  — slide/reversal (normalize only, no inversion)
  *                 - undefined/null — no processing (for libraries)
+ * @param rollPath Absolute path to the roll's directory. See `ensureThumb`.
  */
 export async function getPreviewURL(
 	frameId: string,
 	source: { absolutePath: string } | { file: File },
 	filmType?: FilmType | null,
+	rollPath?: string,
 ): Promise<string> {
-	const blob = await ensurePreview(frameId, source, filmType);
+	const blob = await ensurePreview(frameId, source, filmType, rollPath);
 	return URL.createObjectURL(blob);
 }
 
@@ -394,15 +439,19 @@ export async function getPreviewURL(
  * Skips images that are already cached.
  * Continues on errors (logs but doesn't throw).
  * Returns the number of thumbnails successfully generated.
+ *
+ * @param rollPath Absolute path to the roll's directory. See `ensureThumb`.
  */
 export async function generateThumbnails(
 	images: Array<{ id: string; absolutePath: string }>,
 	options?: {
 		concurrency?: number;
 		onProgress?: (current: number, total: number) => void;
+		rollPath?: string;
 	},
 ): Promise<number> {
 	const concurrency = options?.concurrency ?? Math.max(4, WORKER_COUNT * 2);
+	const rollPath = options?.rollPath;
 	const total = images.length;
 	let completed = 0;
 	let generated = 0;
@@ -414,14 +463,14 @@ export async function generateThumbnails(
 			if (!item) break;
 
 			try {
-				const existing = await readThumb(item.id);
+				const existing = await readCached('thumb', item.id, rollPath);
 				if (existing) {
 					completed++;
 					options?.onProgress?.(completed, total);
 					continue;
 				}
 
-				await ensureThumb(item.id, { absolutePath: item.absolutePath });
+				await ensureThumb(item.id, { absolutePath: item.absolutePath }, undefined, rollPath);
 				generated++;
 			} catch (err) {
 				console.error(`Failed to generate thumbnail for ${item.id}:`, err);

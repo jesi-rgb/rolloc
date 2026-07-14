@@ -371,7 +371,7 @@ export interface EffectiveEdit {
 	transform: TransformParams;
 }
 
-export type FrameFlag = 'pick' | 'reject' | 'edited';
+export type FrameFlag = 'pick' | 'reject' | 'edited' | 'missing';
 
 export interface Roll {
 	id: string;

@@ -9,7 +9,7 @@
 		ThumbsUpIcon,
 		ThumbsDownIcon,
 	} from "phosphor-svelte";
-	import { putFrame } from "$lib/db/idb";
+	import { putFrame } from "$lib/db/rolls";
 	import { join } from "@tauri-apps/api/path";
 	import { getThumbURL, getPreviewURL } from "$lib/image/thumbgen";
 	import type { Frame, FrameFlag } from "$lib/types";

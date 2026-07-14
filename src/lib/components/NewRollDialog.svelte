@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { pickDirectory } from '$lib/fs/directory';
-	import { createRoll } from '$lib/db/rolls';
+	import { createRoll, checkForSidecar, restoreRoll } from '$lib/db/rolls';
 	import type { Roll, FilmType } from '$lib/types';
 	import type { FilmStock } from '$lib/data/film-stocks';
+	import type { SidecarMeta } from '$lib/fs/sidecar';
 	import ColorFilmButton from './ColorFilmButton.svelte';
 	import BlackWhiteFilmButton from './BlackWhiteFilmButton.svelte';
 	import SlideFilmButton from './SlideFilmButton.svelte';
@@ -32,11 +33,15 @@
 	let busy      = $state(false);
 	let picking   = $state(false);
 	let error     = $state('');
+	/** Set when the picked folder already contains a `.rolloc-meta` sidecar. */
+	let foundSidecar = $state<SidecarMeta | null>(null);
+	let checkingSidecar = $state(false);
 
 	async function pickDir() {
 		if (picking) return;
 		picking = true;
 		error = '';
+		foundSidecar = null;
 		try {
 			const path = await pickDirectory();
 			if (path) {
@@ -44,6 +49,13 @@
 				// Extract directory name from path (handle both / and \ separators)
 				dirName = path.split(/[\\/]/).filter(Boolean).pop() ?? '';
 				if (!label) label = dirName;
+
+				checkingSidecar = true;
+				try {
+					foundSidecar = await checkForSidecar(path);
+				} finally {
+					checkingSidecar = false;
+				}
 			}
 		} finally {
 			picking = false;
@@ -65,11 +77,18 @@
 
 	async function submit() {
 		if (!dirPath) { error = 'Please select a directory.'; return; }
-		if (!label.trim()) { error = 'Label is required.'; return; }
 
 		busy  = true;
 		error = '';
 		try {
+			if (foundSidecar) {
+				const roll = await restoreRoll(foundSidecar, dirPath);
+				onCreated(roll);
+				return;
+			}
+
+			if (!label.trim()) { error = 'Label is required.'; busy = false; return; }
+
 			const roll = await createRoll({
 				label:     label.trim(),
 				filmStock,
@@ -129,6 +148,22 @@
 			</button>
 		</div>
 
+		{#if checkingSidecar}
+			<p class="text-xs text-content-subtle">Checking folder for existing rolloc data…</p>
+		{/if}
+
+		{#if foundSidecar}
+			<!-- Existing .rolloc-meta sidecar found: offer to restore instead of creating fresh -->
+			<div class="rounded-lg border border-primary/40 bg-primary/10 p-sm space-y-1">
+				<p class="text-sm font-medium text-content">
+					Existing rolloc data found in this folder
+				</p>
+				<p class="text-xs text-content-subtle">
+					Restoring “{foundSidecar.roll.label}” — {foundSidecar.frames.length} frame{foundSidecar.frames.length === 1 ? '' : 's'},
+					with previous edits and cached thumbnails.
+				</p>
+			</div>
+		{:else}
 		<!-- Fields -->
 		<div class="space-y-sm">
 			<label class="block">
@@ -245,6 +280,7 @@
 				</p>
 			</div>
 		</div>
+		{/if}
 
 		{#if error}
 			<p class="text-sm text-danger">{error}</p>
@@ -258,11 +294,15 @@
 			>Cancel</button>
 			<button
 				onclick={submit}
-				disabled={busy}
+				disabled={busy || checkingSidecar}
 				class="px-base py-sm text-sm font-medium rounded-lg bg-primary text-primary-content
 				       hover:bg-primary-muted disabled:opacity-50 disabled:cursor-not-allowed transition"
 			>
-				{busy ? 'Creating…' : 'Create Roll'}
+				{#if foundSidecar}
+					{busy ? 'Restoring…' : 'Restore Roll'}
+				{:else}
+					{busy ? 'Creating…' : 'Create Roll'}
+				{/if}
 			</button>
 		</div>
 	</div>
