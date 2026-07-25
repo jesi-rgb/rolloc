@@ -879,6 +879,19 @@ export interface GpuPipeline {
 	 */
 	lastOutputWidth: number;
 	lastOutputHeight: number;
+	/**
+	 * Tell the pipeline how much space (in CSS pixels) the canvas may occupy
+	 * on screen. The swap chain is sized to fit this box (times the device
+	 * pixel ratio) instead of the full image resolution, and the blit pass
+	 * box-filters the difference.
+	 *
+	 * Without this the browser composites a full-resolution canvas down to the
+	 * viewport with a single bilinear tap, which aliases heavily and makes the
+	 * preview look far harsher than the exported file.
+	 *
+	 * Pass `0, 0` to disable and render the swap chain at full resolution.
+	 */
+	setDisplayBox(cssWidth: number, cssHeight: number): void;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -1424,6 +1437,44 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	const sampler = createLinearSampler(device);
 
+	// ── Display (swap chain) sizing ─────────────────────────────────────────
+
+	/** Available on-screen space for the canvas, in CSS pixels. 0 = unknown. */
+	let displayBoxW = 0;
+	let displayBoxH = 0;
+	/** Current swap chain dimensions, so we only reconfigure on change. */
+	let canvasW = 0;
+	let canvasH = 0;
+
+	/**
+	 * Size the swap chain so the image fits the display box at device
+	 * resolution, preserving the aspect ratio of the `finalW × finalH` output.
+	 * Never upscales beyond the processed resolution. Falls back to full
+	 * resolution when the display box is unknown.
+	 */
+	function syncCanvasSize(finalW: number, finalH: number): void {
+		let targetW = finalW;
+		let targetH = finalH;
+
+		if (displayBoxW > 0 && displayBoxH > 0) {
+			const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+			const boxW = displayBoxW * dpr;
+			const boxH = displayBoxH * dpr;
+			// `min(…, 1)` keeps us from rendering more pixels than we processed.
+			const scale = Math.min(boxW / finalW, boxH / finalH, 1);
+			targetW = Math.max(1, Math.round(finalW * scale));
+			targetH = Math.max(1, Math.round(finalH * scale));
+		}
+
+		if (targetW === canvasW && targetH === canvasH) return;
+
+		canvas.width = targetW;
+		canvas.height = targetH;
+		canvasW = targetW;
+		canvasH = targetH;
+		context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
+	}
+
 	// ── Compile shader modules ──────────────────────────────────────────────
 
 	const ingestRawModule     = device.createShaderModule({ code: ingestRawWGSL });
@@ -1648,12 +1699,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		const finalW = contentW + 2 * bp;
 		const finalH = contentH + 2 * bp;
 
-		// ── Resize canvas + output textures (FINAL/bordered size) ───────────
+		// ── Resize output textures (FINAL/bordered size) ────────────────────
+		// These stay at full processing resolution — readPixels(), the WB
+		// picker and horizon detection all read from `readbackTexture`.
 		if (finalW !== lastOutputWidth || finalH !== lastOutputHeight) {
-			canvas.width = finalW;
-			canvas.height = finalH;
-			context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
-
 			// Rebuild output + readback textures at new size
 			outputTexture?.destroy();
 			outputTexture = device.createTexture({
@@ -1671,6 +1720,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastOutputWidth = finalW;
 			lastOutputHeight = finalH;
 		}
+
+		// ── Resize the swap chain to the on-screen display size ─────────────
+		// Compositing a full-resolution canvas down to the viewport is a
+		// single bilinear tap (no mip chain), which aliases badly. Rendering
+		// the swap chain at display size and box-filtering in the blit pass
+		// gives a preview that matches the exported file.
+		syncCanvasSize(finalW, finalH);
 
 		// ── Resize content texture (border pass input) when matte active ────
 		if (bp > 0 && (contentW !== lastContentW || contentH !== lastContentH)) {
@@ -2114,22 +2170,39 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// The GPU transform pass will be used during export (see exportWithTransform).
 
 		// ── Dithered blit → canvas swap chain (8-bit display) ────────────────
+		// The swap chain may be smaller than the output texture; the blit
+		// shader box-filters over the footprint to avoid aliasing.
+		const blitDisplayUnif = makeUniformBuffer(
+			device,
+			new Float32Array([finalW, finalH, canvasW || finalW, canvasH || finalH]),
+		);
+		toClean.push(blitDisplayUnif);
+
 		const blitBG = device.createBindGroup({
 			layout: blitPipeline.getBindGroupLayout(0),
 			entries: [
 				{ binding: 0, resource: sampler },
 				{ binding: 1, resource: outputTexture!.createView() },
+				{ binding: 2, resource: { buffer: blitDisplayUnif } },
 			],
 		});
 
 		drawFullscreenTriangle(encoder, blitPipeline, blitBG, context.getCurrentTexture().createView());
 
 		// ── Dithered blit → readback texture (rgba8unorm, COPY_SRC) ──────────
+		// Full resolution — src and dst match, so this is a 1:1 copy.
+		const blitReadbackUnif = makeUniformBuffer(
+			device,
+			new Float32Array([finalW, finalH, finalW, finalH]),
+		);
+		toClean.push(blitReadbackUnif);
+
 		const readbackBG = device.createBindGroup({
 			layout: blitReadbackPipeline.getBindGroupLayout(0),
 			entries: [
 				{ binding: 0, resource: sampler },
 				{ binding: 1, resource: outputTexture!.createView() },
+				{ binding: 2, resource: { buffer: blitReadbackUnif } },
 			],
 		});
 
@@ -2524,5 +2597,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		get lastLogPerc() { return lastLogPerc; },
 		get lastOutputWidth() { return lastOutputWidth; },
 		get lastOutputHeight() { return lastOutputHeight; },
+		setDisplayBox(cssWidth: number, cssHeight: number): void {
+			displayBoxW = cssWidth;
+			displayBoxH = cssHeight;
+		},
 	};
 }
