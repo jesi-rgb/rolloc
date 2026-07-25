@@ -329,6 +329,120 @@ fn inner_export(
 
 use crate::process::CropQuad;
 
+/// Compute the 8 projective homography coefficients mapping the unit square
+/// (0,0)-(1,1) to the given crop quad. For non-parallelogram quads this maps
+/// straight lines in the output to straight lines in the source, giving true
+/// perspective correction. For rectangles/parallelograms the denominator is 1
+/// and the result is equivalent to the previous bilinear sampling.
+///
+/// Output order [a,b,c,d,e,f,g,h] so that for an output position (u,v):
+///     W     = g*u + h*v + 1
+///     src.x = (a*u + b*v + c) / W
+///     src.y = (d*u + e*v + f) / W
+///
+/// Mirrors `computeCropHomography` in `src/lib/image/pipeline.ts` to guarantee
+/// identical GPU/CPU results.
+fn compute_crop_homography(crop: &CropQuad) -> [f32; 8] {
+    let x0 = crop.tl.x;
+    let y0 = crop.tl.y;
+    let x1 = crop.tr.x;
+    let y1 = crop.tr.y;
+    let x2 = crop.bl.x;
+    let y2 = crop.bl.y;
+    let x3 = crop.br.x;
+    let y3 = crop.br.y;
+
+    // Solve for the projective map from the unit square (0,0)-(1,1) to the quad.
+    // Mapping: src = ((a*u+b*v+c)/(g*u+h*v+1), (d*u+e*v+f)/(g*u+h*v+1)).
+    // System for the perspective coefficients g and h:
+    //   g*(x1-x3) + h*(x2-x3) = x0-x1-x2+x3
+    //   g*(y1-y3) + h*(y2-y3) = y0-y1-y2+y3
+    let a = x1 - x3;
+    let b = x2 - x3;
+    let rx = x0 - x1 - x2 + x3;
+    let c = y1 - y3;
+    let d = y2 - y3;
+    let ry = y0 - y1 - y2 + y3;
+
+    let det = a * d - b * c;
+    let (g, h) = if det.abs() > 1e-10 {
+        (
+            (rx * d - b * ry) / det,
+            (a * ry - rx * c) / det,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    [
+        (g + 1.0) * x1 - x0, // a
+        (h + 1.0) * x2 - x0, // b
+        x0,                  // c
+        (g + 1.0) * y1 - y0, // d
+        (h + 1.0) * y2 - y0, // e
+        y0,                  // f
+        g,                   // g
+        h,                   // h
+    ]
+}
+
+/// Evaluate the crop homography at output uv ∈ [0,1]², returning source coords
+/// in the same normalized space as the crop quad.
+fn apply_crop_homography(hmg: &[f32; 8], u: f32, v: f32) -> (f32, f32) {
+    let w = hmg[6] * u + hmg[7] * v + 1.0;
+    let x = (hmg[0] * u + hmg[1] * v + hmg[2]) / w;
+    let y = (hmg[3] * u + hmg[4] * v + hmg[5]) / w;
+    (x, y)
+}
+
+#[cfg(test)]
+mod homography_tests {
+    use super::{apply_crop_homography, compute_crop_homography, CropQuad};
+    use crate::process::Point2D;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn maps_unit_square_corners_to_quad() {
+        let crop = CropQuad {
+            tl: Point2D { x: 0.1, y: 0.1 },
+            tr: Point2D { x: 0.9, y: 0.15 },
+            br: Point2D { x: 0.85, y: 0.95 },
+            bl: Point2D { x: 0.15, y: 0.9 },
+        };
+        let h = compute_crop_homography(&crop);
+
+        assert!(approx_eq(apply_crop_homography(&h, 0.0, 0.0).0, crop.tl.x));
+        assert!(approx_eq(apply_crop_homography(&h, 0.0, 0.0).1, crop.tl.y));
+        assert!(approx_eq(apply_crop_homography(&h, 1.0, 0.0).0, crop.tr.x));
+        assert!(approx_eq(apply_crop_homography(&h, 1.0, 0.0).1, crop.tr.y));
+        assert!(approx_eq(apply_crop_homography(&h, 1.0, 1.0).0, crop.br.x));
+        assert!(approx_eq(apply_crop_homography(&h, 1.0, 1.0).1, crop.br.y));
+        assert!(approx_eq(apply_crop_homography(&h, 0.0, 1.0).0, crop.bl.x));
+        assert!(approx_eq(apply_crop_homography(&h, 0.0, 1.0).1, crop.bl.y));
+    }
+
+    #[test]
+    fn preserves_straight_lines() {
+        let crop = CropQuad {
+            tl: Point2D { x: 0.3, y: 0.1 },
+            tr: Point2D { x: 0.7, y: 0.1 },
+            br: Point2D { x: 0.95, y: 0.9 },
+            bl: Point2D { x: 0.05, y: 0.9 },
+        };
+        let h = compute_crop_homography(&crop);
+
+        let a = apply_crop_homography(&h, 0.2, 0.5);
+        let b = apply_crop_homography(&h, 0.5, 0.5);
+        let c = apply_crop_homography(&h, 0.8, 0.5);
+
+        let area = ((a.0 * (b.1 - c.1) + b.0 * (c.1 - a.1) + c.0 * (a.1 - b.1)) / 2.0).abs();
+        assert!(area < 1e-6, "area should be ~0 for collinear points, got {}", area);
+    }
+}
+
 /// Compute the output dimensions for a crop operation.
 /// The crop coordinates are normalized (0-1) relative to the SOURCE image dimensions,
 /// even when rotation is applied (because the GPU uses UV-based rotation that doesn't
@@ -460,25 +574,24 @@ fn apply_transform_and_crop(
 
     let mut dst = vec![0.0_f32; out_w * out_h * 3];
 
+    // Precompute the crop homography to match the GPU crop pass.
+    let crop_hmg = compute_crop_homography(crop);
+
     for out_y in 0..out_h {
         let v = out_y as f32 / (out_h - 1).max(1) as f32;
 
         for out_x in 0..out_w {
             let u = out_x as f32 / (out_w - 1).max(1) as f32;
 
-            // Apply flips to the UV coordinates
+            // Apply flips to the UV coordinates.
             let u_flipped = if transform.flip_h { 1.0 - u } else { u };
             let v_flipped = if transform.flip_v { 1.0 - v } else { v };
 
-            // Bilinear interpolation within the crop quad gives us a point in
-            // the post-rotation normalized coordinate space [0,1]×[0,1].
-            let top_x = crop.tl.x * (1.0 - u_flipped) + crop.tr.x * u_flipped;
-            let top_y = crop.tl.y * (1.0 - u_flipped) + crop.tr.y * u_flipped;
-            let bot_x = crop.bl.x * (1.0 - u_flipped) + crop.br.x * u_flipped;
-            let bot_y = crop.bl.y * (1.0 - u_flipped) + crop.br.y * u_flipped;
-
-            let crop_x = top_x * (1.0 - v_flipped) + bot_x * v_flipped;
-            let crop_y = top_y * (1.0 - v_flipped) + bot_y * v_flipped;
+            // Map output uv to the post-rotation normalized source space using the
+            // projective homography. For rectangular/parallelogram quads this
+            // degenerates to the previous bilinear mapping; for non-parallelogram
+            // quads it preserves straight lines (perspective correction).
+            let (crop_x, crop_y) = apply_crop_homography(&crop_hmg, u_flipped, v_flipped);
 
             // Replicate the GPU transform shader logic:
             // 1. Center the UV

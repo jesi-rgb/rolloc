@@ -37,8 +37,16 @@
 		 * `null` = free-form, `'original'` = source image ratio, or a numeric
 		 * display width/height ratio. When set, dragging any corner keeps the
 		 * ratio, and selecting a new ratio re-fits the current crop.
+		 * Ignored when `perspective` is true.
 		 */
 		aspectRatio?: CropAspect;
+		/**
+		 * When true, the four corners can be dragged independently to perform
+		 * perspective (keystone) correction. Aspect-ratio locking is disabled.
+		 */
+		perspective?: boolean;
+		/** Called when the user toggles perspective mode from within the overlay. */
+		onTogglePerspective?: () => void;
 	}
 
 	let {
@@ -47,6 +55,8 @@
 		onChange,
 		fineRotating = false,
 		aspectRatio = null,
+		perspective = false,
+		onTogglePerspective,
 	}: Props = $props();
 
 	// ─── Reactively track canvas size and position ────────────────────────────
@@ -206,20 +216,31 @@
 
 	// Re-fit only when the *selected ratio* changes (not on canvas resize).
 	let prevAspect: CropAspect = untrack(() => aspectRatio);
+	let prevPerspective = untrack(() => perspective);
 	$effect(() => {
 		const a = aspectRatio;
 		const k = aspectK;
+		const p = perspective;
 		untrack(() => {
+			if (p !== prevPerspective) {
+				prevPerspective = p;
+				if (p) {
+					// Resetting from a constrained aspect rect to the current rect as a
+					// quad keeps the visual framing identical. Subsequent corner drags
+					// then diverge freely.
+					onChange?.(rectToQuad(quadToRect(value)));
+				}
+			}
 			if (a === prevAspect) return;
 			prevAspect = a;
-			if (a != null && k != null) fitRectToAspect(k);
+			if (!perspective && a != null && k != null) fitRectToAspect(k);
 		});
 	});
 
-	const tlPx = $derived(toPixel({ x: rect.left, y: rect.top }));
-	const trPx = $derived(toPixel({ x: rect.right, y: rect.top }));
-	const brPx = $derived(toPixel({ x: rect.right, y: rect.bottom }));
-	const blPx = $derived(toPixel({ x: rect.left, y: rect.bottom }));
+	const tlPx = $derived(toPixel(value.tl));
+	const trPx = $derived(toPixel(value.tr));
+	const brPx = $derived(toPixel(value.br));
+	const blPx = $derived(toPixel(value.bl));
 
 	// ─── Drag state ───────────────────────────────────────────────────────────
 
@@ -299,6 +320,17 @@
 		const svgPt = pt.matrixTransform(ctm.inverse());
 
 		const pos = toNormalized(svgPt.x, svgPt.y);
+
+		if (perspective) {
+			// Free-corner perspective: drag the selected corner and clamp just this
+			// point to [0, 1]. Other corners remain fixed, so converging lines can
+			// be aligned precisely.
+			const newQuad = { ...value };
+			const clamped = { x: Math.max(0, Math.min(1, pos.x)), y: Math.max(0, Math.min(1, pos.y)) };
+			newQuad[dragging] = clamped;
+			onChange?.(newQuad);
+			return;
+		}
 
 		// Aspect-locked drag: keep the opposite corner fixed and resize while
 		// preserving the ratio. Falls through to free-form drag when unlocked.
@@ -630,4 +662,18 @@
 	>
 		Reset Crop
 	</button>
+
+	<!-- Perspective toggle (positioned left of Reset Crop) -->
+	{#if onTogglePerspective}
+		<button
+			onclick={onTogglePerspective}
+			style="left: {canvasOffsetLeft +
+				canvasWidth -
+				185}px; top: {canvasOffsetTop + 8}px;"
+			class="absolute px-2 py-1 text-xs bg-base/80 border border-base-subtle
+			       text-content-muted hover:text-content hover:bg-base rounded transition"
+		>
+			{perspective ? 'Rect Crop' : 'Perspective'}
+		</button>
+	{/if}
 {/if}

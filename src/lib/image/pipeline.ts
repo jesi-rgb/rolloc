@@ -1254,21 +1254,72 @@ function makeBorderUniforms(
 }
 
 /**
+ * Compute the 8 projective homography coefficients mapping the unit square
+ * (0,0)-(1,1) to the given crop quad. For non-parallelogram quads this maps
+ * straight lines in the output to straight lines in the source, giving true
+ * perspective correction. For rectangles/parallelograms the denominator is 1
+ * and the result is equivalent to the previous bilinear sampling.
+ *
+ * Output order [a,b,c,d,e,f,g,h] so that for an output position (u,v):
+ *     W     = g*u + h*v + 1
+ *     src.x = (a*u + b*v + c) / W
+ *     src.y = (d*u + e*v + f) / W
+ *
+ * Mirrors the helper added to `src-tauri/src/export.rs` to guarantee identical
+ * GPU/CPU results.
+ */
+function computeCropHomography(quad: CropQuad): [number, number, number, number, number, number, number, number] {
+	const x0 = quad.tl.x;
+	const y0 = quad.tl.y;
+	const x1 = quad.tr.x;
+	const y1 = quad.tr.y;
+	const x2 = quad.bl.x;
+	const y2 = quad.bl.y;
+	const x3 = quad.br.x;
+	const y3 = quad.br.y;
+
+	// Solve for the projective map from the unit square (0,0)-(1,1) to the quad.
+	// Mapping: src = ((a*u+b*v+c)/(g*u+h*v+1), (d*u+e*v+f)/(g*u+h*v+1)).
+	// System for the perspective coefficients g and h:
+	//   g*(x1-x3) + h*(x2-x3) = x0-x1-x2+x3
+	//   g*(y1-y3) + h*(y2-y3) = y0-y1-y2+y3
+	const a = x1 - x3;
+	const b = x2 - x3;
+	const rx = x0 - x1 - x2 + x3;
+	const c = y1 - y3;
+	const d = y2 - y3;
+	const ry = y0 - y1 - y2 + y3;
+
+	const det = a * d - b * c;
+	let g = 0.0;
+	let h = 0.0;
+	if (Math.abs(det) > 1e-10) {
+		g = (rx * d - b * ry) / det;
+		h = (a * ry - rx * c) / det;
+	}
+
+	return [
+		(g + 1) * x1 - x0, // a
+		(h + 1) * x2 - x0, // b
+		x0,                // c
+		(g + 1) * y1 - y0, // d
+		(h + 1) * y2 - y0, // e
+		y0,                // f
+		g,                 // g
+		h,                 // h
+	];
+}
+
+/**
  * Build the crop pass uniform buffer.
  *
- * CropQuadUniforms layout (total 32 bytes):
- *   tl : vec2<f32>  @ 0
- *   tr : vec2<f32>  @ 8
- *   br : vec2<f32>  @ 16
- *   bl : vec2<f32>  @ 24
+ * CropUniforms layout (total 32 bytes):
+ *   h0 : vec4<f32>  @ 0   (a, b, c, d)
+ *   h1 : vec4<f32>  @ 16  (e, f, g, h)
  */
 function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
-	const data = new Float32Array([
-		quad.tl.x, quad.tl.y,
-		quad.tr.x, quad.tr.y,
-		quad.br.x, quad.br.y,
-		quad.bl.x, quad.bl.y,
-	]);
+	const [a, b, c, d, e, f, g, h] = computeCropHomography(quad);
+	const data = new Float32Array([a, b, c, d, e, f, g, h]);
 	return makeUniformBuffer(device, data);
 }
 
