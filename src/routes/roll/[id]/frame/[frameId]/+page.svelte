@@ -608,6 +608,7 @@
     } else {
       // Entering crop mode — show full uncropped image
       cropModeActive = true;
+      perspectiveActive = false;
       // Start each crop session free-form.
       cropAspect = null;
       // Initialize local quad from saved state (or default if none)
@@ -618,6 +619,10 @@
       }
       renderUncropped();
     }
+  }
+
+  function togglePerspective(): void {
+    perspectiveActive = !perspectiveActive;
   }
 
   /**
@@ -657,6 +662,7 @@
 
     // Exit crop mode
     cropModeActive = false;
+    perspectiveActive = false;
     localCropQuad = null;
 
     // Re-render with the crop applied
@@ -688,6 +694,7 @@
    */
   function cancelCrop(): void {
     cropModeActive = false;
+    perspectiveActive = false;
     localCropQuad = null;
     // Re-render with the previously saved crop (not the local edits)
     renderFrame();
@@ -703,10 +710,15 @@
   function handleWbPickerClick(e: MouseEvent): void {
     if (!wbPickerActive || !canvasEl || !pipeline) return;
 
-    // Map pointer coords (CSS px) to canvas pixel coords.
+    // Map pointer coords (CSS px) to readback-texture pixel coords.
+    // The canvas backing store is sized to the display box, but readPixels()
+    // reads the full-resolution readback texture, so scale against that.
     const rect = canvasEl.getBoundingClientRect();
-    const scaleX = canvasEl.width / rect.width;
-    const scaleY = canvasEl.height / rect.height;
+    const readW = pipeline.lastOutputWidth;
+    const readH = pipeline.lastOutputHeight;
+    if (readW === 0 || readH === 0) return;
+    const scaleX = readW / rect.width;
+    const scaleY = readH / rect.height;
     const px = Math.round((e.clientX - rect.left) * scaleX);
     const py = Math.round((e.clientY - rect.top) * scaleY);
 
@@ -722,8 +734,8 @@
     const half = Math.floor(sampleSize / 2);
     const x0 = Math.max(0, px - half);
     const y0 = Math.max(0, py - half);
-    const w = Math.min(sampleSize, canvasEl.width - x0);
-    const h = Math.min(sampleSize, canvasEl.height - y0);
+    const w = Math.min(sampleSize, readW - x0);
+    const h = Math.min(sampleSize, readH - y0);
 
     pipeline
       .readPixels(x0, y0, w, h)
@@ -1531,7 +1543,7 @@
           <h2 class="text-xl font-semibold text-content">
             Preview unavailable
           </h2>
-          <p class="text-content-muted max-w-sm text-sm">
+          <p class="text-content-muted text-sm">
             {renderError}
           </p>
           <a href="/roll/{rollId}" class="text-sm text-primary hover:underline"
