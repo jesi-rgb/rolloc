@@ -116,6 +116,8 @@
   // ─── Canvas + pipeline refs ────────────────────────────────────────────────
 
   let canvasEl = $state<HTMLCanvasElement | null>(null);
+  /** Preview area container — drives the swap chain display size. */
+  let previewAreaEl = $state<HTMLDivElement | null>(null);
   let pipeline = $state<GpuPipeline | null>(null);
   let currentBitmap = $state<ImageBitmap | null>(null);
   /** Raw binary payload from `raw_decode`; non-null only for RAW frames. */
@@ -158,6 +160,31 @@
       .catch((err: unknown) => {
         gpuError = err instanceof Error ? err.message : String(err);
       });
+  });
+
+  // ─── Keep the swap chain matched to the on-screen preview size ────────────
+  // The canvas backing store is sized to fit this box rather than the full
+  // image resolution. Letting the browser composite a full-res canvas down to
+  // the viewport uses a single bilinear tap with no mip chain, which aliases
+  // heavily on grainy scans and makes the preview look far harsher than the
+  // exported file.
+
+  $effect(() => {
+    const el = previewAreaEl;
+    const p = pipeline;
+    if (!el || !p) return;
+
+    const ro = new ResizeObserver((entries) => {
+      // contentRect excludes padding, which is the space the canvas can use.
+      const box = entries[0]?.contentRect;
+      if (!box || box.width === 0 || box.height === 0) return;
+      p.setDisplayBox(box.width, box.height);
+      void renderFrame();
+    });
+    // ResizeObserver fires once on observe(), which seeds the initial size.
+    ro.observe(el);
+
+    return () => ro.disconnect();
   });
 
   // ─── History helpers ──────────────────────────────────────────────────────
@@ -277,11 +304,11 @@
         const absolutePath = await join(dirPath, frame.filename);
         let rawBuffer: ArrayBuffer;
         try {
-          // Cap at 4000px on the long edge for the editing preview.
-          // Full-res decode is deferred to export. Also respect the GPU
-          // texture size limit (usually 8192, but can be lower on some devices).
+          // Decode at the GPU's texture size limit (usually 8192, but can be
+          // lower on some devices). Full-res decode beyond that is deferred
+          // to export.
           const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
-          const maxPx = Math.min(4000, gpuLimit);
+          const maxPx = gpuLimit;
           rawBuffer = await invoke<ArrayBuffer>("raw_decode", {
             path: absolutePath,
             maxPx,
@@ -1448,6 +1475,7 @@
   <div class="flex-1 min-h-0 flex overflow-hidden relative">
     <!-- Canvas / preview area — always in DOM so the pipeline stays alive -->
     <div
+      bind:this={previewAreaEl}
       class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
     >
       <!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
