@@ -1904,9 +1904,8 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				const sharpenBG = device.createBindGroup({
 					layout: sharpenPipeline.getBindGroupLayout(0),
 					entries: [
-						{ binding: 0, resource: sampler },
-						{ binding: 1, resource: sharpenInputTex.createView() },
-						{ binding: 2, resource: { buffer: sharpenUnifBuf } },
+						{ binding: 0, resource: sharpenInputTex.createView() },
+						{ binding: 1, resource: { buffer: sharpenUnifBuf } },
 					],
 				});
 

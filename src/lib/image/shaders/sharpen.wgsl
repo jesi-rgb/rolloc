@@ -18,9 +18,8 @@ struct SharpenUniforms {
     _pad2: f32,
 };
 
-@group(0) @binding(0) var tex_sampler: sampler;
-@group(0) @binding(1) var input_tex: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> params: SharpenUniforms;
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: SharpenUniforms;
 
 const LUMA_COEFFS = vec3<f32>(0.2126, 0.7152, 0.0722);
 

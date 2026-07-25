@@ -48,10 +48,11 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	// Map the final-canvas UV back into content UV space.
 	let inner = (in.uv - U.innerOffset) / U.innerScale;
 
-	if (inner.x < 0.0 || inner.x > 1.0 || inner.y < 0.0 || inner.y > 1.0) {
-		return vec4<f32>(U.color.rgb, 1.0);
-	}
-
+	// Always sample — WGSL requires textureSample in uniform control flow.
+	// The sampler uses clamp-to-edge, so out-of-bounds UVs are safe.
 	let col = textureSample(uTexture, uSampler, inner);
-	return vec4<f32>(col.rgb, 1.0);
+
+	let outside = inner.x < 0.0 || inner.x > 1.0 || inner.y < 0.0 || inner.y > 1.0;
+	let rgb = select(col.rgb, U.color.rgb, outside);
+	return vec4<f32>(rgb, 1.0);
 }

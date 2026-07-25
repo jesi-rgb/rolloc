@@ -6,6 +6,14 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { sveltePhosphorOptimize } from 'phosphor-svelte/vite';
 
 export default defineConfig({
+	server: {
+		watch: {
+			ignored: [
+				"**/src-tauri/target/**",
+				"**/target/**",
+			],
+		}
+  	},
 	plugins: [tailwindcss(), sveltekit(), sveltePhosphorOptimize(), devtoolsJson()],
 	test: {
 		expect: { requireAssertions: true },

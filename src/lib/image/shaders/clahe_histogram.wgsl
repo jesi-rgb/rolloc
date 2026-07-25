@@ -109,7 +109,8 @@ fn main(
 		workgroupBarrier();
 
 		let excess = atomicLoad(&hist[0]);
-		if (excess == 0u) { break; }
+		// NOTE: removed early `break` because workgroupBarrier must be in uniform
+		// control flow. With only 4 rounds max, the extra iterations are free.
 
 		// Distribute excess evenly across all bins.
 		let per_bin = excess / NUM_BINS;
