@@ -384,14 +384,21 @@
           if (dirPath) {
             try {
               const absolutePath = await join(dirPath, frame.filename);
-              blob = await ensurePreview(frame.id, { absolutePath }, undefined, dirPath);
+              blob = await ensurePreview(
+                frame.id,
+                { absolutePath },
+                undefined,
+                dirPath,
+              );
             } catch {
               // File missing — try sidecar/OPFS cache.
             }
           }
 
-          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarPreview(dirPath, frame.id);
-          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarThumb(dirPath, frame.id);
+          if (!blob && dirPath && isTauriEnv())
+            blob = await readSidecarPreview(dirPath, frame.id);
+          if (!blob && dirPath && isTauriEnv())
+            blob = await readSidecarThumb(dirPath, frame.id);
           if (!blob) blob = await readPreview(frame.id);
           if (!blob) blob = await readThumb(frame.id);
 
@@ -560,6 +567,9 @@
 
   /** When true, the crop overlay is visible and editable. */
   let cropModeActive = $state(false);
+
+  /** When true, the crop overlay is in perspective-correction mode. */
+  let perspectiveActive = $state(false);
 
   /** When true, user is dragging the fine rotation slider — show denser alignment grid. */
   let fineRotating = $state(false);
@@ -1469,6 +1479,8 @@
             onChange={onCropChange}
             aspectRatio={cropAspect}
             {fineRotating}
+            perspective={perspectiveActive}
+            onTogglePerspective={togglePerspective}
           />
         {/if}
 
@@ -1616,6 +1628,8 @@
             cropActive={cropModeActive}
             {cropAspect}
             onCropAspectChange={(a) => (cropAspect = a)}
+            onTogglePerspective={togglePerspective}
+            perspective={perspectiveActive}
           />
         </SidebarSection>
 
