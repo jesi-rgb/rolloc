@@ -25,7 +25,11 @@
   import { startExport } from "$lib/jobs.svelte";
   import { getFrame, getFrames } from "$lib/db/idb";
   import { readPreview, readThumb } from "$lib/fs/opfs";
-  import { readPreview as readSidecarPreview, readThumb as readSidecarThumb, isTauriEnv } from "$lib/fs/sidecar";
+  import {
+    readPreview as readSidecarPreview,
+    readThumb as readSidecarThumb,
+    isTauriEnv,
+  } from "$lib/fs/sidecar";
   import { ensurePreview } from "$lib/image/thumbgen";
   import {
     createPipeline,
@@ -397,7 +401,8 @@
         }
 
         if (directBuffer) {
-          const { width: decW, height: decH } = parseDecodeImageRgbBuffer(directBuffer);
+          const { width: decW, height: decH } =
+            parseDecodeImageRgbBuffer(directBuffer);
           currentBitmap?.close();
           currentBitmap = null;
           currentRawBuffer = null;

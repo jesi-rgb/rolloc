@@ -4,8 +4,8 @@
  * Generates JPEG blobs from image files and caches results in OPFS.
  *
  * Sizes:
- *   THUMB_SIZE   — 300px long edge  → filmstrip
- *   PREVIEW_SIZE — 4000px long edge → lightbox pre-render
+ *   THUMB_SIZE   — long edge → filmstrip
+ *   PREVIEW_SIZE — long edge → lightbox pre-render
  *
  * Generation paths (in order of preference):
  *   1. Native Tauri command (`generate_thumb`) — reads, decodes, resizes, and
@@ -33,8 +33,8 @@ import type { ThumbWorkerRequest, ThumbWorkerResponse } from './thumb.worker';
 import type { FilmType } from '$lib/types';
 
 export const THUMB_SIZE = 300;
-export const PREVIEW_SIZE = 3000;
-export const JPEG_QUALITY = 0.88;
+export const PREVIEW_SIZE = 9000;
+export const JPEG_QUALITY = 1;
 
 // ─── Tauri detection ──────────────────────────────────────────────────────────
 
