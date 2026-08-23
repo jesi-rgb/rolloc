@@ -116,6 +116,36 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 const ANALYSIS_BUFFER = 0.10;
 
 /**
+ * 256-entry sRGB→linear lookup table, keyed on the 8-bit sample value.
+ *
+ * Mirrors `srgb_to_linear` in `normalization.wgsl` / `invert.wgsl` and
+ * `export.rs:1087` so the CPU percentile analysis, the GPU preview and the
+ * native export all operate on the same linear-light values.
+ */
+const SRGB_TO_LINEAR_LUT: Float32Array = (() => {
+	const lut = new Float32Array(256);
+	for (let i = 0; i < 256; i++) {
+		const c = i / 255;
+		lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+	}
+	return lut;
+})();
+
+/**
+ * Convert an 8-bit sRGB RGBA buffer to linear-light f32 in place-equivalent
+ * form.  The alpha channel is expanded too — it is never read by the
+ * percentile analysis, so the extra work is not worth a branch per sample.
+ */
+function srgbU8ToLinearF32(src: Uint8ClampedArray | Uint8Array): Float32Array {
+	const out = new Float32Array(src.length);
+	for (let i = 0; i < src.length; i++) {
+		out[i] = SRGB_TO_LINEAR_LUT[src[i]];
+	}
+	return out;
+}
+
+
+/**
  * Number of histogram bins for auto-levels shadow floor computation.
  * Higher = more precise detection of the first populated bin.
  */
@@ -741,9 +771,17 @@ function computeLogPercentilesFromU16(
 
 /**
  * Read the pixels of an `ImageBitmap` to a Float32Array via OffscreenCanvas.
- * The result is sRGB-encoded [0,1] f32 values; callers should gamma-expand
- * before computing log percentiles if strictly necessary.  For the percentile
- * computation (which only needs relative ordering), sRGB values are adequate.
+ *
+ * The result is **linear-light** [0,1] f32: the sRGB EOTF is applied here so
+ * the log-percentile analysis measures the same quantity as the normalization
+ * shader (which gamma-expands when `srgbExpand = 1`) and as the native export
+ * path (`export.rs` expands via a 256/65536-entry LUT before `process_image`).
+ *
+ * This matters beyond preview/export parity: the floors and ceils derived here
+ * are persisted as `frame.cachedLogPerc` and handed to the Rust exporter, which
+ * applies them to linear data.  `log10(sRGB)` and `log10(linear)` are not
+ * related by an affine map, so mixing the two silently mis-places every
+ * per-channel bound.
  */
 async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
 	const oc = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -751,12 +789,7 @@ async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
 	if (!ctx) throw new Error('Could not create OffscreenCanvas 2D context');
 	ctx.drawImage(bitmap, 0, 0);
 	const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-	// Convert Uint8ClampedArray [0,255] sRGB to float [0,1].
-	const f32 = new Float32Array(data.data.length);
-	for (let i = 0; i < data.data.length; i++) {
-		f32[i] = data.data[i] / 255.0;
-	}
-	return f32;
+	return srgbU8ToLinearF32(data.data);
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -991,18 +1024,25 @@ function filmTypeToNumber(filmType: FilmType): number {
  *   wpOffset       : f32        @ 52
  *   bpOffset       : f32        @ 56
  *   filmType       : u32        @ 60  (0 = C41, 1 = BW, 2 = E6)
- *   struct size = 64 bytes
+ *   srgbExpand     : f32        @ 64  (1 = gamma-expand source, 0 = already linear)
+ *   _pad0..2       : f32        @ 68..76
+ *   struct size = 80 bytes
+ *
+ * @param srgbExpand - true for sRGB-encoded sources (JPEG/TIFF preview), false
+ *                     for the RAW path whose data is already scene-linear.
  */
 function makeNormalizationUniforms(
 	device: GPUDevice,
 	perc: LogPercentiles,
 	filmType: FilmType,
+	srgbExpand: boolean,
 ): GPUBuffer {
+	const SIZE = 80;
 	const buffer = device.createBuffer({
-		size: 64,
+		size: SIZE,
 		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 	});
-	const data = new ArrayBuffer(64);
+	const data = new ArrayBuffer(SIZE);
 	const floatView = new Float32Array(data);
 	const uintView = new Uint32Array(data);
 
@@ -1028,7 +1068,10 @@ function makeNormalizationUniforms(
 	floatView[12] = 0.0;  // shadowStrength
 	floatView[13] = 0.0;  // wpOffset
 	floatView[14] = 0.0;  // bpOffset
-	uintView[15]  = filmTypeToNumber(filmType);  // filmType as u32
+	uintView[15] = filmTypeToNumber(filmType);  // filmType as u32
+
+	// srgbExpand @ 64 (floatView[16]); floatView[17..19] are padding.
+	floatView[16] = srgbExpand ? 1.0 : 0.0;
 
 	device.queue.writeBuffer(buffer, 0, data);
 	return buffer;
@@ -1823,8 +1866,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// Pass 2.6: clahe_remap    — fragment: intermediateE/B + CDF → intermediateC
 			// Pass 3: tonecurve        — intermediateC/E/B  → outputTexture
 
-			const normBuf = makeNormalizationUniforms(device, logPerc, edit.inversionParams.filmType);
-			
+			const normBuf = makeNormalizationUniforms(
+				device,
+				logPerc,
+				edit.inversionParams.filmType,
+				!isLinear,
+			);
+
 			// Apply auto-exposure correction if enabled
 			const autoExposureAdj = edit.inversionParams.autoExposure ? logPerc.autoExposure : 0;
 			const hdBuf = makeHDCurveUniforms(device, edit.inversionParams, autoExposureAdj);
