@@ -1,4 +1,5 @@
 pub mod decode;
+mod decode_cache;
 mod demosaic;
 mod export;
 mod process;

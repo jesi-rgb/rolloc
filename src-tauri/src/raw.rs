@@ -349,9 +349,45 @@ pub struct RawDecodeMetadata {
 ///
 /// If `max_px` is Some(n), the output is downsampled so that neither dimension
 /// exceeds `n` pixels.  Pass the device's `maxTextureDimension2D` limit here.
+///
+/// The payload is cached on disk (see `decode_cache`) keyed on the source file
+/// and these parameters, so re-opening a frame skips the demosaic entirely.
+///
+/// When `warm_only` is true the payload is decoded and cached but an empty
+/// response is returned, so background prewarming does not ship ~50 MB over
+/// IPC for a buffer the caller throws away.
 #[tauri::command]
-pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>) -> Result<Response, String> {
+pub async fn raw_decode(
+    app: tauri::AppHandle,
+    path: String,
+    max_px: Option<u32>,
+    skip_wb: Option<bool>,
+    warm_only: Option<bool>,
+) -> Result<Response, String> {
+    let warm_only = warm_only.unwrap_or(false);
+    // ── Cache lookup ────────────────────────────────────────────────────────
+    // Both parameters change the pixels: max_px the resolution, skip_wb whether
+    // as-shot white balance is baked in.
+    let cache_entry = crate::decode_cache::payload_entry(
+        &app,
+        &path,
+        crate::decode_cache::Payload::Raw { skip_wb: skip_wb.unwrap_or(false) },
+        max_px,
+    );
+
+    if let Some(entry) = cache_entry.as_deref() {
+        if warm_only {
+            if crate::decode_cache::touch_if_present(entry) {
+                return Ok(Response::new(Vec::new()));
+            }
+        } else if let Some(cached) = crate::decode_cache::read(entry) {
+            return Ok(Response::new(cached));
+        }
+    }
+
+    let decode_path = path.clone();
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let path = decode_path;
         // ── Decode ──────────────────────────────────────────────────────────
         let raw = rawler::decode_file(&path)
             .map_err(|e| format!("raw decode failed: {e}"))?;
@@ -687,6 +723,32 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
     })
     .await
     .map_err(|e| format!("task panicked: {e:?}"))??;
+
+    // ── Populate the cache ──────────────────────────────────────────────────
+    // A prewarm must finish the write before it returns, otherwise the caller
+    // has no way to know the work landed. A real decode does not wait: it is a
+    // ~50 MB write plus an eviction scan, and rendering can start without it.
+    match (cache_entry, warm_only) {
+        (Some(entry), true) => {
+            let payload = bytes;
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::decode_cache::write(&entry, &payload);
+            })
+            .await;
+            return Ok(Response::new(Vec::new()));
+        }
+        (Some(entry), false) => {
+            let payload = bytes.clone();
+            drop(tokio::task::spawn_blocking(move || {
+                crate::decode_cache::write(&entry, &payload);
+            }));
+        }
+        (None, _) => {}
+    }
+
+    if warm_only {
+        return Ok(Response::new(Vec::new()));
+    }
 
     Ok(Response::new(bytes))
 }
