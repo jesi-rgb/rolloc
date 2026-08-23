@@ -37,6 +37,7 @@
     parseDecodeImageRgbBuffer,
     PREVIEW_MAX_PX,
   } from "$lib/image/pipeline";
+  import { focusDecodeWarm, startDecodeWarm } from "$lib/image/decode-warm";
   import {
     resolveEdit,
     DEFAULT_INVERSION_PARAMS,
@@ -148,6 +149,8 @@
   });
 
   onDestroy(() => {
+    // Leave the sweep running — the roll grid picks it back up, and a decode
+    // already paid for is worth keeping.
     pipeline?.destroy();
     currentBitmap?.close();
     currentRawBuffer = null;
@@ -304,6 +307,11 @@
 
       const dirPath = await getRollPath(rid);
 
+      // True once a decode that populates the on-disk cache has run for this
+      // frame — the fallback preview-blob path does not, so the sweep must
+      // still cover it.
+      let cacheWarmed = false;
+
       if (frame && isRawExtension(frame.filename) && dirPath) {
         // RAW path — full linear decode via Tauri command.
         const absolutePath = await join(dirPath, frame.filename);
@@ -320,6 +328,7 @@
             maxPx,
             skipWb: roll.rollEdit.invert,
           });
+          cacheWarmed = true;
         } catch (err) {
           renderError = `Failed to decode RAW file: ${err instanceof Error ? err.message : String(err)}`;
           loading = false;
@@ -394,6 +403,7 @@
               path: absolutePath,
               maxPx: Math.min(gpuLimit, PREVIEW_MAX_PX),
             });
+            cacheWarmed = true;
           } catch (err) {
             console.warn(
               "[frame] Direct decode failed, falling back to cached preview:",
@@ -455,6 +465,19 @@
       }
 
       loading = false;
+
+      // The frame on screen is decoded (and therefore cached) by now — tell the
+      // sweep so it moves on to the neighbours instead of redoing this one.
+      focusDecodeWarm(fid, cacheWarmed);
+      if (dirPath && frames.length > 1) {
+        void startDecodeWarm({
+          rollId: rid,
+          dirPath,
+          frames: frames.map((f) => ({ id: f.id, filename: f.filename })),
+          invert: roll?.rollEdit.invert ?? false,
+          maxPx: Math.min(pipeline?.maxTextureDimension ?? 8192, PREVIEW_MAX_PX),
+        });
+      }
     }
 
     load().catch((err: unknown) => {

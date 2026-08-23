@@ -18,6 +18,7 @@ pub fn run() {
       raw::raw_thumb,
       raw::raw_decode,
       decode::decode_image_rgba,
+      decode_cache::decode_cache_probe,
       export::export_jpeg,
       export::export_native,
       export::export_image_native,

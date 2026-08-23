@@ -23,6 +23,9 @@
 		/** True when this frame is in the export selection set. Independent
 		 *  of `selected` (which is the focus highlight). */
 		picked?: boolean;
+		/** True when a full-resolution decode of this frame is cached on disk,
+		 *  i.e. the editor will open it instantly. */
+		fullRes?: boolean;
 		onSelect?: (frame: Frame) => void;
 		onDblClick?: (frame: Frame) => void;
 	}
@@ -33,6 +36,7 @@
 		selected = false,
 		selecting = false,
 		picked = false,
+		fullRes = false,
 		onSelect,
 		onDblClick,
 	}: Props = $props();
@@ -158,6 +162,16 @@
 						></span>
 					{/each}
 				</div>
+			{/if}
+
+			<!-- Full-resolution-ready marker.  Sits opposite the flag badges so
+			     it never collides with them, and is hidden in selection mode
+			     where the checkbox owns that corner. -->
+			{#if fullRes && !selecting}
+				<div
+					class="absolute bottom-3 right-3 size-1.5 rounded-full bg-accent"
+					title="Full resolution ready"
+				></div>
 			{/if}
 
 			<!-- Selection checkbox overlay (selection mode only) -->
