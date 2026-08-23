@@ -1611,6 +1611,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
 	let lastBitmap: ImageBitmap | null = null;
+	/**
+	 * Source buffers whose GPU upload is still resident in `sourceTexture`.
+	 *
+	 * Uploading is by far the most expensive part of a render on the RAW path
+	 * (a 26 MP frame is a 207 MB `rgba16uint` copy plus an ingest pass plus a
+	 * full rebuild of every intermediate).  None of it depends on the edit
+	 * parameters, so re-doing it on every slider tick is what pinned the
+	 * editor at ~1 fps.  Identity comparison is enough: the decode buffers are
+	 * immutable and replaced wholesale on frame navigation.
+	 */
+	let lastRawBuffer: ArrayBuffer | null = null;
+	let lastDecodedBuffer: ArrayBuffer | null = null;
 	let sourceTexture: GPUTexture | null = null;
 	let intermediateA: GPUTexture | null = null;
 	let intermediateB: GPUTexture | null = null;
@@ -1683,6 +1695,45 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let cachedInvertLogPerc: LogPercentiles | null = null;
 	let cachedInvertFilmType: string | null = null;
 	let cachedInvertAutoLevels: boolean | null = null;
+
+	/**
+	 * Log-percentile cache for the buffer-based paths (`renderRaw` /
+	 * `renderDecodedRgba`), which have no `ImageBitmap` to key on.
+	 *
+	 * The analysis walks every pixel on the main thread, so at full resolution
+	 * it alone costs more than the entire GPU pass chain.  It depends only on
+	 * the source pixels plus `filmType` / `autoLevels`, never on the edit
+	 * parameters being dragged.
+	 */
+	let cachedPercSource: object | null = null;
+	let cachedPercFilmType: string | null = null;
+	let cachedPercAutoLevels: boolean | null = null;
+	let cachedPercValue: LogPercentiles | null = null;
+
+	/**
+	 * Return cached percentiles for `source`, computing them via `compute` only
+	 * when the source or the two parameters that affect them have changed.
+	 */
+	function cachedPercentiles(
+		source: object,
+		filmType: FilmType,
+		autoLevels: boolean,
+		compute: () => LogPercentiles,
+	): LogPercentiles {
+		if (
+			cachedPercValue !== null &&
+			cachedPercSource === source &&
+			cachedPercFilmType === filmType &&
+			cachedPercAutoLevels === autoLevels
+		) {
+			return cachedPercValue;
+		}
+		cachedPercValue = compute();
+		cachedPercSource = source;
+		cachedPercFilmType = filmType;
+		cachedPercAutoLevels = autoLevels;
+		return cachedPercValue;
+	}
 
 	/** Track last output dimensions to detect when resize is needed. */
 	let lastOutputWidth = 0;
@@ -2360,13 +2411,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		// Re-upload source texture only when the bitmap changes
 		if (bitmap !== lastBitmap) {
-		ensureRgba8Source(w, h);
-		device.queue.copyExternalImageToTexture(
-			{ source: bitmap },
-			{ texture: sourceTexture! },
-			[w, h],
-		);
-		lastBitmap = bitmap;
+			ensureRgba8Source(w, h);
+			device.queue.copyExternalImageToTexture(
+				{ source: bitmap },
+				{ texture: sourceTexture! },
+				[w, h],
+			);
+			lastBitmap = bitmap;
+			// This bitmap now owns sourceTexture.
+			lastRawBuffer = null;
+			lastDecodedBuffer = null;
 		}
 
 		// Compute log percentiles for the NegPy normalization pass.
@@ -2418,50 +2472,61 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	async function renderDecodedRgba(edit: EffectiveEdit, rgbaBuffer: ArrayBuffer): Promise<void> {
 		const { width: w, height: h, pixels } = parseDecodeImageRgbBuffer(rgbaBuffer);
 
-		// Invalidate ImageBitmap cache so the next render() call re-uploads.
-		lastBitmap = null;
-		cachedF32Bitmap = null;
-		cachedF32Pixels = null;
-		cachedInvertLogPerc = null;
+		// ── Upload — skipped when this buffer is already resident ─────────────
+		if (rgbaBuffer !== lastDecodedBuffer) {
+			// Invalidate ImageBitmap cache so the next render() call re-uploads.
+			lastBitmap = null;
+			cachedF32Bitmap = null;
+			cachedF32Pixels = null;
+			cachedInvertLogPerc = null;
 
-		ensureRgba8Source(w, h);
-		// bytesPerRow must be 256-aligned for writeTexture.
-		const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
-		let uploadData: ArrayBuffer;
-		if (bytesPerRow === w * 4) {
-			uploadData = (pixels.buffer as ArrayBuffer).slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
-		} else {
-			const buf = new ArrayBuffer(bytesPerRow * h);
-			const dst = new Uint8Array(buf);
-			for (let row = 0; row < h; row++) {
-				dst.set(
-					new Uint8Array(pixels.buffer, pixels.byteOffset + row * w * 4, w * 4),
-					row * bytesPerRow,
-				);
+			ensureRgba8Source(w, h);
+			// bytesPerRow must be 256-aligned for writeTexture.
+			const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+			let uploadData: ArrayBuffer;
+			if (bytesPerRow === w * 4) {
+				uploadData = (pixels.buffer as ArrayBuffer).slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+			} else {
+				const buf = new ArrayBuffer(bytesPerRow * h);
+				const dst = new Uint8Array(buf);
+				for (let row = 0; row < h; row++) {
+					dst.set(
+						new Uint8Array(pixels.buffer, pixels.byteOffset + row * w * 4, w * 4),
+						row * bytesPerRow,
+					);
+				}
+				uploadData = buf;
 			}
-			uploadData = buf;
+
+			device.queue.writeTexture(
+				{ texture: sourceTexture! },
+				uploadData,
+				{ bytesPerRow },
+				[w, h],
+			);
+
+			lastDecodedBuffer = rgbaBuffer;
+			lastRawBuffer = null;
 		}
 
-		device.queue.writeTexture(
-			{ texture: sourceTexture! },
-			uploadData,
-			{ bytesPerRow },
-			[w, h],
-		);
-
 		// Compute log percentiles for the NegPy normalization pass.
+		// Gamma-expand to linear first — the normalization shader does the same
+		// (srgbExpand = 1 on this path), and the exporter measures linear data.
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
-			const f32 = new Float32Array(pixels.length);
-			const u8 = pixels as Uint8ClampedArray;
-			for (let i = 0; i < pixels.length; i++) {
-				f32[i] = u8[i] / 255.0;
-			}
-			logPerc = computeLogPercentilesFromF32(
-				f32, w, h, 8, undefined,
+			logPerc = cachedPercentiles(
+				rgbaBuffer,
 				edit.inversionParams.filmType,
 				edit.inversionParams.autoLevels,
+				() => computeLogPercentilesFromF32(
+					srgbU8ToLinearF32(pixels as Uint8ClampedArray), w, h, 8, undefined,
+					edit.inversionParams.filmType,
+					edit.inversionParams.autoLevels,
+				),
 			);
+			lastLogPerc = logPerc;
+		} else {
+			lastLogPerc = null;
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -2484,10 +2549,15 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(
-					pixels, w, h, 8, undefined,
+				logPerc = cachedPercentiles(
+					rawBuffer,
 					edit.inversionParams.filmType,
 					edit.inversionParams.autoLevels,
+					() => computeLogPercentilesFromU16(
+						pixels, w, h, 8, undefined,
+						edit.inversionParams.filmType,
+						edit.inversionParams.autoLevels,
+					),
 				);
 				lastLogPerc = logPerc;
 			}
@@ -2499,67 +2569,77 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		device.pushErrorScope('validation');
 		device.pushErrorScope('out-of-memory');
 
-		// Upload u16 pixel data as rgba16uint texture.
-		const rawTexture = device.createTexture({
-			size: [w, h],
-			format: 'rgba16uint',
-			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-		});
-		// Each pixel is 4 × u16 = 8 bytes; bytesPerRow must be aligned to 256.
-		const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
-		let uploadData: Uint8Array<ArrayBuffer>;
-		if (bytesPerRow === w * 8) {
-			const buf = new ArrayBuffer(pixels.byteLength);
-			new Uint8Array(buf).set(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
-			uploadData = new Uint8Array(buf);
-		} else {
-			const buf = new ArrayBuffer(bytesPerRow * h);
-			uploadData = new Uint8Array(buf);
-			const srcRow = w * 8;
-			for (let row = 0; row < h; row++) {
-				uploadData.set(
-					new Uint8Array(pixels.buffer, pixels.byteOffset + row * srcRow, srcRow),
-					row * bytesPerRow,
-				);
+		// ── Upload + ingest — skipped when this buffer is already resident ────
+		// Everything in here depends only on the source pixels, so on a slider
+		// drag we go straight to the main passes with the ingested texture and
+		// the intermediates from the first render of this frame.
+		let rawTexture: GPUTexture | null = null;
+		if (rawBuffer !== lastRawBuffer) {
+			// Upload u16 pixel data as rgba16uint texture.
+			rawTexture = device.createTexture({
+				size: [w, h],
+				format: 'rgba16uint',
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			// Each pixel is 4 × u16 = 8 bytes; bytesPerRow must be aligned to 256.
+			const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
+			let uploadData: Uint8Array<ArrayBuffer>;
+			if (bytesPerRow === w * 8) {
+				const buf = new ArrayBuffer(pixels.byteLength);
+				new Uint8Array(buf).set(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
+				uploadData = new Uint8Array(buf);
+			} else {
+				const buf = new ArrayBuffer(bytesPerRow * h);
+				uploadData = new Uint8Array(buf);
+				const srcRow = w * 8;
+				for (let row = 0; row < h; row++) {
+					uploadData.set(
+						new Uint8Array(pixels.buffer, pixels.byteOffset + row * srcRow, srcRow),
+						row * bytesPerRow,
+					);
+				}
 			}
+
+			device.queue.writeTexture(
+				{ texture: rawTexture },
+				uploadData,
+				{ bytesPerRow, rowsPerImage: h },
+				[w, h],
+			);
+
+			// ── Ingest pass: rgba16uint → rgba16float ────────────────────────
+			const ingestedTexture = device.createTexture({
+				size: [w, h],
+				format: 'rgba16float',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+
+			const ingestBG = device.createBindGroup({
+				layout: ingestRawPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: rawTexture.createView() },
+				],
+			});
+
+			const ingestEncoder = device.createCommandEncoder();
+			drawFullscreenTriangle(ingestEncoder, ingestRawPipeline, ingestBG, ingestedTexture.createView());
+			device.queue.submit([ingestEncoder.finish()]);
+
+			// ── Swap sourceTexture + intermediates for the main passes ────────
+			sourceTexture?.destroy();
+			sourceTexture = ingestedTexture;
+			ensureIntermediates(w, h, true);
+
+			// This buffer now owns sourceTexture; invalidate the other paths'
+			// residency so they re-upload when next used.
+			lastRawBuffer = rawBuffer;
+			lastDecodedBuffer = null;
+			lastBitmap = null;
 		}
-
-		device.queue.writeTexture(
-			{ texture: rawTexture },
-			uploadData,
-			{ bytesPerRow, rowsPerImage: h },
-			[w, h],
-		);
-
-		// ── Ingest pass: rgba16uint → rgba16float ────────────────────────────
-		const ingestedTexture = device.createTexture({
-			size: [w, h],
-			format: 'rgba16float',
-			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-		});
-
-		const ingestBG = device.createBindGroup({
-			layout: ingestRawPipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: rawTexture.createView() },
-			],
-		});
-
-		const ingestEncoder = device.createCommandEncoder();
-		drawFullscreenTriangle(ingestEncoder, ingestRawPipeline, ingestBG, ingestedTexture.createView());
-		device.queue.submit([ingestEncoder.finish()]);
-
-		// ── Swap sourceTexture + intermediates for the main passes ────────────
-		sourceTexture?.destroy();
-		sourceTexture = ingestedTexture;
-		ensureIntermediates(w, h, true);
-
-		// Invalidate lastBitmap so next JPEG render re-uploads.
-		lastBitmap = null;
 
 		await runMainPasses(edit, w, h, true, logPerc);
 
-		rawTexture.destroy();
+		rawTexture?.destroy();
 
 		// Surface any GPU errors captured during this render.
 		const oomErr = await device.popErrorScope();
@@ -2590,6 +2670,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		cachedF32Bitmap = null;
 		cachedF32Pixels = null;
 		cachedInvertLogPerc = null;
+		cachedPercSource = null;
+		cachedPercValue = null;
+		lastRawBuffer = null;
+		lastDecodedBuffer = null;
 		device.destroy();
 	}
 
