@@ -25,22 +25,22 @@
  *   gpu.destroy();          // free GPU resources
  */
 
-import invertWGSL           from './shaders/invert.wgsl?raw';
-import colorMatrixWGSL      from './shaders/colormatrix.wgsl?raw';
-import toneCurveWGSL        from './shaders/tonecurve.wgsl?raw';
-import ingestRawWGSL        from './shaders/ingest_raw.wgsl?raw';
-import normalizationWGSL    from './shaders/normalization.wgsl?raw';
-import hdCurveWGSL          from './shaders/hd_curve.wgsl?raw';
-import glowWGSL             from './shaders/glow.wgsl?raw';
-import downsampleWGSL       from './shaders/downsample.wgsl?raw';
-import glowBlendWGSL        from './shaders/glow_blend.wgsl?raw';
-import claheHistogramWGSL   from './shaders/clahe_histogram.wgsl?raw';
-import claheRemapWGSL       from './shaders/clahe_remap.wgsl?raw';
-import sharpenWGSL          from './shaders/sharpen.wgsl?raw';
-import blitWGSL             from './shaders/blit.wgsl?raw';
-import cropWGSL             from './shaders/crop.wgsl?raw';
-import transformWGSL        from './shaders/transform.wgsl?raw';
-import borderWGSL           from './shaders/border.wgsl?raw';
+import invertWGSL from './shaders/invert.wgsl?raw';
+import colorMatrixWGSL from './shaders/colormatrix.wgsl?raw';
+import toneCurveWGSL from './shaders/tonecurve.wgsl?raw';
+import ingestRawWGSL from './shaders/ingest_raw.wgsl?raw';
+import normalizationWGSL from './shaders/normalization.wgsl?raw';
+import hdCurveWGSL from './shaders/hd_curve.wgsl?raw';
+import glowWGSL from './shaders/glow.wgsl?raw';
+import downsampleWGSL from './shaders/downsample.wgsl?raw';
+import glowBlendWGSL from './shaders/glow_blend.wgsl?raw';
+import claheHistogramWGSL from './shaders/clahe_histogram.wgsl?raw';
+import claheRemapWGSL from './shaders/clahe_remap.wgsl?raw';
+import sharpenWGSL from './shaders/sharpen.wgsl?raw';
+import blitWGSL from './shaders/blit.wgsl?raw';
+import cropWGSL from './shaders/crop.wgsl?raw';
+import transformWGSL from './shaders/transform.wgsl?raw';
+import borderWGSL from './shaders/border.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import type { BorderColor, CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
 import { TONE_PRESETS } from '$lib/types';
@@ -91,9 +91,9 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 	const Z = (Y / y) * (1 - x - y);
 
 	// XYZ D65 → linear sRGB (IEC 61966-2-1)
-	const r =  3.2406 * X - 1.5372 * Y - 0.4986 * Z;
+	const r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
 	const g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
-	const b =  0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+	const b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
 
 	// Normalise so that green channel (most stable) is 1.0
 	const gNorm = g > 0 ? g : 1;
@@ -106,6 +106,45 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 	];
 }
 
+/**
+ * Long-edge cap, in pixels, for the resolution the editor *works* at.
+ *
+ * Every pass in the chain runs at this resolution on every render, so it sets
+ * the interactive frame rate: cost scales with the pixel count, i.e. with the
+ * square of this number.  A 26 MP frame at full resolution is ~4× the work of
+ * 3072 px, and a 40 MP X-Trans frame is ~7×.
+ *
+ * Downscaling is only safe because it happens *after* a full-resolution
+ * demosaic and uses an area average (`raw.rs`) or Lanczos3 (`decode.rs`).
+ * Reaching a small image by demosaicking cheaply, or by point-sampling, is what
+ * made the preview look crunchy — the resolution was never the problem.
+ */
+export const PREVIEW_MAX_PX = 2072;
+
+/** Cached adapter limit, so repeat callers do not re-request an adapter. */
+let _gpuMaxTextureDimension: number | null = null;
+
+/**
+ * The long-edge cap the editor actually decodes at: `PREVIEW_MAX_PX`, lowered
+ * to the GPU's texture limit on devices that cannot hold that much.
+ *
+ * Callers that have a live pipeline should use its `maxTextureDimension`; this
+ * exists for the ones that do not (the roll grid's background decode sweep),
+ * which must arrive at the *same* number or every frame it warms would be
+ * cached under a key the editor never asks for.
+ */
+export async function previewMaxPx(): Promise<number> {
+	if (_gpuMaxTextureDimension === null) {
+		try {
+			const adapter = await navigator.gpu?.requestAdapter();
+			_gpuMaxTextureDimension = adapter?.limits.maxTextureDimension2D ?? PREVIEW_MAX_PX;
+		} catch {
+			_gpuMaxTextureDimension = PREVIEW_MAX_PX;
+		}
+	}
+	return Math.min(_gpuMaxTextureDimension, PREVIEW_MAX_PX);
+}
+
 // ─── Log-space percentile computation (NegPy normalization) ──────────────────
 
 /**
@@ -114,6 +153,36 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
  * film rebate border from the analysis.
  */
 const ANALYSIS_BUFFER = 0.10;
+
+/**
+ * 256-entry sRGB→linear lookup table, keyed on the 8-bit sample value.
+ *
+ * Mirrors `srgb_to_linear` in `normalization.wgsl` / `invert.wgsl` and
+ * `export.rs:1087` so the CPU percentile analysis, the GPU preview and the
+ * native export all operate on the same linear-light values.
+ */
+const SRGB_TO_LINEAR_LUT: Float32Array = (() => {
+	const lut = new Float32Array(256);
+	for (let i = 0; i < 256; i++) {
+		const c = i / 255;
+		lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+	}
+	return lut;
+})();
+
+/**
+ * Convert an 8-bit sRGB RGBA buffer to linear-light f32 in place-equivalent
+ * form.  The alpha channel is expanded too — it is never read by the
+ * percentile analysis, so the extra work is not worth a branch per sample.
+ */
+function srgbU8ToLinearF32(src: Uint8ClampedArray | Uint8Array): Float32Array {
+	const out = new Float32Array(src.length);
+	for (let i = 0; i < src.length; i++) {
+		out[i] = SRGB_TO_LINEAR_LUT[src[i]];
+	}
+	return out;
+}
+
 
 /**
  * Number of histogram bins for auto-levels shadow floor computation.
@@ -326,7 +395,7 @@ export interface ChannelHistograms {
  */
 export interface LogPercentiles {
 	floors: [number, number, number];
-	ceils:  [number, number, number];
+	ceils: [number, number, number];
 	/**
 	 * Auto-exposure correction in density units.
 	 * Positive = image is dark, needs brightening (reduce density).
@@ -521,9 +590,9 @@ function computeLogPercentilesFromF32(
 	const cutY = hasDims ? Math.floor(height * ANALYSIS_BUFFER) : 0;
 	const cutX = hasDims ? Math.floor(width * ANALYSIS_BUFFER) : 0;
 	const startY = cutY;
-	const endY   = hasDims ? height - cutY : 0;
+	const endY = hasDims ? height - cutY : 0;
 	const startX = cutX;
-	const endX   = hasDims ? width - cutX : 0;
+	const endX = hasDims ? width - cutX : 0;
 
 	if (hasDims) {
 		for (let y = startY; y < endY; y += stride) {
@@ -551,12 +620,12 @@ function computeLogPercentilesFromF32(
 	// negpy: C41/BW use p_low=0.001, p_high=99.999
 	//        E6 uses p_low=99.999, p_high=0.001
 	const isE6 = filmType === 'E6';
-	const pHigh = isE6 ? 0.001  : 99.999;
+	const pHigh = isE6 ? 0.001 : 99.999;
 
 	// Compute floors and ceils using either auto-levels or percentile method
 	let floors: [number, number, number];
 	let ceils: [number, number, number];
-	
+
 	if (autoLevels) {
 		// Auto-levels: each channel finds its own floor AND ceil independently.
 		// This is key for removing color casts - channels are stretched independently.
@@ -585,7 +654,7 @@ function computeLogPercentilesFromF32(
 		floors = darkCount > 0
 			? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
 			: [percentile(rLog, pLow), percentile(gLog, pLow), percentile(bLog, pLow)];
-		
+
 		// Ceils use standard per-channel percentile
 		ceils = [
 			percentile(rLog, pHigh),
@@ -596,7 +665,7 @@ function computeLogPercentilesFromF32(
 		console.debug('[autoLevels OFF] percentile ceils:', ceils.map(c => c.toFixed(4)));
 	}
 
-	console.debug('[normalization] floor-ceil delta per channel:', 
+	console.debug('[normalization] floor-ceil delta per channel:',
 		[(ceils[0] - floors[0]).toFixed(4), (ceils[1] - floors[1]).toFixed(4), (ceils[2] - floors[2]).toFixed(4)]);
 
 	// ── Auto-exposure calculation ────────────────────────────────────────────
@@ -613,23 +682,23 @@ function computeLogPercentilesFromF32(
 	//
 	// The density slider works inversely: higher density = darker image.
 	// So autoExposure = (0.5 - normalizedMedian) * scale
-	
+
 	const medianR = percentile(rLog, 50);
 	const medianG = percentile(gLog, 50);
 	const medianB = percentile(bLog, 50);
-	
+
 	// Normalize medians to [0, 1] based on floors and ceils
 	const rangeR = ceils[0] - floors[0];
 	const rangeG = ceils[1] - floors[1];
 	const rangeB = ceils[2] - floors[2];
-	
+
 	const normMedianR = rangeR > 0.001 ? (medianR - floors[0]) / rangeR : 0.5;
 	const normMedianG = rangeG > 0.001 ? (medianG - floors[1]) / rangeG : 0.5;
 	const normMedianB = rangeB > 0.001 ? (medianB - floors[2]) / rangeB : 0.5;
-	
+
 	// Use luminance-weighted average (human eye is most sensitive to green)
 	const avgNormMedian = 0.2126 * normMedianR + 0.7152 * normMedianG + 0.0722 * normMedianB;
-	
+
 	// Target is 0.5 (middle gray in normalized space).
 	// Scale factor converts the 0-1 deviation to density units.
 	// A deviation of 0.5 (completely dark) should give ~2-3 density units adjustment.
@@ -641,8 +710,8 @@ function computeLogPercentilesFromF32(
 	const TARGET_MEDIAN = 0.5;
 	const EXPOSURE_SCALE = 4.0;  // How aggressively to correct
 	const autoExposure = (avgNormMedian - TARGET_MEDIAN) * EXPOSURE_SCALE;
-	
-	console.debug('[autoExposure] medians (normalized):', 
+
+	console.debug('[autoExposure] medians (normalized):',
 		`R=${normMedianR.toFixed(3)}, G=${normMedianG.toFixed(3)}, B=${normMedianB.toFixed(3)}, avg=${avgNormMedian.toFixed(3)}`);
 	console.debug('[autoExposure] correction:', autoExposure.toFixed(3), 'density units');
 
@@ -660,16 +729,16 @@ function computeLogPercentilesFromF32(
 		const normR = rangeR > 0.001 ? (rLog[i] - floors[0]) / rangeR : 0.5;
 		const normG = rangeG > 0.001 ? (gLog[i] - floors[1]) / rangeG : 0.5;
 		const normB = rangeB > 0.001 ? (bLog[i] - floors[2]) / rangeB : 0.5;
-		
+
 		// Clamp to [0, 1] and map to bin index
 		const binR = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normR)) * (HIST_BINS - 1))));
 		const binG = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normG)) * (HIST_BINS - 1))));
 		const binB = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normB)) * (HIST_BINS - 1))));
-		
+
 		histR[binR]++;
 		histG[binG]++;
 		histB[binB]++;
-		
+
 		// Luminance using standard weights
 		const luma = 0.2126 * normR + 0.7152 * normG + 0.0722 * normB;
 		const binLuma = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, luma)) * (HIST_BINS - 1))));
@@ -741,9 +810,17 @@ function computeLogPercentilesFromU16(
 
 /**
  * Read the pixels of an `ImageBitmap` to a Float32Array via OffscreenCanvas.
- * The result is sRGB-encoded [0,1] f32 values; callers should gamma-expand
- * before computing log percentiles if strictly necessary.  For the percentile
- * computation (which only needs relative ordering), sRGB values are adequate.
+ *
+ * The result is **linear-light** [0,1] f32: the sRGB EOTF is applied here so
+ * the log-percentile analysis measures the same quantity as the normalization
+ * shader (which gamma-expands when `srgbExpand = 1`) and as the native export
+ * path (`export.rs` expands via a 256/65536-entry LUT before `process_image`).
+ *
+ * This matters beyond preview/export parity: the floors and ceils derived here
+ * are persisted as `frame.cachedLogPerc` and handed to the Rust exporter, which
+ * applies them to linear data.  `log10(sRGB)` and `log10(linear)` are not
+ * related by an affine map, so mixing the two silently mis-places every
+ * per-channel bound.
  */
 async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
 	const oc = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -751,12 +828,7 @@ async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
 	if (!ctx) throw new Error('Could not create OffscreenCanvas 2D context');
 	ctx.drawImage(bitmap, 0, 0);
 	const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-	// Convert Uint8ClampedArray [0,255] sRGB to float [0,1].
-	const f32 = new Float32Array(data.data.length);
-	for (let i = 0; i < data.data.length; i++) {
-		f32[i] = data.data[i] / 255.0;
-	}
-	return f32;
+	return srgbU8ToLinearF32(data.data);
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -798,7 +870,7 @@ export interface RawDecodeResult {
  */
 export function parseRawDecodeBuffer(buffer: ArrayBuffer): RawDecodeResult {
 	const view = new DataView(buffer);
-	const width  = view.getUint32(0, true);
+	const width = view.getUint32(0, true);
 	const height = view.getUint32(4, true);
 	const pixelByteLen = width * height * 4 * 2; // u16 × 4 channels × 2 bytes/u16
 	const pixelsOffset = 8;
@@ -879,6 +951,19 @@ export interface GpuPipeline {
 	 */
 	lastOutputWidth: number;
 	lastOutputHeight: number;
+	/**
+	 * Tell the pipeline how much space (in CSS pixels) the canvas may occupy
+	 * on screen. The swap chain is sized to fit this box (times the device
+	 * pixel ratio) instead of the full image resolution, and the blit pass
+	 * box-filters the difference.
+	 *
+	 * Without this the browser composites a full-resolution canvas down to the
+	 * viewport with a single bilinear tap, which aliases heavily and makes the
+	 * preview look far harsher than the exported file.
+	 *
+	 * Pass `0, 0` to disable and render the swap chain at full resolution.
+	 */
+	setDisplayBox(cssWidth: number, cssHeight: number): void;
 }
 
 // ─── LUT texture helper ───────────────────────────────────────────────────────
@@ -961,16 +1046,16 @@ function makeUniformBuffer(device: GPUDevice, data: Float32Array): GPUBuffer {
 function filmTypeToNumber(filmType: FilmType): number {
 	switch (filmType) {
 		case 'C41': return 0;
-		case 'BW':  return 1;
-		case 'E6':  return 2;
-		default:    return 0;
+		case 'BW': return 1;
+		case 'E6': return 2;
+		default: return 0;
 	}
 }
 
 /**
  * Build the normalization pass uniform buffer.
  *
- * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 64 bytes):
+ * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 80 bytes):
  *   floors         : vec4<f32>  @ 0   (rgb + pad)
  *   ceils          : vec4<f32>  @ 16  (rgb + pad)
  *   shadowCast     : vec4<f32>  @ 32  (rgb + pad)
@@ -978,18 +1063,25 @@ function filmTypeToNumber(filmType: FilmType): number {
  *   wpOffset       : f32        @ 52
  *   bpOffset       : f32        @ 56
  *   filmType       : u32        @ 60  (0 = C41, 1 = BW, 2 = E6)
- *   struct size = 64 bytes
+ *   srgbExpand     : f32        @ 64  (1 = gamma-expand source, 0 = already linear)
+ *   _pad0..2       : f32        @ 68..76
+ *   struct size = 80 bytes
+ *
+ * @param srgbExpand - true for sRGB-encoded sources (JPEG/TIFF preview), false
+ *                     for the RAW path whose data is already scene-linear.
  */
 function makeNormalizationUniforms(
 	device: GPUDevice,
 	perc: LogPercentiles,
 	filmType: FilmType,
+	srgbExpand: boolean,
 ): GPUBuffer {
+	const SIZE = 80;
 	const buffer = device.createBuffer({
-		size: 64,
+		size: SIZE,
 		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 	});
-	const data = new ArrayBuffer(64);
+	const data = new ArrayBuffer(SIZE);
 	const floatView = new Float32Array(data);
 	const uintView = new Uint32Array(data);
 
@@ -1006,8 +1098,8 @@ function makeNormalizationUniforms(
 	floatView[7] = 0;  // pad
 
 	// shadowCast (vec4) @ 32
-	floatView[8]  = 0;  // no shadow cast correction for now
-	floatView[9]  = 0;
+	floatView[8] = 0;  // no shadow cast correction for now
+	floatView[9] = 0;
 	floatView[10] = 0;
 	floatView[11] = 0;  // pad
 
@@ -1015,7 +1107,10 @@ function makeNormalizationUniforms(
 	floatView[12] = 0.0;  // shadowStrength
 	floatView[13] = 0.0;  // wpOffset
 	floatView[14] = 0.0;  // bpOffset
-	uintView[15]  = filmTypeToNumber(filmType);  // filmType as u32
+	uintView[15] = filmTypeToNumber(filmType);  // filmType as u32
+
+	// srgbExpand @ 64 (floatView[16]); floatView[17..19] are padding.
+	floatView[16] = srgbExpand ? 1.0 : 0.0;
 
 	device.queue.writeBuffer(buffer, 0, data);
 	return buffer;
@@ -1066,17 +1161,17 @@ function makeHDCurveUniforms(
 
 	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
 	// NegPy convention: Cyan shifts Red channel, Magenta shifts Green, Yellow shifts Blue.
-	const cmyR = inv.cmyCyan    * CMY_MAX_DENSITY;
+	const cmyR = inv.cmyCyan * CMY_MAX_DENSITY;
 	const cmyG = inv.cmyMagenta * CMY_MAX_DENSITY;
-	const cmyB = inv.cmyYellow  * CMY_MAX_DENSITY;
+	const cmyB = inv.cmyYellow * CMY_MAX_DENSITY;
 
-	const sCmyR = inv.shadowCyan    * CMY_MAX_DENSITY;
+	const sCmyR = inv.shadowCyan * CMY_MAX_DENSITY;
 	const sCmyG = inv.shadowMagenta * CMY_MAX_DENSITY;
-	const sCmyB = inv.shadowYellow  * CMY_MAX_DENSITY;
+	const sCmyB = inv.shadowYellow * CMY_MAX_DENSITY;
 
-	const hCmyR = inv.highlightCyan    * CMY_MAX_DENSITY;
+	const hCmyR = inv.highlightCyan * CMY_MAX_DENSITY;
 	const hCmyG = inv.highlightMagenta * CMY_MAX_DENSITY;
-	const hCmyB = inv.highlightYellow  * CMY_MAX_DENSITY;
+	const hCmyB = inv.highlightYellow * CMY_MAX_DENSITY;
 
 	// Create buffer with mixed float32 and uint32 values
 	const buffer = device.createBuffer({
@@ -1100,8 +1195,8 @@ function makeHDCurveUniforms(
 	floatView[7] = 0;  // pad
 
 	// cmyOffsets (vec4) @ 32
-	floatView[8]  = cmyR;
-	floatView[9]  = cmyG;
+	floatView[8] = cmyR;
+	floatView[9] = cmyG;
 	floatView[10] = cmyB;
 	floatView[11] = 0;  // pad
 
@@ -1120,7 +1215,7 @@ function makeHDCurveUniforms(
 	// scalars @ 80
 	floatView[20] = inv.toe;          // toe @ 80
 	floatView[21] = inv.toeWidth;     // toeWidth @ 84
-	uintView[22]  = filmTypeToNumber(inv.filmType);  // filmType @ 88 (u32)
+	uintView[22] = filmTypeToNumber(inv.filmType);  // filmType @ 88 (u32)
 	floatView[23] = inv.shoulder;     // shoulder @ 92
 	floatView[24] = inv.shoulderWidth; // shoulderWidth @ 96
 	floatView[25] = 0.0;              // _unused1 @ 100
@@ -1247,28 +1342,79 @@ function makeBorderUniforms(
 	const c = color === 'white' ? 1 : 0;
 	const data = new Float32Array([
 		contentW / finalW, contentH / finalH,   // innerScale
-		bpX / finalW,      bpY / finalH,         // innerOffset
+		bpX / finalW, bpY / finalH,         // innerOffset
 		c, c, c, 1,                              // color
 	]);
 	return makeUniformBuffer(device, data);
 }
 
 /**
+ * Compute the 8 projective homography coefficients mapping the unit square
+ * (0,0)-(1,1) to the given crop quad. For non-parallelogram quads this maps
+ * straight lines in the output to straight lines in the source, giving true
+ * perspective correction. For rectangles/parallelograms the denominator is 1
+ * and the result is equivalent to the previous bilinear sampling.
+ *
+ * Output order [a,b,c,d,e,f,g,h] so that for an output position (u,v):
+ *     W     = g*u + h*v + 1
+ *     src.x = (a*u + b*v + c) / W
+ *     src.y = (d*u + e*v + f) / W
+ *
+ * Mirrors the helper added to `src-tauri/src/export.rs` to guarantee identical
+ * GPU/CPU results.
+ */
+function computeCropHomography(quad: CropQuad): [number, number, number, number, number, number, number, number] {
+	const x0 = quad.tl.x;
+	const y0 = quad.tl.y;
+	const x1 = quad.tr.x;
+	const y1 = quad.tr.y;
+	const x2 = quad.bl.x;
+	const y2 = quad.bl.y;
+	const x3 = quad.br.x;
+	const y3 = quad.br.y;
+
+	// Solve for the projective map from the unit square (0,0)-(1,1) to the quad.
+	// Mapping: src = ((a*u+b*v+c)/(g*u+h*v+1), (d*u+e*v+f)/(g*u+h*v+1)).
+	// System for the perspective coefficients g and h:
+	//   g*(x1-x3) + h*(x2-x3) = x0-x1-x2+x3
+	//   g*(y1-y3) + h*(y2-y3) = y0-y1-y2+y3
+	const a = x1 - x3;
+	const b = x2 - x3;
+	const rx = x0 - x1 - x2 + x3;
+	const c = y1 - y3;
+	const d = y2 - y3;
+	const ry = y0 - y1 - y2 + y3;
+
+	const det = a * d - b * c;
+	let g = 0.0;
+	let h = 0.0;
+	if (Math.abs(det) > 1e-10) {
+		g = (rx * d - b * ry) / det;
+		h = (a * ry - rx * c) / det;
+	}
+
+	return [
+		(g + 1) * x1 - x0, // a
+		(h + 1) * x2 - x0, // b
+		x0,                // c
+		(g + 1) * y1 - y0, // d
+		(h + 1) * y2 - y0, // e
+		y0,                // f
+		g,                 // g
+		h,                 // h
+	];
+}
+
+/**
  * Build the crop pass uniform buffer.
  *
- * CropQuadUniforms layout (total 32 bytes):
- *   tl : vec2<f32>  @ 0
- *   tr : vec2<f32>  @ 8
- *   br : vec2<f32>  @ 16
- *   bl : vec2<f32>  @ 24
+ * CropUniforms layout (total 32 bytes):
+ *   h0 : vec4<f32>  @ 0   (a, b, c, d)
+ *   h1 : vec4<f32>  @ 16  (e, f, g, h)
  */
 function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
-	const data = new Float32Array([
-		quad.tl.x, quad.tl.y,
-		quad.tr.x, quad.tr.y,
-		quad.br.x, quad.br.y,
-		quad.bl.x, quad.bl.y,
-	]);
+	const [a, b, c, d, e, f, g, h] = computeCropHomography(quad);
+	const data = new Float32Array([a, b, c, d, e, f, g, h]);
 	return makeUniformBuffer(device, data);
 }
 
@@ -1373,51 +1519,89 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 	const sampler = createLinearSampler(device);
 
+	// ── Display (swap chain) sizing ─────────────────────────────────────────
+
+	/** Available on-screen space for the canvas, in CSS pixels. 0 = unknown. */
+	let displayBoxW = 0;
+	let displayBoxH = 0;
+	/** Current swap chain dimensions, so we only reconfigure on change. */
+	let canvasW = 0;
+	let canvasH = 0;
+
+	/**
+	 * Size the swap chain so the image fits the display box at device
+	 * resolution, preserving the aspect ratio of the `finalW × finalH` output.
+	 * Never upscales beyond the processed resolution. Falls back to full
+	 * resolution when the display box is unknown.
+	 */
+	function syncCanvasSize(finalW: number, finalH: number): void {
+		let targetW = finalW;
+		let targetH = finalH;
+
+		if (displayBoxW > 0 && displayBoxH > 0) {
+			const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+			const boxW = displayBoxW * dpr;
+			const boxH = displayBoxH * dpr;
+			// `min(…, 1)` keeps us from rendering more pixels than we processed.
+			const scale = Math.min(boxW / finalW, boxH / finalH, 1);
+			targetW = Math.max(1, Math.round(finalW * scale));
+			targetH = Math.max(1, Math.round(finalH * scale));
+		}
+
+		if (targetW === canvasW && targetH === canvasH) return;
+
+		canvas.width = targetW;
+		canvas.height = targetH;
+		canvasW = targetW;
+		canvasH = targetH;
+		context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
+	}
+
 	// ── Compile shader modules ──────────────────────────────────────────────
 
-	const ingestRawModule     = device.createShaderModule({ code: ingestRawWGSL });
-	const invertModule        = device.createShaderModule({ code: invertWGSL });
+	const ingestRawModule = device.createShaderModule({ code: ingestRawWGSL });
+	const invertModule = device.createShaderModule({ code: invertWGSL });
 	const normalizationModule = device.createShaderModule({ code: normalizationWGSL });
-	const hdCurveModule       = device.createShaderModule({ code: hdCurveWGSL });
-	const glowModule          = device.createShaderModule({ code: glowWGSL });
-	const downsampleModule    = device.createShaderModule({ code: downsampleWGSL });
-	const glowBlendModule     = device.createShaderModule({ code: glowBlendWGSL });
-	const claheHistModule     = device.createShaderModule({ code: claheHistogramWGSL });
-	const claheRemapModule    = device.createShaderModule({ code: claheRemapWGSL });
-	const sharpenModule       = device.createShaderModule({ code: sharpenWGSL });
-	const colorMatrixModule   = device.createShaderModule({ code: colorMatrixWGSL });
-	const toneCurveModule     = device.createShaderModule({ code: toneCurveWGSL });
-	const blitModule          = device.createShaderModule({ code: blitWGSL });
-	const cropModule          = device.createShaderModule({ code: cropWGSL });
+	const hdCurveModule = device.createShaderModule({ code: hdCurveWGSL });
+	const glowModule = device.createShaderModule({ code: glowWGSL });
+	const downsampleModule = device.createShaderModule({ code: downsampleWGSL });
+	const glowBlendModule = device.createShaderModule({ code: glowBlendWGSL });
+	const claheHistModule = device.createShaderModule({ code: claheHistogramWGSL });
+	const claheRemapModule = device.createShaderModule({ code: claheRemapWGSL });
+	const sharpenModule = device.createShaderModule({ code: sharpenWGSL });
+	const colorMatrixModule = device.createShaderModule({ code: colorMatrixWGSL });
+	const toneCurveModule = device.createShaderModule({ code: toneCurveWGSL });
+	const blitModule = device.createShaderModule({ code: blitWGSL });
+	const cropModule = device.createShaderModule({ code: cropWGSL });
 
 	// ── Build render pipelines ──────────────────────────────────────────────
 
 	function makeRenderPipeline(module: GPUShaderModule, format: GPUTextureFormat): GPURenderPipeline {
 		return device.createRenderPipeline({
 			layout: 'auto',
-			vertex:   { module, entryPoint: 'vs_main' },
+			vertex: { module, entryPoint: 'vs_main' },
 			fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
 			primitive: { topology: 'triangle-list' },
 		});
 	}
 
-	const ingestRawPipeline     = makeRenderPipeline(ingestRawModule,     'rgba16float');
-	const invertPipeline        = makeRenderPipeline(invertModule,         'rgba16float');
-	const normalizationPipeline = makeRenderPipeline(normalizationModule,  'rgba16float');
-	const hdCurvePipeline       = makeRenderPipeline(hdCurveModule,        'rgba16float');
-	const glowPipeline          = makeRenderPipeline(glowModule,           'rgba16float');
-	const downsamplePipeline    = makeRenderPipeline(downsampleModule,     'rgba16float');
-	const glowBlendPipeline     = makeRenderPipeline(glowBlendModule,      'rgba16float');
-	const colorMatrixPipeline   = makeRenderPipeline(colorMatrixModule,    'rgba16float');
+	const ingestRawPipeline = makeRenderPipeline(ingestRawModule, 'rgba16float');
+	const invertPipeline = makeRenderPipeline(invertModule, 'rgba16float');
+	const normalizationPipeline = makeRenderPipeline(normalizationModule, 'rgba16float');
+	const hdCurvePipeline = makeRenderPipeline(hdCurveModule, 'rgba16float');
+	const glowPipeline = makeRenderPipeline(glowModule, 'rgba16float');
+	const downsamplePipeline = makeRenderPipeline(downsampleModule, 'rgba16float');
+	const glowBlendPipeline = makeRenderPipeline(glowBlendModule, 'rgba16float');
+	const colorMatrixPipeline = makeRenderPipeline(colorMatrixModule, 'rgba16float');
 	/**
 	 * Tone curve renders to `rgba16float` for maximum precision.
 	 * A blit pass with ordered dithering then converts to the 8-bit swap chain,
 	 * and a separate readback copy quantises to `rgba8unorm` with dithering.
 	 */
-	const toneCurvePipeline     = makeRenderPipeline(toneCurveModule,      'rgba16float');
-	const blitPipeline          = makeRenderPipeline(blitModule,           presentationFormat);
+	const toneCurvePipeline = makeRenderPipeline(toneCurveModule, 'rgba16float');
+	const blitPipeline = makeRenderPipeline(blitModule, presentationFormat);
 	/** Blit pipeline targeting rgba8unorm for the readback texture. */
-	const blitReadbackPipeline  = makeRenderPipeline(blitModule,           'rgba8unorm');
+	const blitReadbackPipeline = makeRenderPipeline(blitModule, 'rgba8unorm');
 
 	// ── CLAHE pipelines ────────────────────────────────────────────────────
 
@@ -1466,6 +1650,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	// ── Mutable resources (rebuilt per render when image changes) ────────────
 
 	let lastBitmap: ImageBitmap | null = null;
+	/**
+	 * Source buffers whose GPU upload is still resident in `sourceTexture`.
+	 *
+	 * Uploading is by far the most expensive part of a render on the RAW path
+	 * (a 26 MP frame is a 207 MB `rgba16uint` copy plus an ingest pass plus a
+	 * full rebuild of every intermediate).  None of it depends on the edit
+	 * parameters, so re-doing it on every slider tick is what pinned the
+	 * editor at ~1 fps.  Identity comparison is enough: the decode buffers are
+	 * immutable and replaced wholesale on frame navigation.
+	 */
+	let lastRawBuffer: ArrayBuffer | null = null;
+	let lastDecodedBuffer: ArrayBuffer | null = null;
 	let sourceTexture: GPUTexture | null = null;
 	let intermediateA: GPUTexture | null = null;
 	let intermediateB: GPUTexture | null = null;
@@ -1539,6 +1735,45 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	let cachedInvertFilmType: string | null = null;
 	let cachedInvertAutoLevels: boolean | null = null;
 
+	/**
+	 * Log-percentile cache for the buffer-based paths (`renderRaw` /
+	 * `renderDecodedRgba`), which have no `ImageBitmap` to key on.
+	 *
+	 * The analysis walks every pixel on the main thread, so at full resolution
+	 * it alone costs more than the entire GPU pass chain.  It depends only on
+	 * the source pixels plus `filmType` / `autoLevels`, never on the edit
+	 * parameters being dragged.
+	 */
+	let cachedPercSource: object | null = null;
+	let cachedPercFilmType: string | null = null;
+	let cachedPercAutoLevels: boolean | null = null;
+	let cachedPercValue: LogPercentiles | null = null;
+
+	/**
+	 * Return cached percentiles for `source`, computing them via `compute` only
+	 * when the source or the two parameters that affect them have changed.
+	 */
+	function cachedPercentiles(
+		source: object,
+		filmType: FilmType,
+		autoLevels: boolean,
+		compute: () => LogPercentiles,
+	): LogPercentiles {
+		if (
+			cachedPercValue !== null &&
+			cachedPercSource === source &&
+			cachedPercFilmType === filmType &&
+			cachedPercAutoLevels === autoLevels
+		) {
+			return cachedPercValue;
+		}
+		cachedPercValue = compute();
+		cachedPercSource = source;
+		cachedPercFilmType = filmType;
+		cachedPercAutoLevels = autoLevels;
+		return cachedPercValue;
+	}
+
 	/** Track last output dimensions to detect when resize is needed. */
 	let lastOutputWidth = 0;
 	let lastOutputHeight = 0;
@@ -1574,11 +1809,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		const hasCrop = edit.cropQuad !== null;
 		const hasTransform = !isIdentityTransform(edit.transform);
 		const swapDims = isRotation90Multiple(edit.transform.rotation);
-		
+
 		// Start with source dimensions, swap if rotated 90°/270°
 		let outW = swapDims ? h : w;
 		let outH = swapDims ? w : h;
-		
+
 		// Apply crop dimensions (crop is in post-rotation space, so use rotated dims)
 		if (hasCrop && edit.cropQuad) {
 			const cropDims = computeCropOutputDimensions(edit.cropQuad, outW, outH);
@@ -1597,12 +1832,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		const finalW = contentW + 2 * bp;
 		const finalH = contentH + 2 * bp;
 
-		// ── Resize canvas + output textures (FINAL/bordered size) ───────────
+		// ── Resize output textures (FINAL/bordered size) ────────────────────
+		// These stay at full processing resolution — readPixels(), the WB
+		// picker and horizon detection all read from `readbackTexture`.
 		if (finalW !== lastOutputWidth || finalH !== lastOutputHeight) {
-			canvas.width = finalW;
-			canvas.height = finalH;
-			context.configure({ device, format: presentationFormat, alphaMode: 'opaque' });
-
 			// Rebuild output + readback textures at new size
 			outputTexture?.destroy();
 			outputTexture = device.createTexture({
@@ -1620,6 +1853,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastOutputWidth = finalW;
 			lastOutputHeight = finalH;
 		}
+
+		// ── Resize the swap chain to the on-screen display size ─────────────
+		// Compositing a full-resolution canvas down to the viewport is a
+		// single bilinear tap (no mip chain), which aliases badly. Rendering
+		// the swap chain at display size and box-filtering in the blit pass
+		// gives a preview that matches the exported file.
+		syncCanvasSize(finalW, finalH);
 
 		// ── Resize content texture (border pass input) when matte active ────
 		if (bp > 0 && (contentW !== lastContentW || contentH !== lastContentH)) {
@@ -1660,10 +1900,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			edit.rgbCurves,
 		);
 
-		const toneLutTex  = createLutTexture(device, toneLut);
-		const redLutTex   = createLutTexture(device, redLut);
+		const toneLutTex = createLutTexture(device, toneLut);
+		const redLutTex = createLutTexture(device, redLut);
 		const greenLutTex = createLutTexture(device, greenLut);
-		const blueLutTex  = createLutTexture(device, blueLut);
+		const blueLutTex = createLutTexture(device, blueLut);
 
 		// ── Build colour matrix uniforms ────────────────────────────────────
 		// Source matrix m is row-major [m00,m01,m02, m10,m11,m12, m20,m21,m22].
@@ -1673,7 +1913,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			m[0], m[3], m[6], 0,   // col0: [m00, m10, m20, pad]
 			m[1], m[4], m[7], 0,   // col1: [m01, m11, m21, pad]
 			m[2], m[5], m[8], 0,   // col2: [m02, m12, m22, pad]
-			0,    0,    0,    0,   // _pad vec4
+			0, 0, 0, 0,   // _pad vec4
 		]);
 		const colorMatrixUniformBuf = makeUniformBuffer(device, colorMatrixUniforms);
 
@@ -1716,8 +1956,13 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// Pass 2.6: clahe_remap    — fragment: intermediateE/B + CDF → intermediateC
 			// Pass 3: tonecurve        — intermediateC/E/B  → outputTexture
 
-			const normBuf = makeNormalizationUniforms(device, logPerc, edit.inversionParams.filmType);
-			
+			const normBuf = makeNormalizationUniforms(
+				device,
+				logPerc,
+				edit.inversionParams.filmType,
+				!isLinear,
+			);
+
 			// Apply auto-exposure correction if enabled
 			const autoExposureAdj = edit.inversionParams.autoExposure ? logPerc.autoExposure : 0;
 			const hdBuf = makeHDCurveUniforms(device, edit.inversionParams, autoExposureAdj);
@@ -1759,7 +2004,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// (Native export uses HQ full-res glow in Rust process.rs)
 			const glowAmount = edit.inversionParams.glow ?? 0;
 			let postGlowTexture: GPUTexture;
-			
+
 			if (glowAmount > 0 && intermediateE && glowDownsampleTex && glowBlurTex) {
 				// Step 1: Downsample H&D output to 1/4 resolution
 				const downsampleBG = device.createBindGroup({
@@ -2063,22 +2308,39 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// The GPU transform pass will be used during export (see exportWithTransform).
 
 		// ── Dithered blit → canvas swap chain (8-bit display) ────────────────
+		// The swap chain may be smaller than the output texture; the blit
+		// shader box-filters over the footprint to avoid aliasing.
+		const blitDisplayUnif = makeUniformBuffer(
+			device,
+			new Float32Array([finalW, finalH, canvasW || finalW, canvasH || finalH]),
+		);
+		toClean.push(blitDisplayUnif);
+
 		const blitBG = device.createBindGroup({
 			layout: blitPipeline.getBindGroupLayout(0),
 			entries: [
 				{ binding: 0, resource: sampler },
 				{ binding: 1, resource: outputTexture!.createView() },
+				{ binding: 2, resource: { buffer: blitDisplayUnif } },
 			],
 		});
 
 		drawFullscreenTriangle(encoder, blitPipeline, blitBG, context.getCurrentTexture().createView());
 
 		// ── Dithered blit → readback texture (rgba8unorm, COPY_SRC) ──────────
+		// Full resolution — src and dst match, so this is a 1:1 copy.
+		const blitReadbackUnif = makeUniformBuffer(
+			device,
+			new Float32Array([finalW, finalH, finalW, finalH]),
+		);
+		toClean.push(blitReadbackUnif);
+
 		const readbackBG = device.createBindGroup({
 			layout: blitReadbackPipeline.getBindGroupLayout(0),
 			entries: [
 				{ binding: 0, resource: sampler },
 				{ binding: 1, resource: outputTexture!.createView() },
+				{ binding: 2, resource: { buffer: blitReadbackUnif } },
 			],
 		});
 
@@ -2136,9 +2398,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 				usage: GPUBufferUsage.STORAGE,
 			});
 		}
-	// Pre-transform texture at source resolution (tone curve renders here when transform is active).
-	// After ensureRgba8Source sets sourceTexture, the non-null assertion below is safe.
-	preTransformTexture?.destroy();
+		// Pre-transform texture at source resolution (tone curve renders here when transform is active).
+		// After ensureRgba8Source sets sourceTexture, the non-null assertion below is safe.
+		preTransformTexture?.destroy();
 		preTransformTexture = device.createTexture({
 			size: [srcW, srcH],
 			format: 'rgba16float',
@@ -2188,13 +2450,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		// Re-upload source texture only when the bitmap changes
 		if (bitmap !== lastBitmap) {
-		ensureRgba8Source(w, h);
-		device.queue.copyExternalImageToTexture(
-			{ source: bitmap },
-			{ texture: sourceTexture! },
-			[w, h],
-		);
-		lastBitmap = bitmap;
+			ensureRgba8Source(w, h);
+			device.queue.copyExternalImageToTexture(
+				{ source: bitmap },
+				{ texture: sourceTexture! },
+				[w, h],
+			);
+			lastBitmap = bitmap;
+			// This bitmap now owns sourceTexture.
+			lastRawBuffer = null;
+			lastDecodedBuffer = null;
 		}
 
 		// Compute log percentiles for the NegPy normalization pass.
@@ -2246,50 +2511,61 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	async function renderDecodedRgba(edit: EffectiveEdit, rgbaBuffer: ArrayBuffer): Promise<void> {
 		const { width: w, height: h, pixels } = parseDecodeImageRgbBuffer(rgbaBuffer);
 
-		// Invalidate ImageBitmap cache so the next render() call re-uploads.
-		lastBitmap = null;
-		cachedF32Bitmap = null;
-		cachedF32Pixels = null;
-		cachedInvertLogPerc = null;
+		// ── Upload — skipped when this buffer is already resident ─────────────
+		if (rgbaBuffer !== lastDecodedBuffer) {
+			// Invalidate ImageBitmap cache so the next render() call re-uploads.
+			lastBitmap = null;
+			cachedF32Bitmap = null;
+			cachedF32Pixels = null;
+			cachedInvertLogPerc = null;
 
-		ensureRgba8Source(w, h);
-		// bytesPerRow must be 256-aligned for writeTexture.
-		const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
-		let uploadData: ArrayBuffer;
-		if (bytesPerRow === w * 4) {
-			uploadData = (pixels.buffer as ArrayBuffer).slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
-		} else {
-			const buf = new ArrayBuffer(bytesPerRow * h);
-			const dst = new Uint8Array(buf);
-			for (let row = 0; row < h; row++) {
-				dst.set(
-					new Uint8Array(pixels.buffer, pixels.byteOffset + row * w * 4, w * 4),
-					row * bytesPerRow,
-				);
+			ensureRgba8Source(w, h);
+			// bytesPerRow must be 256-aligned for writeTexture.
+			const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+			let uploadData: ArrayBuffer;
+			if (bytesPerRow === w * 4) {
+				uploadData = (pixels.buffer as ArrayBuffer).slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+			} else {
+				const buf = new ArrayBuffer(bytesPerRow * h);
+				const dst = new Uint8Array(buf);
+				for (let row = 0; row < h; row++) {
+					dst.set(
+						new Uint8Array(pixels.buffer, pixels.byteOffset + row * w * 4, w * 4),
+						row * bytesPerRow,
+					);
+				}
+				uploadData = buf;
 			}
-			uploadData = buf;
+
+			device.queue.writeTexture(
+				{ texture: sourceTexture! },
+				uploadData,
+				{ bytesPerRow },
+				[w, h],
+			);
+
+			lastDecodedBuffer = rgbaBuffer;
+			lastRawBuffer = null;
 		}
 
-		device.queue.writeTexture(
-			{ texture: sourceTexture! },
-			uploadData,
-			{ bytesPerRow },
-			[w, h],
-		);
-
 		// Compute log percentiles for the NegPy normalization pass.
+		// Gamma-expand to linear first — the normalization shader does the same
+		// (srgbExpand = 1 on this path), and the exporter measures linear data.
 		let logPerc: LogPercentiles | null = null;
 		if (edit.invert) {
-			const f32 = new Float32Array(pixels.length);
-			const u8 = pixels as Uint8ClampedArray;
-			for (let i = 0; i < pixels.length; i++) {
-				f32[i] = u8[i] / 255.0;
-			}
-			logPerc = computeLogPercentilesFromF32(
-				f32, w, h, 8, undefined,
+			logPerc = cachedPercentiles(
+				rgbaBuffer,
 				edit.inversionParams.filmType,
 				edit.inversionParams.autoLevels,
+				() => computeLogPercentilesFromF32(
+					srgbU8ToLinearF32(pixels as Uint8ClampedArray), w, h, 8, undefined,
+					edit.inversionParams.filmType,
+					edit.inversionParams.autoLevels,
+				),
 			);
+			lastLogPerc = logPerc;
+		} else {
+			lastLogPerc = null;
 		}
 
 		await runMainPasses(edit, w, h, false, logPerc);
@@ -2312,10 +2588,15 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			if (logPercOverride) {
 				logPerc = logPercOverride;
 			} else {
-				logPerc = computeLogPercentilesFromU16(
-					pixels, w, h, 8, undefined,
+				logPerc = cachedPercentiles(
+					rawBuffer,
 					edit.inversionParams.filmType,
 					edit.inversionParams.autoLevels,
+					() => computeLogPercentilesFromU16(
+						pixels, w, h, 8, undefined,
+						edit.inversionParams.filmType,
+						edit.inversionParams.autoLevels,
+					),
 				);
 				lastLogPerc = logPerc;
 			}
@@ -2327,67 +2608,77 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		device.pushErrorScope('validation');
 		device.pushErrorScope('out-of-memory');
 
-		// Upload u16 pixel data as rgba16uint texture.
-		const rawTexture = device.createTexture({
-			size: [w, h],
-			format: 'rgba16uint',
-			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-		});
-		// Each pixel is 4 × u16 = 8 bytes; bytesPerRow must be aligned to 256.
-		const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
-		let uploadData: Uint8Array<ArrayBuffer>;
-		if (bytesPerRow === w * 8) {
-			const buf = new ArrayBuffer(pixels.byteLength);
-			new Uint8Array(buf).set(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
-			uploadData = new Uint8Array(buf);
-		} else {
-			const buf = new ArrayBuffer(bytesPerRow * h);
-			uploadData = new Uint8Array(buf);
-			const srcRow = w * 8;
-			for (let row = 0; row < h; row++) {
-				uploadData.set(
-					new Uint8Array(pixels.buffer, pixels.byteOffset + row * srcRow, srcRow),
-					row * bytesPerRow,
-				);
+		// ── Upload + ingest — skipped when this buffer is already resident ────
+		// Everything in here depends only on the source pixels, so on a slider
+		// drag we go straight to the main passes with the ingested texture and
+		// the intermediates from the first render of this frame.
+		let rawTexture: GPUTexture | null = null;
+		if (rawBuffer !== lastRawBuffer) {
+			// Upload u16 pixel data as rgba16uint texture.
+			rawTexture = device.createTexture({
+				size: [w, h],
+				format: 'rgba16uint',
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			// Each pixel is 4 × u16 = 8 bytes; bytesPerRow must be aligned to 256.
+			const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
+			let uploadData: Uint8Array<ArrayBuffer>;
+			if (bytesPerRow === w * 8) {
+				const buf = new ArrayBuffer(pixels.byteLength);
+				new Uint8Array(buf).set(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
+				uploadData = new Uint8Array(buf);
+			} else {
+				const buf = new ArrayBuffer(bytesPerRow * h);
+				uploadData = new Uint8Array(buf);
+				const srcRow = w * 8;
+				for (let row = 0; row < h; row++) {
+					uploadData.set(
+						new Uint8Array(pixels.buffer, pixels.byteOffset + row * srcRow, srcRow),
+						row * bytesPerRow,
+					);
+				}
 			}
+
+			device.queue.writeTexture(
+				{ texture: rawTexture },
+				uploadData,
+				{ bytesPerRow, rowsPerImage: h },
+				[w, h],
+			);
+
+			// ── Ingest pass: rgba16uint → rgba16float ────────────────────────
+			const ingestedTexture = device.createTexture({
+				size: [w, h],
+				format: 'rgba16float',
+				usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+			});
+
+			const ingestBG = device.createBindGroup({
+				layout: ingestRawPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: rawTexture.createView() },
+				],
+			});
+
+			const ingestEncoder = device.createCommandEncoder();
+			drawFullscreenTriangle(ingestEncoder, ingestRawPipeline, ingestBG, ingestedTexture.createView());
+			device.queue.submit([ingestEncoder.finish()]);
+
+			// ── Swap sourceTexture + intermediates for the main passes ────────
+			sourceTexture?.destroy();
+			sourceTexture = ingestedTexture;
+			ensureIntermediates(w, h, true);
+
+			// This buffer now owns sourceTexture; invalidate the other paths'
+			// residency so they re-upload when next used.
+			lastRawBuffer = rawBuffer;
+			lastDecodedBuffer = null;
+			lastBitmap = null;
 		}
-
-		device.queue.writeTexture(
-			{ texture: rawTexture },
-			uploadData,
-			{ bytesPerRow, rowsPerImage: h },
-			[w, h],
-		);
-
-		// ── Ingest pass: rgba16uint → rgba16float ────────────────────────────
-		const ingestedTexture = device.createTexture({
-			size: [w, h],
-			format: 'rgba16float',
-			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-		});
-
-		const ingestBG = device.createBindGroup({
-			layout: ingestRawPipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: rawTexture.createView() },
-			],
-		});
-
-		const ingestEncoder = device.createCommandEncoder();
-		drawFullscreenTriangle(ingestEncoder, ingestRawPipeline, ingestBG, ingestedTexture.createView());
-		device.queue.submit([ingestEncoder.finish()]);
-
-		// ── Swap sourceTexture + intermediates for the main passes ────────────
-		sourceTexture?.destroy();
-		sourceTexture = ingestedTexture;
-		ensureIntermediates(w, h, true);
-
-		// Invalidate lastBitmap so next JPEG render re-uploads.
-		lastBitmap = null;
 
 		await runMainPasses(edit, w, h, true, logPerc);
 
-		rawTexture.destroy();
+		rawTexture?.destroy();
 
 		// Surface any GPU errors captured during this render.
 		const oomErr = await device.popErrorScope();
@@ -2418,6 +2709,10 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		cachedF32Bitmap = null;
 		cachedF32Pixels = null;
 		cachedInvertLogPerc = null;
+		cachedPercSource = null;
+		cachedPercValue = null;
+		lastRawBuffer = null;
+		lastDecodedBuffer = null;
 		device.destroy();
 	}
 
@@ -2473,5 +2768,9 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		get lastLogPerc() { return lastLogPerc; },
 		get lastOutputWidth() { return lastOutputWidth; },
 		get lastOutputHeight() { return lastOutputHeight; },
+		setDisplayBox(cssWidth: number, cssHeight: number): void {
+			displayBoxW = cssWidth;
+			displayBoxH = cssHeight;
+		},
 	};
 }

@@ -265,12 +265,12 @@ pub fn apply_quick_inversion(img: &mut image::RgbImage) {
     }
 
     // ── Step 1: Convert to f32 linear ─────────────────────────────────────────
+    let srgb_lut = srgb_to_linear_lut();
     let mut pixels: Vec<f32> = Vec::with_capacity(pixel_count * 3);
     for p in img.pixels() {
-        // sRGB → linear (gamma 2.2)
-        pixels.push((p[0] as f32 / 255.0).powf(2.2));
-        pixels.push((p[1] as f32 / 255.0).powf(2.2));
-        pixels.push((p[2] as f32 / 255.0).powf(2.2));
+        pixels.push(srgb_lut[p[0] as usize]);
+        pixels.push(srgb_lut[p[1] as usize]);
+        pixels.push(srgb_lut[p[2] as usize]);
     }
 
     // ── Step 2: Compute log10 percentiles ─────────────────────────────────────
@@ -296,9 +296,9 @@ pub fn apply_quick_inversion(img: &mut image::RgbImage) {
             d.signum() * abs_d
         };
 
-        let nr = ((lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0])).clamp(0.0, 1.0);
-        let ng = ((lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1])).clamp(0.0, 1.0);
-        let nb = ((lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2])).clamp(0.0, 1.0);
+        let nr = (lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0]);
+        let ng = (lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1]);
+        let nb = (lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2]);
 
         // H&D curve (already gamma encodes to 1/2.2)
         chunk[0] = hd_channel(nr);
@@ -332,6 +332,25 @@ pub fn apply_bw_inversion(img: &mut image::RgbImage) {
     }
 }
 
+/// Build a 256-entry sRGB→linear LUT keyed on the 8-bit sample value.
+///
+/// Exact IEC 61966-2-1 EOTF — matches `srgb_to_linear` in `export.rs` and
+/// `normalization.wgsl`.  The previous `powf(2.2)` approximation diverges by
+/// up to ~1.5% near black, and the per-channel log stretch amplifies exactly
+/// that region on C-41 (the orange mask squeezes the blue channel into a
+/// narrow band just above zero), so the error surfaced as a thumbnail-only
+/// colour cast.
+fn srgb_to_linear_lut() -> [f32; 256] {
+    std::array::from_fn(|i| {
+        let c = i as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+}
+
 /// Apply E6 slide film normalization (no inversion) to an RGB8 image.
 ///
 /// Slide film is already positive — just apply auto levels normalization
@@ -347,11 +366,12 @@ pub fn apply_e6_normalize(img: &mut image::RgbImage) {
     }
 
     // Convert to f32 linear
+    let srgb_lut = srgb_to_linear_lut();
     let mut pixels: Vec<f32> = Vec::with_capacity(pixel_count * 3);
     for p in img.pixels() {
-        pixels.push((p[0] as f32 / 255.0).powf(2.2));
-        pixels.push((p[1] as f32 / 255.0).powf(2.2));
-        pixels.push((p[2] as f32 / 255.0).powf(2.2));
+        pixels.push(srgb_lut[p[0] as usize]);
+        pixels.push(srgb_lut[p[1] as usize]);
+        pixels.push(srgb_lut[p[2] as usize]);
     }
 
     // Compute percentiles for normalization
@@ -375,7 +395,10 @@ pub fn apply_e6_normalize(img: &mut image::RgbImage) {
             d.signum() * abs_d
         };
 
-        // Normalize but don't invert — floor becomes 0, ceil becomes 1
+        // Normalize but don't invert — floor becomes 0, ceil becomes 1.
+        // Unlike the C-41 path this clamp must stay: there is no bounded H&D
+        // sigmoid downstream, only `powf(1/2.2)`, which returns NaN for a
+        // negative base.
         let nr = ((lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0])).clamp(0.0, 1.0);
         let ng = ((lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1])).clamp(0.0, 1.0);
         let nb = ((lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2])).clamp(0.0, 1.0);

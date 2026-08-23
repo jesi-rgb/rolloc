@@ -775,6 +775,11 @@ pub fn compute_log_percentiles_full(
 
 /// Apply log10 normalization per-channel: maps [floor, ceil] → [0, 1].
 /// This simultaneously inverts the negative and removes the orange mask.
+///
+/// The result is deliberately **not** clamped to [0, 1] — mirrors
+/// `normalization.wgsl`.  Densities outside the measured bounds are rolled off
+/// by the bounded H&D sigmoid in `hd_channel`; clipping them here would destroy
+/// every highlight above the ceil percentile before the curve saw it.
 fn normalize_pixel(r: f32, g: f32, b: f32, perc: &LogPercentiles) -> [f32; 3] {
     let eps: f32 = 1e-6;
     let log10_e: f32 = std::f32::consts::LOG10_E;
@@ -792,9 +797,9 @@ fn normalize_pixel(r: f32, g: f32, b: f32, perc: &LogPercentiles) -> [f32; 3] {
     };
 
     [
-        ((lr - floors[0]) / safe_delta(ceils[0] - floors[0])).clamp(0.0, 1.0),
-        ((lg - floors[1]) / safe_delta(ceils[1] - floors[1])).clamp(0.0, 1.0),
-        ((lb - floors[2]) / safe_delta(ceils[2] - floors[2])).clamp(0.0, 1.0),
+        (lr - floors[0]) / safe_delta(ceils[0] - floors[0]),
+        (lg - floors[1]) / safe_delta(ceils[1] - floors[1]),
+        (lb - floors[2]) / safe_delta(ceils[2] - floors[2]),
     ]
 }
 

@@ -1,23 +1,26 @@
 /**
- * Perspective crop pass — samples from a quadrilateral region of the source
- * texture and maps it to the output rectangle using bilinear interpolation.
+ * Perspective crop pass — samples from a projectively-mapped quadrilateral region
+ * of the source texture and maps it to the output rectangle.
  *
- * The four corners of the crop quad (tl, tr, br, bl) are passed as uniforms.
- * Each corner is normalized (0–1) relative to the source image dimensions.
+ * The four corners of the crop quad are converted CPU-side into an 8-coefficient
+ * projective homography:
  *
- * For each output pixel, we compute the corresponding source UV using bilinear
- * interpolation across the quad. This handles perspective distortion correctly.
+ *     W     = g*u + h*v + 1
+ *     src.x = (a*u + b*v + c) / W
+ *     src.y = (d*u + e*v + f) / W
+ *
+ * For rectangles/parallelograms the denominator is 1, giving the same result as
+ * the previous bilinear mapping. For non-parallelogram quads this preserves
+ * straight lines and straightens converging edges (keystone correction).
  */
 
 @group(0) @binding(0) var uSampler : sampler;
 @group(0) @binding(1) var uTexture : texture_2d<f32>;
-@group(0) @binding(2) var<uniform> uCropQuad : CropQuadUniforms;
+@group(0) @binding(2) var<uniform> uCrop : CropUniforms;
 
-struct CropQuadUniforms {
-	tl : vec2<f32>,  // top-left corner (normalized 0–1)
-	tr : vec2<f32>,  // top-right corner
-	br : vec2<f32>,  // bottom-right corner
-	bl : vec2<f32>,  // bottom-left corner
+struct CropUniforms {
+	h0 : vec4<f32>,  // (a, b, c, d)
+	h1 : vec4<f32>,  // (e, f, g, h)
 }
 
 struct VertIn {
@@ -42,41 +45,29 @@ fn vs_main(in : VertIn) -> VertOut {
 }
 
 /**
- * Bilinear interpolation within the quad.
- *
- * Given output UV (u, v) in [0,1]×[0,1], compute the corresponding
- * source UV by interpolating the quad corners:
- *
- *   top    = lerp(tl, tr, u)
- *   bottom = lerp(bl, br, u)
- *   result = lerp(top, bottom, v)
- *
- * This is equivalent to a bilinear patch and handles parallelograms
- * correctly. For true perspective (non-parallelogram quads), this is
- * an approximation but works well for typical film frame alignment.
+ * Projective evaluation of the homography mapping output uv ∈ [0,1]² to source uv.
  */
-fn quadInterpolate(uv : vec2<f32>, tl : vec2<f32>, tr : vec2<f32>, br : vec2<f32>, bl : vec2<f32>) -> vec2<f32> {
-	let u = uv.x;
-	let v = uv.y;
+fn projectiveSample(uv : vec2<f32>) -> vec2<f32> {
+	let a = uCrop.h0.x;
+	let b = uCrop.h0.y;
+	let c = uCrop.h0.z;
+	let d = uCrop.h0.w;
+	let e = uCrop.h1.x;
+	let f = uCrop.h1.y;
+	let g = uCrop.h1.z;
+	let h = uCrop.h1.w;
 
-	// Interpolate along top and bottom edges
-	let top = mix(tl, tr, u);
-	let bottom = mix(bl, br, u);
-
-	// Interpolate between top and bottom
-	return mix(top, bottom, v);
+	let W = g * uv.x + h * uv.y + 1.0;
+	return vec2<f32>(
+		(a * uv.x + b * uv.y + c) / W,
+		(d * uv.x + e * uv.y + f) / W,
+	);
 }
 
 @fragment
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
-	// Map output UV to source UV via the crop quad
-	let srcUV = quadInterpolate(
-		in.uv,
-		uCropQuad.tl,
-		uCropQuad.tr,
-		uCropQuad.br,
-		uCropQuad.bl
-	);
+	// Map output UV to source UV via the projective homography
+	let srcUV = projectiveSample(in.uv);
 
 	// Sample the source texture at the computed UV
 	// Out-of-bounds UVs will be clamped by the sampler

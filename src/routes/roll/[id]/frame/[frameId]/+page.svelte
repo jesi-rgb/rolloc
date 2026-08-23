@@ -25,13 +25,19 @@
   import { startExport } from "$lib/jobs.svelte";
   import { getFrame, getFrames } from "$lib/db/idb";
   import { readPreview, readThumb } from "$lib/fs/opfs";
-  import { readPreview as readSidecarPreview, readThumb as readSidecarThumb, isTauriEnv } from "$lib/fs/sidecar";
+  import {
+    readPreview as readSidecarPreview,
+    readThumb as readSidecarThumb,
+    isTauriEnv,
+  } from "$lib/fs/sidecar";
   import { ensurePreview } from "$lib/image/thumbgen";
   import {
     createPipeline,
     parseRawDecodeBuffer,
     parseDecodeImageRgbBuffer,
+    PREVIEW_MAX_PX,
   } from "$lib/image/pipeline";
+  import { focusDecodeWarm, startDecodeWarm } from "$lib/image/decode-warm";
   import {
     resolveEdit,
     DEFAULT_INVERSION_PARAMS,
@@ -116,6 +122,8 @@
   // ─── Canvas + pipeline refs ────────────────────────────────────────────────
 
   let canvasEl = $state<HTMLCanvasElement | null>(null);
+  /** Preview area container — drives the swap chain display size. */
+  let previewAreaEl = $state<HTMLDivElement | null>(null);
   let pipeline = $state<GpuPipeline | null>(null);
   let currentBitmap = $state<ImageBitmap | null>(null);
   /** Raw binary payload from `raw_decode`; non-null only for RAW frames. */
@@ -141,6 +149,8 @@
   });
 
   onDestroy(() => {
+    // Leave the sweep running — the roll grid picks it back up, and a decode
+    // already paid for is worth keeping.
     pipeline?.destroy();
     currentBitmap?.close();
     currentRawBuffer = null;
@@ -158,6 +168,31 @@
       .catch((err: unknown) => {
         gpuError = err instanceof Error ? err.message : String(err);
       });
+  });
+
+  // ─── Keep the swap chain matched to the on-screen preview size ────────────
+  // The canvas backing store is sized to fit this box rather than the full
+  // image resolution. Letting the browser composite a full-res canvas down to
+  // the viewport uses a single bilinear tap with no mip chain, which aliases
+  // heavily on grainy scans and makes the preview look far harsher than the
+  // exported file.
+
+  $effect(() => {
+    const el = previewAreaEl;
+    const p = pipeline;
+    if (!el || !p) return;
+
+    const ro = new ResizeObserver((entries) => {
+      // contentRect excludes padding, which is the space the canvas can use.
+      const box = entries[0]?.contentRect;
+      if (!box || box.width === 0 || box.height === 0) return;
+      p.setDisplayBox(box.width, box.height);
+      void renderFrame();
+    });
+    // ResizeObserver fires once on observe(), which seeds the initial size.
+    ro.observe(el);
+
+    return () => ro.disconnect();
   });
 
   // ─── History helpers ──────────────────────────────────────────────────────
@@ -272,21 +307,28 @@
 
       const dirPath = await getRollPath(rid);
 
+      // True once a decode that populates the on-disk cache has run for this
+      // frame — the fallback preview-blob path does not, so the sweep must
+      // still cover it.
+      let cacheWarmed = false;
+
       if (frame && isRawExtension(frame.filename) && dirPath) {
         // RAW path — full linear decode via Tauri command.
         const absolutePath = await join(dirPath, frame.filename);
         let rawBuffer: ArrayBuffer;
         try {
-          // Cap at 4000px on the long edge for the editing preview.
-          // Full-res decode is deferred to export. Also respect the GPU
-          // texture size limit (usually 8192, but can be lower on some devices).
+          // Demosaic runs at full sensor resolution, then Rust box-averages
+          // down to this cap. PREVIEW_MAX_PX keeps the interactive pass chain
+          // affordable without the screen seeing any difference; the GPU limit
+          // is the hard ceiling on top of it.
           const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
-          const maxPx = Math.min(4000, gpuLimit);
+          const maxPx = Math.min(gpuLimit, PREVIEW_MAX_PX);
           rawBuffer = await invoke<ArrayBuffer>("raw_decode", {
             path: absolutePath,
             maxPx,
             skipWb: roll.rollEdit.invert,
           });
+          cacheWarmed = true;
         } catch (err) {
           renderError = `Failed to decode RAW file: ${err instanceof Error ? err.message : String(err)}`;
           loading = false;
@@ -359,8 +401,9 @@
             const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
             directBuffer = await invoke<ArrayBuffer>("decode_image_rgba", {
               path: absolutePath,
-              maxPx: gpuLimit,
+              maxPx: Math.min(gpuLimit, PREVIEW_MAX_PX),
             });
+            cacheWarmed = true;
           } catch (err) {
             console.warn(
               "[frame] Direct decode failed, falling back to cached preview:",
@@ -370,7 +413,8 @@
         }
 
         if (directBuffer) {
-          const { width: decW, height: decH } = parseDecodeImageRgbBuffer(directBuffer);
+          const { width: decW, height: decH } =
+            parseDecodeImageRgbBuffer(directBuffer);
           currentBitmap?.close();
           currentBitmap = null;
           currentRawBuffer = null;
@@ -384,14 +428,21 @@
           if (dirPath) {
             try {
               const absolutePath = await join(dirPath, frame.filename);
-              blob = await ensurePreview(frame.id, { absolutePath }, undefined, dirPath);
+              blob = await ensurePreview(
+                frame.id,
+                { absolutePath },
+                undefined,
+                dirPath,
+              );
             } catch {
               // File missing — try sidecar/OPFS cache.
             }
           }
 
-          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarPreview(dirPath, frame.id);
-          if (!blob && dirPath && isTauriEnv()) blob = await readSidecarThumb(dirPath, frame.id);
+          if (!blob && dirPath && isTauriEnv())
+            blob = await readSidecarPreview(dirPath, frame.id);
+          if (!blob && dirPath && isTauriEnv())
+            blob = await readSidecarThumb(dirPath, frame.id);
           if (!blob) blob = await readPreview(frame.id);
           if (!blob) blob = await readThumb(frame.id);
 
@@ -414,6 +465,19 @@
       }
 
       loading = false;
+
+      // The frame on screen is decoded (and therefore cached) by now — tell the
+      // sweep so it moves on to the neighbours instead of redoing this one.
+      focusDecodeWarm(fid, cacheWarmed);
+      if (dirPath && frames.length > 1) {
+        void startDecodeWarm({
+          rollId: rid,
+          dirPath,
+          frames: frames.map((f) => ({ id: f.id, filename: f.filename })),
+          invert: roll?.rollEdit.invert ?? false,
+          maxPx: Math.min(pipeline?.maxTextureDimension ?? 8192, PREVIEW_MAX_PX),
+        });
+      }
     }
 
     load().catch((err: unknown) => {
@@ -561,6 +625,9 @@
   /** When true, the crop overlay is visible and editable. */
   let cropModeActive = $state(false);
 
+  /** When true, the crop overlay is in perspective-correction mode. */
+  let perspectiveActive = $state(false);
+
   /** When true, user is dragging the fine rotation slider — show denser alignment grid. */
   let fineRotating = $state(false);
 
@@ -608,6 +675,7 @@
     } else {
       // Entering crop mode — show full uncropped image
       cropModeActive = true;
+      perspectiveActive = false;
       // Start each crop session free-form.
       cropAspect = null;
       // Initialize local quad from saved state (or default if none)
@@ -618,6 +686,10 @@
       }
       renderUncropped();
     }
+  }
+
+  function togglePerspective(): void {
+    perspectiveActive = !perspectiveActive;
   }
 
   /**
@@ -657,6 +729,7 @@
 
     // Exit crop mode
     cropModeActive = false;
+    perspectiveActive = false;
     localCropQuad = null;
 
     // Re-render with the crop applied
@@ -688,6 +761,7 @@
    */
   function cancelCrop(): void {
     cropModeActive = false;
+    perspectiveActive = false;
     localCropQuad = null;
     // Re-render with the previously saved crop (not the local edits)
     renderFrame();
@@ -703,10 +777,15 @@
   function handleWbPickerClick(e: MouseEvent): void {
     if (!wbPickerActive || !canvasEl || !pipeline) return;
 
-    // Map pointer coords (CSS px) to canvas pixel coords.
+    // Map pointer coords (CSS px) to readback-texture pixel coords.
+    // The canvas backing store is sized to the display box, but readPixels()
+    // reads the full-resolution readback texture, so scale against that.
     const rect = canvasEl.getBoundingClientRect();
-    const scaleX = canvasEl.width / rect.width;
-    const scaleY = canvasEl.height / rect.height;
+    const readW = pipeline.lastOutputWidth;
+    const readH = pipeline.lastOutputHeight;
+    if (readW === 0 || readH === 0) return;
+    const scaleX = readW / rect.width;
+    const scaleY = readH / rect.height;
     const px = Math.round((e.clientX - rect.left) * scaleX);
     const py = Math.round((e.clientY - rect.top) * scaleY);
 
@@ -722,8 +801,8 @@
     const half = Math.floor(sampleSize / 2);
     const x0 = Math.max(0, px - half);
     const y0 = Math.max(0, py - half);
-    const w = Math.min(sampleSize, canvasEl.width - x0);
-    const h = Math.min(sampleSize, canvasEl.height - y0);
+    const w = Math.min(sampleSize, readW - x0);
+    const h = Math.min(sampleSize, readH - y0);
 
     pipeline
       .readPixels(x0, y0, w, h)
@@ -1426,6 +1505,7 @@
   <div class="flex-1 min-h-0 flex overflow-hidden relative">
     <!-- Canvas / preview area — always in DOM so the pipeline stays alive -->
     <div
+      bind:this={previewAreaEl}
       class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
     >
       <!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
@@ -1457,6 +1537,8 @@
             onChange={onCropChange}
             aspectRatio={cropAspect}
             {fineRotating}
+            perspective={perspectiveActive}
+            onTogglePerspective={togglePerspective}
           />
         {/if}
 
@@ -1531,7 +1613,7 @@
           <h2 class="text-xl font-semibold text-content">
             Preview unavailable
           </h2>
-          <p class="text-content-muted max-w-sm text-sm">
+          <p class="text-content-muted text-sm">
             {renderError}
           </p>
           <a href="/roll/{rollId}" class="text-sm text-primary hover:underline"
@@ -1604,6 +1686,8 @@
             cropActive={cropModeActive}
             {cropAspect}
             onCropAspectChange={(a) => (cropAspect = a)}
+            onTogglePerspective={togglePerspective}
+            perspective={perspectiveActive}
           />
         </SidebarSection>
 

@@ -34,6 +34,13 @@
 		thumbQueueProgress,
 		onThumbProgress,
 	} from "$lib/image/thumb-queue";
+	import {
+		startDecodeWarm,
+		decodeWarmProgress,
+		onDecodeWarmProgress,
+		isFrameWarm,
+	} from "$lib/image/decode-warm";
+	import { previewMaxPx } from "$lib/image/pipeline";
 
 	// $page.params.id is typed string | undefined in SvelteKit; guard below
 	const rollId = $derived(page.params.id ?? "");
@@ -58,6 +65,30 @@
 	);
 
 	const selected = $derived(frames[selIdx] ?? null);
+
+	// ─── Background full-resolution decode ────────────────────────────────────
+
+	/** Reactive snapshot of the shared decode-sweep counters. */
+	let warmProgress = $state({ warm: 0, total: 0, running: false });
+	/**
+	 * Frame IDs with a full-resolution decode on disk.  A separate Set rather
+	 * than reading `isFrameWarm` in the template: the module's set is not
+	 * reactive, so the thumbs need a `$state` value to re-render from.
+	 */
+	let warmFrameIds = $state<Set<string>>(new Set());
+
+	/**
+	 * True once every frame has been counted into the thumb queue.  `thumbsReady`
+	 * alone is not enough to start the decode sweep: before the queue has been
+	 * populated its total is 0, which reads as "ready" and would put a
+	 * multi-second demosaic in front of the thumbnails the user is waiting on.
+	 */
+	let thumbsEnqueued = $state(false);
+
+	/** True while the sweep still has frames left to decode. */
+	const warming = $derived(
+		warmProgress.total > 0 && warmProgress.warm < warmProgress.total,
+	);
 
 	// ─── Selection / batch export state ───────────────────────────────────────
 
@@ -162,9 +193,13 @@
 		// Reset any counters left by a previous page visit.
 		resetThumbQueueProgress();
 
-		// Keep our local reactive snapshot in sync with the queue.
+		// Keep our local reactive snapshots in sync with the shared queues.
 		onThumbProgress(() => {
 			thumbProgress = { ...thumbQueueProgress };
+		});
+		onDecodeWarmProgress(() => {
+			warmProgress = { ...decodeWarmProgress };
+			warmFrameIds = new Set(frames.filter((f) => isFrameWarm(f.id)).map((f) => f.id));
 		});
 
 		if (!rollId) {
@@ -197,7 +232,9 @@
 		// requests from IntersectionObserver (FrameThumb) will jump the queue.
 		// Pass each frame's film type for correct processing.
 		if (dirPath && frames.length > 0) {
-			void prefetchThumbs(
+			// Awaited: it resolves once every frame is enqueued (not generated),
+			// which is the point `thumbProgress.total` becomes meaningful.
+			await prefetchThumbs(
 				frames.map((f) => ({
 					id: f.id,
 					relativePath: f.filename,
@@ -208,11 +245,35 @@
 				true,
 			);
 		}
+		thumbsEnqueued = true;
 	});
 
 	onDestroy(() => {
 		onThumbProgress(null);
 		resetThumbQueueProgress();
+		onDecodeWarmProgress(null);
+		// The sweep itself keeps running — it is shared with the frame editor,
+		// which is where the user is heading.  Only the subscription goes.
+	});
+
+	/**
+	 * Start decoding the whole roll at full resolution as soon as the grid
+	 * becomes clickable.
+	 *
+	 * Deliberately tied to `thumbsReady` rather than to page load: until then
+	 * the thumbnail workers own the CPU, and a frame cannot be opened anyway.
+	 * From that moment on, every ~4-second demosaic the sweep completes is one
+	 * the user does not wait for when they open that frame.
+	 */
+	$effect(() => {
+		if (!thumbsEnqueued || !thumbsReady) return;
+		if (!dirPath || !roll || frames.length === 0) return;
+		const path = dirPath;
+		const invert = roll.rollEdit.invert;
+		const targets = frames.map((f) => ({ id: f.id, filename: f.filename }));
+		void previewMaxPx().then((maxPx) =>
+			startDecodeWarm({ rollId, dirPath: path, frames: targets, invert, maxPx }),
+		);
 	});
 
 	function selectFrame(f: Frame) {
@@ -427,6 +488,7 @@
 						<FrameThumb
 							{frame}
 							dirPath={dirPath!}
+							fullRes={warmFrameIds.has(frame.id)}
 							selected={!selecting && i === selIdx}
 							{selecting}
 							picked={pickedIds.has(frame.id)}
@@ -439,6 +501,32 @@
 				</div>
 			</div>
 		</div>
+
+		<!-- Background decode progress — subtle, non-blocking.  The grid is
+		     already usable; this only says how much of the roll will open
+		     instantly. -->
+		{#if warming}
+			<div
+				class="shrink-0 flex items-center gap-sm px-l py-1.5
+				       border-t border-base-subtle text-xs text-content-subtle"
+			>
+				<span class="size-1.5 rounded-full bg-accent animate-pulse"></span>
+				<span>Optimizing full-resolution previews</span>
+				<div
+					class="w-32 h-1 rounded-full bg-base-subtle overflow-hidden"
+				>
+					<div
+						class="h-full bg-accent rounded-full transition-all duration-300"
+						style="width: {Math.round(
+							(warmProgress.warm / warmProgress.total) * 100,
+						)}%"
+					></div>
+				</div>
+				<span class="tabular-nums"
+					>{warmProgress.warm} / {warmProgress.total}</span
+				>
+			</div>
+		{/if}
 
 		<!-- Keyboard shortcut hint bar -->
 		<KeyboardHintBar

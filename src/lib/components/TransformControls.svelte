@@ -38,6 +38,10 @@
 		cropAspect?: CropAspect;
 		/** Called when the user picks a crop aspect ratio. */
 		onCropAspectChange?: (aspect: CropAspect) => void;
+		/** Called when the user toggles perspective correction mode. */
+		onTogglePerspective?: () => void;
+		/** When true, perspective correction is active. */
+		perspective?: boolean;
 	}
 
 	let {
@@ -51,6 +55,8 @@
 		cropActive = false,
 		cropAspect = null,
 		onCropAspectChange,
+		onTogglePerspective,
+		perspective = false,
 	}: Props = $props();
 
 	// ─── Local reactive copies ─────────────────────────────────────────────────
@@ -250,8 +256,20 @@
 		</ToggleButton>
 	{/if}
 
-	<!-- ── Crop aspect ratio (only in crop mode) ────────────────────────────── -->
-	{#if cropActive}
+	<!-- ── Perspective toggle (only in crop mode) ───────────────────────────── -->
+	{#if cropActive && onTogglePerspective}
+		<ToggleButton
+			active={perspective}
+			onclick={onTogglePerspective}
+			title="Toggle perspective correction mode"
+			block
+		>
+			{perspective ? "Exit Perspective" : "Perspective"}
+		</ToggleButton>
+	{/if}
+
+	<!-- ── Crop aspect ratio (only in crop mode, disabled in perspective mode) ─ -->
+	{#if cropActive && !perspective}
 		<div
 			class="flex flex-col gap-xs"
 			transition:slide={{ duration: 200, easing: cubicOut }}

@@ -50,9 +50,40 @@ pub fn decode_image(path: impl AsRef<Path>) -> Result<DynamicImage, String> {
 ///   [0..4]   width  : u32 LE
 ///   [4..8]   height : u32 LE
 ///   [8..]    RGBA u8 pixels
+///
+/// The payload is cached on disk (see `decode_cache`) keyed on the source file
+/// and `max_px`, so re-opening a frame skips the decode and Lanczos resize.
+///
+/// When `warm_only` is true the payload is cached but an empty response is
+/// returned — see `raw_decode`.
 #[tauri::command]
-pub async fn decode_image_rgba(path: String, max_px: Option<u32>) -> Result<Response, String> {
+pub async fn decode_image_rgba(
+    app: tauri::AppHandle,
+    path: String,
+    max_px: Option<u32>,
+    warm_only: Option<bool>,
+) -> Result<Response, String> {
+    let warm_only = warm_only.unwrap_or(false);
+    let cache_entry = crate::decode_cache::payload_entry(
+        &app,
+        &path,
+        crate::decode_cache::Payload::Rgba8,
+        max_px,
+    );
+
+    if let Some(entry) = cache_entry.as_deref() {
+        if warm_only {
+            if crate::decode_cache::touch_if_present(entry) {
+                return Ok(Response::new(Vec::new()));
+            }
+        } else if let Some(cached) = crate::decode_cache::read(entry) {
+            return Ok(Response::new(cached));
+        }
+    }
+
+    let decode_path = path.clone();
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let path = decode_path;
         let mut img = decode_image(&path)?;
 
         // Apply EXIF orientation from the source file so the returned buffer
@@ -85,6 +116,30 @@ pub async fn decode_image_rgba(path: String, max_px: Option<u32>) -> Result<Resp
     })
     .await
     .map_err(|e| format!("task panicked: {e:?}"))??;
+
+    // A prewarm waits for the write so the caller knows the work landed; a real
+    // decode does not, so rendering is not held up by disk IO.
+    match (cache_entry, warm_only) {
+        (Some(entry), true) => {
+            let payload = bytes;
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::decode_cache::write(&entry, &payload);
+            })
+            .await;
+            return Ok(Response::new(Vec::new()));
+        }
+        (Some(entry), false) => {
+            let payload = bytes.clone();
+            drop(tokio::task::spawn_blocking(move || {
+                crate::decode_cache::write(&entry, &payload);
+            }));
+        }
+        (None, _) => {}
+    }
+
+    if warm_only {
+        return Ok(Response::new(Vec::new()));
+    }
 
     Ok(Response::new(bytes))
 }
