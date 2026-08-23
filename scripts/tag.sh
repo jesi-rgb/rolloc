@@ -25,12 +25,11 @@ else
 	sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
 fi
 
-# Update Cargo.toml (package version only, not dependency versions)
-if [[ "$OSTYPE" == "darwin"* ]]; then
-	sed -i '' "0,/^version = /s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
-else
-	sed -i "0,/^version = /s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
-fi
+# Update Cargo.toml (first version key only, i.e. the [package] one).
+# BSD sed silently ignores `0,/re/` ranges, so use awk for portability.
+awk -v v="$VERSION" '!done && /^version = /{sub(/"[^"]*"/, "\"" v "\""); done=1} {print}' \
+	src-tauri/Cargo.toml >src-tauri/Cargo.toml.tmp
+mv src-tauri/Cargo.toml.tmp src-tauri/Cargo.toml
 
 echo "Updated versions:"
 grep '"version"' src-tauri/tauri.conf.json
@@ -38,10 +37,18 @@ grep '^version' src-tauri/Cargo.toml | head -1
 
 echo "Committing version bump..."
 git add src-tauri/tauri.conf.json src-tauri/Cargo.toml
-git commit -m "chore: bump version to $VERSION"
+if git diff --cached --quiet; then
+	echo "  versions already at $VERSION, nothing to commit"
+else
+	git commit -m "chore: bump version to $VERSION"
+fi
 
-echo "Creating tag: $TAG"
-git tag "$TAG"
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+	echo "Tag $TAG already exists locally, reusing it"
+else
+	echo "Creating tag: $TAG"
+	git tag "$TAG"
+fi
 
 echo "Pushing commit and tag to origin..."
 git push origin HEAD
