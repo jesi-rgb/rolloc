@@ -106,6 +106,45 @@ function temperatureToMultipliers(temperature: number, tint: number): [number, n
 	];
 }
 
+/**
+ * Long-edge cap, in pixels, for the resolution the editor *works* at.
+ *
+ * Every pass in the chain runs at this resolution on every render, so it sets
+ * the interactive frame rate: cost scales with the pixel count, i.e. with the
+ * square of this number.  A 26 MP frame at full resolution is ~4× the work of
+ * 3072 px, and a 40 MP X-Trans frame is ~7×.
+ *
+ * Downscaling is only safe because it happens *after* a full-resolution
+ * demosaic and uses an area average (`raw.rs`) or Lanczos3 (`decode.rs`).
+ * Reaching a small image by demosaicking cheaply, or by point-sampling, is what
+ * made the preview look crunchy — the resolution was never the problem.
+ */
+export const PREVIEW_MAX_PX = 2072;
+
+/** Cached adapter limit, so repeat callers do not re-request an adapter. */
+let _gpuMaxTextureDimension: number | null = null;
+
+/**
+ * The long-edge cap the editor actually decodes at: `PREVIEW_MAX_PX`, lowered
+ * to the GPU's texture limit on devices that cannot hold that much.
+ *
+ * Callers that have a live pipeline should use its `maxTextureDimension`; this
+ * exists for the ones that do not (the roll grid's background decode sweep),
+ * which must arrive at the *same* number or every frame it warms would be
+ * cached under a key the editor never asks for.
+ */
+export async function previewMaxPx(): Promise<number> {
+	if (_gpuMaxTextureDimension === null) {
+		try {
+			const adapter = await navigator.gpu?.requestAdapter();
+			_gpuMaxTextureDimension = adapter?.limits.maxTextureDimension2D ?? PREVIEW_MAX_PX;
+		} catch {
+			_gpuMaxTextureDimension = PREVIEW_MAX_PX;
+		}
+	}
+	return Math.min(_gpuMaxTextureDimension, PREVIEW_MAX_PX);
+}
+
 // ─── Log-space percentile computation (NegPy normalization) ──────────────────
 
 /**

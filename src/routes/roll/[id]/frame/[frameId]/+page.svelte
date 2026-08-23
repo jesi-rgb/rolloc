@@ -35,6 +35,7 @@
     createPipeline,
     parseRawDecodeBuffer,
     parseDecodeImageRgbBuffer,
+    PREVIEW_MAX_PX,
   } from "$lib/image/pipeline";
   import {
     resolveEdit,
@@ -308,11 +309,12 @@
         const absolutePath = await join(dirPath, frame.filename);
         let rawBuffer: ArrayBuffer;
         try {
-          // Decode at the GPU's texture size limit (usually 8192, but can be
-          // lower on some devices). Full-res decode beyond that is deferred
-          // to export.
+          // Demosaic runs at full sensor resolution, then Rust box-averages
+          // down to this cap. PREVIEW_MAX_PX keeps the interactive pass chain
+          // affordable without the screen seeing any difference; the GPU limit
+          // is the hard ceiling on top of it.
           const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
-          const maxPx = gpuLimit;
+          const maxPx = Math.min(gpuLimit, PREVIEW_MAX_PX);
           rawBuffer = await invoke<ArrayBuffer>("raw_decode", {
             path: absolutePath,
             maxPx,
@@ -390,7 +392,7 @@
             const gpuLimit = pipeline?.maxTextureDimension ?? 8192;
             directBuffer = await invoke<ArrayBuffer>("decode_image_rgba", {
               path: absolutePath,
-              maxPx: gpuLimit,
+              maxPx: Math.min(gpuLimit, PREVIEW_MAX_PX),
             });
           } catch (err) {
             console.warn(

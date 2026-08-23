@@ -26,8 +26,14 @@
 //! in linear camera-native colour space (no tone curve, no demosaic colour conversion).
 //! The WebGPU pipeline ingests this as `rgba16uint` and processes it from there.
 //!
+//! The demosaic here is deliberately the same one `export.rs` runs — AHD for
+//! Bayer, bilinear for X-Trans — so the editor preview and the exported file
+//! resolve the same detail.  Anything cheaper shows up on screen as aliased
+//! grain and false colour that the export does not have.
+//!
 //! ## Data flow (editor)
-//!   RAW file → rawler decode → black/white level normalise → bilinear demosaic
+//!   RAW file → rawler decode → black/white level normalise → full-resolution
+//!     demosaic → crop to usable sensor area → box-average downscale to max_px
 //!     → rgba16 pixels over IPC → `rgba16uint` WebGPU texture → existing
 //!     invert / colormatrix / tonecurve pipeline.
 
@@ -384,25 +390,23 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
         };
 
         // Build linear u16 RGBA pixel buffer (A = 65535 throughout).
-        // Strategy: superpixel demosaic — one output pixel per CFA tile,
-        // averaging all R, G, B samples within each tile.  When max_px is set
-        // and the tile grid is larger than the limit, we stride over tiles so
-        // the output is at most max_px on the long edge.  This means demosaic
-        // and downscale happen in a single pass — O(out_w × out_h × tile_w × tile_h)
-        // instead of O(full_res × tile²), which is critical for large sensors.
+        // Strategy: the SAME full-resolution demosaic the exporter runs, so the
+        // editor preview and the exported file resolve identical detail.
         //
-        // For Bayer (2×2) the tile has 1R + 2G + 1B sample.
-        // For Fujifilm X-Trans (6×6) the tile has 2R + 8G + 2B … (mixed pattern).
-        // Either way: average all same-color samples in the tile → RGB.
+        // This used to be a superpixel demosaic (one output pixel per CFA tile)
+        // plus an integer stride over tiles to respect max_px.  Both steps threw
+        // away real detail: the tile collapse costs a factor of 2 per axis on
+        // Bayer and 6 on X-Trans, and striding is nearest-neighbour point
+        // sampling, which aliases grain instead of filtering it.  Together they
+        // are why the preview looked crunchy next to the export.
 
-        // ── Normalise helper (black-subtracted, WB-scaled, clamped 0–65535) ──
+        // ── Normalise helper (black-subtracted, WB-scaled, clamped 0–1) ──────
         let norm_ch = |ch: usize, v: f32| -> f32 {
             let bl = blacks[ch.min(3)];
             let wl = whites[ch.min(3)];
             let norm = (v - bl).max(0.0) / (wl - bl).max(1.0);
             (norm * wb_for_ch(ch)).clamp(0.0, 1.0)
         };
-        let pf = |yy: usize, xx: usize| pixels[yy * pw + xx] as f32;
 
         // ── Usable image area (exclude masked/black sensor borders) ──────────
         // The full sensor buffer (pw × ph) includes optically-black / masked
@@ -419,105 +423,126 @@ pub async fn raw_decode(path: String, max_px: Option<u32>, skip_wb: Option<bool>
             _ => (0usize, 0usize, pw, ph),
         };
 
-        let (out_w, out_h, rgba) = if raw.cpp == 3 {
-            // ── Already-demosaiced RGB (some DNGs) ───────────────────────────
+        // ── Full-resolution demosaic (mirrors export.rs) ──────────────────────
+        // AHD for Bayer, bilinear for X-Trans, superpixel only for exotic CFAs
+        // that neither handles.  Output is f32 RGB in [0, 1], linear.
+        let (dm_w, dm_h, rgb) = if raw.cpp == 3 {
+            // Already-demosaiced RGB (some DNGs) — straight normalisation.
             let bl = blacks[0];
             let wl = whites[0];
             let range = (wl - bl).max(1.0);
-            // Optionally stride for downscale.
-            let stride = if let Some(limit) = max_px {
-                let limit = limit as usize;
-                ((crop_w.max(crop_h) + limit - 1) / limit).max(1)
-            } else { 1 };
-            let ow = (crop_w + stride - 1) / stride;
-            let oh = (crop_h + stride - 1) / stride;
-            let mut buf = vec![0u16; ow * oh * 4];
-            for oy in 0..oh {
-                for ox in 0..ow {
-                    let sy = (crop_y + oy * stride).min(crop_y + crop_h - 1);
-                    let sx = (crop_x + ox * stride).min(crop_x + crop_w - 1);
-                    let i = sy * pw + sx;
-                    let r = (((pixels[i * 3]     as f32 - bl).max(0.0) / range) * wb_for_ch(0) * 65535.0).min(65535.0) as u16;
-                    let g = (((pixels[i * 3 + 1] as f32 - bl).max(0.0) / range) * wb_for_ch(1) * 65535.0).min(65535.0) as u16;
-                    let b = (((pixels[i * 3 + 2] as f32 - bl).max(0.0) / range) * wb_for_ch(2) * 65535.0).min(65535.0) as u16;
-                    let base = (oy * ow + ox) * 4;
-                    buf[base]     = r;
-                    buf[base + 1] = g;
-                    buf[base + 2] = b;
-                    buf[base + 3] = 65535;
+            let mut buf = vec![0.0_f32; pw * ph * 3];
+            for i in 0..pw * ph {
+                for c in 0..3 {
+                    buf[i * 3 + c] = ((pixels[i * 3 + c] as f32 - bl).max(0.0) / range
+                        * wb_for_ch(c))
+                        .clamp(0.0, 1.0);
                 }
             }
-            (ow, oh, buf)
+            (pw, ph, buf)
         } else {
-            // ── CFA demosaic — superpixel per tile ───────────────────────────
-            let cfa   = &raw.camera.cfa;
-            let cfa_w = cfa.width;
-            let cfa_h = cfa.height;
+            let cfa = &raw.camera.cfa;
+            if cfa.width == 2 && cfa.height == 2 {
+                crate::demosaic::demosaic_ahd(pixels, pw, ph, |r, c| cfa.color_at(r, c), norm_ch)
+            } else if cfa.width == 6 && cfa.height == 6 {
+                crate::demosaic::demosaic_xtrans_bilinear(
+                    pixels, pw, ph, |r, c| cfa.color_at(r, c), norm_ch,
+                )
+            } else {
+                crate::demosaic::demosaic_superpixel(
+                    pixels, pw, ph, cfa.width, cfa.height, |r, c| cfa.color_at(r, c), norm_ch,
+                )
+            }
+        };
+        if dm_w == 0 || dm_h == 0 {
+            return Err("RAW image too small to demosaic".to_string());
+        }
 
-            // Restrict to whole CFA tiles that fall inside the usable crop area.
-            // Tile origins stay aligned to the sensor CFA grid (multiples of
-            // cfa_w/cfa_h) so `cfa.color_at(dy, dx)` keeps the correct absolute
-            // colour phase; we simply skip the tiles that lie in the masked
-            // border region.
-            let start_tx = (crop_x + cfa_w - 1) / cfa_w;
-            let start_ty = (crop_y + cfa_h - 1) / cfa_h;
-            let end_tx   = (crop_x + crop_w) / cfa_w;
-            let end_ty   = (crop_y + crop_h) / cfa_h;
+        // ── Crop to the usable sensor area (mirrors export.rs) ────────────────
+        // AHD and X-Trans bilinear both trim a 3-pixel border; superpixel emits
+        // one pixel per CFA tile.  Map the sensor-space crop rect accordingly.
+        let (off_x, off_y, div_x, div_y) = if raw.cpp == 3 {
+            (0usize, 0usize, 1usize, 1usize)
+        } else {
+            let cfa = &raw.camera.cfa;
+            if (cfa.width == 2 && cfa.height == 2) || (cfa.width == 6 && cfa.height == 6) {
+                (3, 3, 1, 1)
+            } else {
+                (0, 0, cfa.width, cfa.height)
+            }
+        };
+        let cx0 = crop_x.saturating_sub(off_x) / div_x;
+        let cy0 = crop_y.saturating_sub(off_y) / div_y;
+        let cx1 = ((crop_x + crop_w).saturating_sub(off_x) / div_x).min(dm_w);
+        let cy1 = ((crop_y + crop_h).saturating_sub(off_y) / div_y).min(dm_h);
 
-            // Number of complete CFA tiles in each axis within the crop area.
-            let tiles_x = end_tx.saturating_sub(start_tx).max(1);
-            let tiles_y = end_ty.saturating_sub(start_ty).max(1);
+        let (cw, ch, rgb) = if cx0 < cx1
+            && cy0 < cy1
+            && (cx0 > 0 || cy0 > 0 || cx1 < dm_w || cy1 < dm_h)
+        {
+            let cw = cx1 - cx0;
+            let ch = cy1 - cy0;
+            let mut cropped = vec![0.0_f32; cw * ch * 3];
+            for y in 0..ch {
+                let src = ((cy0 + y) * dm_w + cx0) * 3;
+                let dst = y * cw * 3;
+                cropped[dst..dst + cw * 3].copy_from_slice(&rgb[src..src + cw * 3]);
+            }
+            (cw, ch, cropped)
+        } else {
+            (dm_w, dm_h, rgb)
+        };
 
-            // Stride in tile units to respect max_px.
-            let tile_stride = if let Some(limit) = max_px {
+        // ── Box-average downscale to max_px ──────────────────────────────────
+        // Only kicks in when the demosaicked image exceeds the caller's cap
+        // (the GPU texture limit).  Averaging every source pixel in the
+        // destination footprint is what keeps film grain from aliasing — the
+        // previous point-subsample is exactly the artefact this replaces.
+        let (out_w, out_h, rgb) = match max_px {
+            Some(limit) if limit > 0 && (cw > limit as usize || ch > limit as usize) => {
                 let limit = limit as usize;
-                ((tiles_x.max(tiles_y) + limit - 1) / limit).max(1)
-            } else { 1 };
-
-            let ow = (tiles_x + tile_stride - 1) / tile_stride;
-            let oh = (tiles_y + tile_stride - 1) / tile_stride;
-
-            let mut buf = vec![0u16; ow * oh * 4];
-
-            for oty in 0..oh {
-                for otx in 0..ow {
-                    // Source tile origin in CFA pixel coordinates (grid-aligned).
-                    let ty = (start_ty + oty * tile_stride).min(end_ty.saturating_sub(1));
-                    let tx = (start_tx + otx * tile_stride).min(end_tx.saturating_sub(1));
-                    let origin_y = ty * cfa_h;
-                    let origin_x = tx * cfa_w;
-
-                    let mut r_sum = 0.0_f32; let mut r_cnt = 0u32;
-                    let mut g_sum = 0.0_f32; let mut g_cnt = 0u32;
-                    let mut b_sum = 0.0_f32; let mut b_cnt = 0u32;
-
-                    for dy in 0..cfa_h {
-                        for dx in 0..cfa_w {
-                            let py = origin_y + dy;
-                            let px = origin_x + dx;
-                            let c = cfa.color_at(dy, dx); // position within tile
-                            let v = norm_ch(c, pf(py, px));
-                            match c {
-                                0 => { r_sum += v; r_cnt += 1; }
-                                2 => { b_sum += v; b_cnt += 1; }
-                                _ => { g_sum += v; g_cnt += 1; }
+                let long = cw.max(ch);
+                let ow = ((cw * limit) / long).max(1);
+                let oh = ((ch * limit) / long).max(1);
+                let mut out = vec![0.0_f32; ow * oh * 3];
+                for oy in 0..oh {
+                    let y0 = oy * ch / oh;
+                    let y1 = (((oy + 1) * ch + oh - 1) / oh).clamp(y0 + 1, ch);
+                    for ox in 0..ow {
+                        let x0 = ox * cw / ow;
+                        let x1 = (((ox + 1) * cw + ow - 1) / ow).clamp(x0 + 1, cw);
+                        let mut acc = [0.0_f32; 3];
+                        let mut n = 0.0_f32;
+                        for sy in y0..y1 {
+                            for sx in x0..x1 {
+                                let b = (sy * cw + sx) * 3;
+                                acc[0] += rgb[b];
+                                acc[1] += rgb[b + 1];
+                                acc[2] += rgb[b + 2];
+                                n += 1.0;
                             }
                         }
+                        let d = (oy * ow + ox) * 3;
+                        out[d] = acc[0] / n;
+                        out[d + 1] = acc[1] / n;
+                        out[d + 2] = acc[2] / n;
                     }
-
-                    let r = if r_cnt > 0 { r_sum / r_cnt as f32 } else { 0.0 };
-                    let g = if g_cnt > 0 { g_sum / g_cnt as f32 } else { 0.0 };
-                    let b = if b_cnt > 0 { b_sum / b_cnt as f32 } else { 0.0 };
-
-                    let base = (oty * ow + otx) * 4;
-                    buf[base]     = (r * 65535.0) as u16;
-                    buf[base + 1] = (g * 65535.0) as u16;
-                    buf[base + 2] = (b * 65535.0) as u16;
-                    buf[base + 3] = 65535;
                 }
+                (ow, oh, out)
             }
-            (ow, oh, buf)
+            _ => (cw, ch, rgb),
         };
+
+        // ── Pack to linear u16 RGBA (A = 65535 throughout) ───────────────────
+        let mut rgba = vec![0u16; out_w * out_h * 4];
+        for (i, px) in rgb.chunks_exact(3).enumerate() {
+            let base = i * 4;
+            rgba[base]     = (px[0].clamp(0.0, 1.0) * 65535.0).round() as u16;
+            rgba[base + 1] = (px[1].clamp(0.0, 1.0) * 65535.0).round() as u16;
+            rgba[base + 2] = (px[2].clamp(0.0, 1.0) * 65535.0).round() as u16;
+            rgba[base + 3] = 65535;
+        }
+        drop(rgb);
 
         // Alias for the rest of the function (orientation, metadata packing).
         let pw = out_w;
