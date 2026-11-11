@@ -291,3 +291,35 @@ export async function getRollPath(rollId: string): Promise<string | null> {
 	const path = await getPath(rollId);
 	return path ?? null;
 }
+
+// ─── Gear history ─────────────────────────────────────────────────────────────
+
+export interface GearHistory {
+	cameras: string[];
+	lenses:  string[];
+}
+
+/**
+ * Distinct cameras and lenses entered on past rolls, most recently used first.
+ * Values are trimmed and deduplicated case-insensitively; the most recent spelling wins.
+ */
+export async function getGearHistory(): Promise<GearHistory> {
+	const rolls = (await getRolls()).sort((a, b) => b.createdAt - a.createdAt);
+	return {
+		cameras: distinctNonEmpty(rolls.map((r) => r.camera ?? '')),
+		lenses:  distinctNonEmpty(rolls.map((r) => r.lens ?? '')),
+	};
+}
+
+function distinctNonEmpty(values: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const raw of values) {
+		const value = raw.trim();
+		const key   = value.toLowerCase();
+		if (!value || seen.has(key)) continue;
+		seen.add(key);
+		out.push(value);
+	}
+	return out;
+}

@@ -1,13 +1,16 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { pickDirectory } from '$lib/fs/directory';
-	import { createRoll, checkForSidecar, restoreRoll } from '$lib/db/rolls';
+	import { createRoll, checkForSidecar, restoreRoll, getGearHistory } from '$lib/db/rolls';
 	import type { Roll, FilmType } from '$lib/types';
 	import type { FilmStock } from '$lib/data/film-stocks';
 	import type { SidecarMeta } from '$lib/fs/sidecar';
+	import type { GearHistory } from '$lib/db/rolls';
 	import ColorFilmButton from './ColorFilmButton.svelte';
 	import BlackWhiteFilmButton from './BlackWhiteFilmButton.svelte';
 	import SlideFilmButton from './SlideFilmButton.svelte';
 	import FilmStockInput from './FilmStockInput.svelte';
+	import HistoryInput from './HistoryInput.svelte';
 
 	/** Film type options for the selector. 'mixed' means leave default per-frame. */
 	type FilmTypeOption = FilmType | 'mixed';
@@ -36,6 +39,14 @@
 	/** Set when the picked folder already contains a `.rolloc-meta` sidecar. */
 	let foundSidecar = $state<SidecarMeta | null>(null);
 	let checkingSidecar = $state(false);
+	/** Cameras/lenses from past rolls, offered as suggestions. */
+	let gear = $state<GearHistory>({ cameras: [], lenses: [] });
+
+	onMount(() => {
+		getGearHistory()
+			.then((h) => { gear = h; })
+			.catch((e: unknown) => { console.error('Failed to load camera/lens history', e); });
+	});
 
 	async function pickDir() {
 		if (picking) return;
@@ -118,13 +129,13 @@
 
 <!-- Backdrop -->
 <div
-	class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+	class="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
 	role="dialog"
 	aria-modal="true"
 	aria-labelledby="dialog-title"
 >
-	<div class="w-full max-w-md rounded-xl bg-base-muted border border-base-subtle
-	            shadow-lg p-l space-y-base">
+	<div class="w-full max-w-md rounded-xl bg-surface border border-base-subtle
+	            shadow-xl p-l space-y-base">
 		<div class="flex items-center justify-between">
 			<h2 id="dialog-title" class="text-l font-semibold text-content">New Roll</h2>
 			<button
@@ -207,25 +218,15 @@
 
 			<label class="block">
 				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Camera</span>
-				<input
-					bind:value={camera}
-					type="text"
-					placeholder="e.g. Nikon FM2"
-					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
-					       text-content placeholder-content-subtle
-					       focus:outline-none focus:border-primary transition"
-				/>
+				<HistoryInput bind:value={camera} options={gear.cameras} placeholder="e.g. Nikon FM2" />
 			</label>
 
 			<label class="block">
 				<span class="text-xs font-medium text-content-muted uppercase tracking-wide">Lens</span>
-				<input
+				<HistoryInput
 					bind:value={lens}
-					type="text"
+					options={gear.lenses}
 					placeholder="e.g. Nikkor 50mm f/1.4"
-					class="mt-1 w-full rounded-lg bg-base border border-base-subtle px-sm py-sm text-sm
-					       text-content placeholder-content-subtle
-					       focus:outline-none focus:border-primary transition"
 				/>
 			</label>
 
@@ -263,7 +264,7 @@
 						onclick={() => { handleFilmTypeClick('mixed'); }}
 						class="flex-1 h-12 text-sm font-bold rounded overflow-hidden transition-all
 							{filmType === 'mixed'
-							? 'bg-content text-base ring-2 ring-white ring-offset-2 ring-offset-base-muted scale-105'
+							? 'bg-content text-base outline-2 outline-offset-2 outline-content scale-105'
 							: 'bg-base-subtle text-content-subtle opacity-60 hover:opacity-100'}"
 					>
 						Mixed
