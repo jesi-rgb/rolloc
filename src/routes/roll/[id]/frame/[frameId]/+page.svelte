@@ -69,9 +69,11 @@
   import TransformControls from "$lib/components/TransformControls.svelte";
   import ExportControls from "$lib/components/ExportControls.svelte";
   import SidebarSection from "$lib/components/SidebarSection.svelte";
+  import PreviewInfoBar from "$lib/components/PreviewInfoBar.svelte";
   import { detectHorizonCandidates } from "$lib/image/horizon-detect";
   import { rotationCoverZoom } from "$lib/image/geometry";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
+  import type { RgbCounts } from "$lib/image/histogram";
   import { wbShiftsFromLog } from "$lib/image/negative/filtration";
   import { slidePickWb } from "$lib/image/negative/transfer";
   import {
@@ -147,6 +149,8 @@
   let currentHistogram = $state<
     import("$lib/image/negative/analysis").ChannelHistograms | null
   >(null);
+  /** RGB counts of the last rendered output, for the histogram under the preview. */
+  let outputHistogram = $state.raw<RgbCounts | null>(null);
   /**
    * Id of the frame whose pixels are currently on the canvas. Lags `frameId`
    * during navigation: the previous frame stays visible (dimmed) until the new
@@ -572,6 +576,7 @@
     return job
       .then(() => {
         currentHistogram = p.lastHistograms;
+        outputHistogram = p.lastOutputHistogram;
         paintedFrameId = fid;
         // Persist the analysis so batch export can match this preview.
         persistAnalysis();
@@ -1579,11 +1584,16 @@
   </header>
 
   <!-- ── Main editor layout (always mounted so canvas persists) ──────────── -->
-  <div class="flex-1 min-h-0 flex overflow-hidden relative">
+  <!-- Grid: preview over info bar on the left, sidebar spanning both rows. -->
+  <div
+    class="flex-1 min-h-0 grid grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto]
+           overflow-hidden relative"
+  >
     <!-- Canvas / preview area — always in DOM so the pipeline stays alive -->
     <div
       bind:this={previewAreaEl}
-      class="flex-1 min-w-0 flex items-center justify-center bg-base-muted overflow-hidden p-base relative"
+      class="col-start-1 row-start-1 min-w-0 min-h-0 flex items-center justify-center
+             bg-base-muted overflow-hidden p-base relative"
     >
       <!-- Canvas container: flip transforms applied via CSS, rotation via GPU UV remapping.
 			     w-full h-full + max-w-fit max-h-fit ensures the wrapper takes the full available
@@ -1703,9 +1713,11 @@
       {/if}
     </div>
 
+    <PreviewInfoBar histogram={outputHistogram} />
+
     <!-- Edit panel sidebar -->
     <aside
-      class="w-75 shrink-0 border-l border-base-subtle bg-base
+      class="col-start-2 row-start-1 row-span-2 w-75 border-l border-base-subtle bg-base
 			       overflow-y-auto flex flex-col"
     >
       {#if roll && frame}

@@ -48,11 +48,13 @@ import blitWGSL from './shaders/blit.wgsl?raw';
 import cropWGSL from './shaders/crop.wgsl?raw';
 import transformWGSL from './shaders/transform.wgsl?raw';
 import borderWGSL from './shaders/border.wgsl?raw';
+import outputHistogramWGSL from './shaders/output_histogram.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import { rotationCoverZoom } from './geometry';
 import { analyzeNegative } from './negative/analysis';
 import type { AnalysisResult, ChannelHistograms } from './negative/analysis';
 import type { LinearSource } from './negative/grid';
+import type { RgbCounts } from './histogram';
 import {
 	borderPixelsForContent,
 	computeCropHomography,
@@ -352,6 +354,11 @@ export interface GpuPipeline {
 	lastBounds: LogBounds | null;
 	/** Histograms of the last negative render's normalized source, for the curves editor. */
 	lastHistograms: ChannelHistograms | null;
+	/**
+	 * 256-bin R/G/B counts of the last render's displayed content (after tone
+	 * curve, rotation and crop; matte excluded), counted on the GPU.
+	 */
+	lastOutputHistogram: RgbCounts | null;
 	/**
 	 * The output dimensions from the last render (after crop is applied).
 	 * Use these for readPixels() after rendering to get the correct cropped size.
@@ -778,6 +785,26 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		layout: 'auto',
 		compute: { module: claheHistModule, entryPoint: 'main' },
 	});
+
+	/** Output histogram compute pipeline (content texture → `outputHistBuffer`). */
+	const outputHistPipeline = device.createComputePipeline({
+		layout: 'auto',
+		compute: { module: device.createShaderModule({ code: outputHistogramWGSL }), entryPoint: 'main' },
+	});
+	/** Rows per output-histogram workgroup (must match ROWS_PER_GROUP in the WGSL). */
+	const OUTPUT_HIST_ROWS = 16;
+	/** R, G, B × 256 u32 counts. */
+	const OUTPUT_HIST_BYTES = 3 * 256 * 4;
+	/**
+	 * Persistent storage for the output histogram counts. Overlapping renders
+	 * share it safely: each encodes clear → count → copy in one command buffer,
+	 * and the queue runs command buffers in submission order.
+	 */
+	const outputHistBuffer = device.createBuffer({
+		size: OUTPUT_HIST_BYTES,
+		usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+	});
+	let lastOutputHistogram: RgbCounts | null = null;
 
 	// ── Crop pipeline (perspective quad → rect) ───────────────────────────────
 
@@ -1516,8 +1543,48 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 		drawFullscreenTriangle(encoder, blitReadbackPipeline, readbackBG, readbackTexture!.createView());
 
+		// ── Output histogram (compute) → staging buffer ──────────────────────
+		// Counts the content (no matte) at full float precision, before the
+		// 8-bit dither. Each render gets its own 3 KB staging buffer because a
+		// previous render's may still be mapped.
+		const histBG = device.createBindGroup({
+			layout: outputHistPipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: finalContentTarget.createView() },
+				{ binding: 1, resource: { buffer: outputHistBuffer } },
+			],
+		});
+		encoder.clearBuffer(outputHistBuffer);
+		const histPass = encoder.beginComputePass();
+		histPass.setPipeline(outputHistPipeline);
+		histPass.setBindGroup(0, histBG);
+		histPass.dispatchWorkgroups(Math.ceil(contentH / OUTPUT_HIST_ROWS));
+		histPass.end();
+		const histStaging = device.createBuffer({
+			size: OUTPUT_HIST_BYTES,
+			usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+		});
+		encoder.copyBufferToBuffer(outputHistBuffer, 0, histStaging, 0, OUTPUT_HIST_BYTES);
+
 		device.queue.submit([encoder.finish()]);
 		await device.queue.onSubmittedWorkDone();
+
+		try {
+			await histStaging.mapAsync(GPUMapMode.READ);
+			const counts = new Uint32Array(histStaging.getMappedRange().slice(0));
+			lastOutputHistogram = {
+				r: counts.subarray(0, 256),
+				g: counts.subarray(256, 512),
+				b: counts.subarray(512, 768),
+				pixels: contentW * contentH,
+			};
+			histStaging.unmap();
+		} catch (err) {
+			// The picture is already on screen; a missing histogram is not fatal.
+			console.error('[pipeline] output histogram readback failed:', err);
+		} finally {
+			histStaging.destroy();
+		}
 
 		// Clean up per-frame GPU resources
 		toneLutTex.destroy();
@@ -1824,6 +1891,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		glowDownsampleTex?.destroy();
 		glowBlurTex?.destroy();
 		claheCdfBuffer?.destroy();
+		outputHistBuffer.destroy();
 		outputTexture?.destroy();
 		contentTexture?.destroy();
 		preTransformTexture?.destroy();
@@ -1917,6 +1985,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		get lastAnalysis() { return lastResult?.analysis ?? null; },
 		get lastBounds() { return lastResult?.bounds ?? null; },
 		get lastHistograms() { return lastResult?.histograms ?? null; },
+		get lastOutputHistogram() { return lastOutputHistogram; },
 		get lastOutputWidth() { return lastOutputWidth; },
 		get lastOutputHeight() { return lastOutputHeight; },
 		setDisplayBox(cssWidth: number, cssHeight: number): void {
