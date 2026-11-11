@@ -335,9 +335,9 @@
 		class="flex items-center gap-sm px-l h-12 border-b border-base-subtle shrink-0"
 	>
 		<a
-			href={resolve("/")}
-			aria-label="Back to library"
-			title="Back to library"
+			href="{resolve('/')}?tab=libraries"
+			aria-label="Back to libraries"
+			title="Back to libraries"
 			class="-ml-xs p-xs rounded-md text-content-muted hover:text-content hover:bg-base-muted transition"
 		>
 			<ArrowLeftIcon size={16} />

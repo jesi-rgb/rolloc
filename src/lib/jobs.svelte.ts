@@ -21,7 +21,8 @@
  *    the UI updates.
  *
  *  - Terminal jobs (done/cancelled/error) stay in the list so the user can
- *    see the result summary in the dock, until they dismiss it. The list is
+ *    see the result summary until they are dismissed — explicitly, or by
+ *    the dock's auto-dismiss timer (BackgroundJobsDock). The list is
  *    auto-pruned to the most recent 5 terminal jobs to bound memory.
  */
 import { exportFramesBatch } from '$lib/export/batch';

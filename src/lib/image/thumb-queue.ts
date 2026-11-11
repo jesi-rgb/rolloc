@@ -108,6 +108,15 @@ const _initialisedIds = new Set<string>();
  */
 const _countedAsCached = new Set<string>();
 
+/**
+ * Bumped by `cancelPrefetchThumbs`.  A running `prefetchThumbs` loop stops
+ * enqueueing once the generation it started under is superseded.
+ */
+let prefetchGeneration = 0;
+
+/** Rejection reason for prefetch entries dropped by `cancelPrefetchThumbs`. */
+const PREFETCH_CANCELLED = 'AbortError';
+
 // ─── Queue processing ─────────────────────────────────────────────────────────
 
 function dequeueNext(): QueueEntry | undefined {
@@ -240,6 +249,25 @@ export function resetThumbQueueProgress(): void {
 }
 
 /**
+ * Abandon background prefetching: stops any running `prefetchThumbs` loop and
+ * drops low-priority entries still waiting in the queue.  High-priority
+ * (viewport) requests and work already in flight are left alone.
+ *
+ * Call when switching to a different roll so the previous roll's backlog does
+ * not hold up — or pollute the progress counters of — the new one.
+ */
+export function cancelPrefetchThumbs(): void {
+	prefetchGeneration++;
+	for (let i = queue.length - 1; i >= 0; i--) {
+		const entry = queue[i];
+		if (entry.priority !== 'low') continue;
+		queue.splice(i, 1);
+		inflight.delete(entry.imageId);
+		entry.reject(new DOMException('Thumbnail prefetch cancelled', PREFETCH_CANCELLED));
+	}
+}
+
+/**
  * Initialise progress counters for a full library before any IntersectionObserver
  * fires.  Checks OPFS for each imageId in parallel (capped at CONCURRENCY) so
  * `thumbQueueProgress.total` reflects the whole library and `cached` reflects
@@ -319,12 +347,14 @@ export async function prefetchThumbs(
 	useSidecar = false,
 ): Promise<void> {
 	const READ_CONCURRENCY = 4;
+	const generation = prefetchGeneration;
 
 	for (let i = 0; i < images.length; i += READ_CONCURRENCY) {
 		const batch = images.slice(i, i + READ_CONCURRENCY);
 
 		// Yield between batches so high-priority requests can jump the queue.
 		await new Promise<void>((r) => setTimeout(r, 0));
+		if (generation !== prefetchGeneration) return;
 
 		await Promise.all(
 			batch.map(async (image) => {
@@ -334,13 +364,16 @@ export async function prefetchThumbs(
 				try {
 					const absolutePath = await join(dirPath, image.relativePath);
 					// Per-image filmType overrides the default if provided
-					void requestThumb(
+					requestThumb(
 						image.id,
 						absolutePath,
 						'low',
 						image.filmType ?? filmType,
 						useSidecar ? dirPath : null,
-					);
+					).catch((err: unknown) => {
+						if (err instanceof DOMException && err.name === PREFETCH_CANCELLED) return;
+						console.error(`[prefetchThumbs] Failed to generate ${image.relativePath}:`, err);
+					});
 				} catch (err) {
 					console.error(`[prefetchThumbs] Failed to build path for ${image.relativePath}:`, err);
 				}

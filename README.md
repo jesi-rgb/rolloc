@@ -99,10 +99,10 @@ src/
       VirtualGrid.svelte
       ...
   routes/
-    +page.svelte            # / — roll library
+    +page.svelte            # / — roll browser (sidebar + filmstrip grid, ?roll=<id>) and libraries tab
     library/                # library view
-    roll/[id]/
-      +page.svelte          # filmstrip grid + metadata panel
+    roll/[id]/frame/[frameId]/
+      +page.svelte          # frame editor
     raw/                    # raw/inversion editor
 ```
 

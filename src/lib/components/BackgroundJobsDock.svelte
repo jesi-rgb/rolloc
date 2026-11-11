@@ -10,6 +10,11 @@
 	 *
 	 * Pure read-only consumer of `$lib/jobs.svelte` — every mutation goes
 	 * through the store's exported functions.
+	 *
+	 * Finished jobs auto-dismiss `AUTO_DISMISS_MS` after they finish.  The
+	 * countdown pauses while the pointer is over the dock or the window is
+	 * unfocused, and restarts in full on resume, so a result never vanishes
+	 * under the cursor or while the user is in another app.
 	 */
 	import { goto } from "$app/navigation";
 	import { join } from "@tauri-apps/api/path";
@@ -41,6 +46,41 @@
 
 	let collapsed = $state(false);
 
+	const AUTO_DISMISS_MS = 3000;
+
+	let hovered = $state(false);
+	let windowFocused = $state(typeof document === "undefined" || document.hasFocus());
+	/** Last time the countdown resumed after a pause; 0 = never paused. */
+	let resumedAt = $state(0);
+	const paused = $derived(hovered || !windowFocused);
+
+	function setHovered(value: boolean): void {
+		hovered = value;
+		if (!paused) resumedAt = Date.now();
+	}
+
+	function setWindowFocused(value: boolean): void {
+		windowFocused = value;
+		if (!paused) resumedAt = Date.now();
+	}
+
+	// Deadlines derive from timestamps, not from when this effect runs, so the
+	// frequent re-runs caused by a running job's progress updates never push
+	// a finished job's dismissal back.
+	$effect(() => {
+		if (paused) return;
+		const now = Date.now();
+		const timers = jobs
+			.filter((j) => isJobTerminal(j.status))
+			.map((j) => {
+				const start = Math.max(j.finishedAt ?? now, resumedAt);
+				return setTimeout(() => dismissJob(j.id), start + AUTO_DISMISS_MS - now);
+			});
+		return () => {
+			for (const t of timers) clearTimeout(t);
+		};
+	});
+
 	function percentFor(job: ExportJob): number {
 		if (job.progress.total === 0) return 0;
 		return Math.round((job.progress.processed / job.progress.total) * 100);
@@ -64,7 +104,7 @@
 	}
 
 	function openRoll(job: ExportJob): void {
-		void goto(`/roll/${job.rollId}`);
+		void goto(`/?roll=${encodeURIComponent(job.rollId)}`);
 	}
 
 	/**
@@ -81,11 +121,20 @@
 	}
 </script>
 
+<svelte:window
+	onfocus={() => setWindowFocused(true)}
+	onblur={() => setWindowFocused(false)}
+/>
+
 {#if hasAny}
 	<div
+		role="region"
+		aria-label="Background jobs"
+		onpointerenter={() => setHovered(true)}
+		onpointerleave={() => setHovered(false)}
 		class="fixed bottom-base right-base z-30 w-80 max-w-[calc(100vw-2rem)]
-		       rounded-lg border border-base-subtle bg-base/80 backdrop-blur-xl
-		       shadow-xl shadow-black/20 overflow-hidden"
+		       rounded-lg border border-base-subtle bg-surface/80 backdrop-blur-xl
+		       shadow-xl overflow-hidden"
 		in:fly={{ y: 24, duration: 280, easing: quintOut }}
 		out:fly={{ y: 24, duration: 200, easing: quintIn }}
 	>
