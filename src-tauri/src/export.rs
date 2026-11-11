@@ -552,10 +552,7 @@ fn apply_transform_and_crop(
     let rotation_rad = transform.rotation * std::f32::consts::PI / 180.0;
     let cos_a = rotation_rad.cos();
     let sin_a = rotation_rad.sin();
-    
-    // Zoom factor (default to 1.0 if not set)
-    let zoom = if transform.zoom > 0.0 { transform.zoom } else { 1.0 };
-    
+
     // Aspect ratios matching the GPU shader
     let src_aspect = src_w as f32 / src_h as f32;
     let out_aspect = rot_w as f32 / rot_h as f32;
@@ -568,6 +565,16 @@ fn apply_transform_and_crop(
     let is_swapped = swapped_dist < unswapped_dist;
     let canvas_w = if is_swapped { 1.0 } else { src_aspect };
     let canvas_h = if is_swapped { src_aspect } else { 1.0 };
+
+    // Cover zoom: smallest zoom at which every canvas corner, rotated into
+    // the source, stays inside it — no clamped pixels at the corners. Must
+    // match `rotationCoverZoom` in geometry.ts. The user's zoom multiplies on top.
+    let (abs_cos, abs_sin) = (cos_a.abs(), sin_a.abs());
+    let cover_zoom = ((canvas_w * abs_cos + canvas_h * abs_sin) / src_aspect)
+        .max(canvas_w * abs_sin + canvas_h * abs_cos)
+        .max(1.0);
+    let user_zoom = if transform.zoom > 0.0 { transform.zoom } else { 1.0 };
+    let zoom = user_zoom * cover_zoom;
 
     let sw = src_w as f32;
     let sh = src_h as f32;

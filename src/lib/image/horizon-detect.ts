@@ -1,672 +1,656 @@
 /**
- * Horizon line detection using Hough Transform.
+ * Straight-line detection for auto-straighten.
  *
- * Detects dominant straight lines in an image and returns candidates
- * for auto-straightening. Supports both horizontal and vertical line detection.
+ * Finds long, straight, near-horizontal or near-vertical edges and reports the
+ * rotation that levels each one.
  *
- * Algorithm:
- *   1. Grayscale conversion (luminance-weighted)
- *   2. Gaussian blur (3×3) to reduce noise
- *   3. Sobel edge detection (gradient magnitude)
- *   4. Edge thresholding (keep strong edges)
- *   5. Hough Transform (accumulate votes in θ-ρ parameter space)
- *   6. Peak detection with non-maximum suppression
- *   7. Convert peaks to line candidates with angle + confidence
+ * Pipeline:
+ *   1. Integer box-downsample to luma (pixels stay square, so angles survive)
+ *   2. Binomial blur → Sobel gradients → non-maximum suppression (thin,
+ *      sub-pixel edge points)
+ *   3. Orientation-gated Hough vote: an edge point only votes for line angles
+ *      within ORIENT_TOL of its own gradient direction, so texture (foliage,
+ *      grain, clouds) cannot pile up votes on an arbitrary angle
+ *   4. Peak picking, then a magnitude-weighted total-least-squares refit on
+ *      the inliers of each peak's longest contiguous run
+ *
+ * All geometry is done in square-pixel space. Angles are never derived from
+ * normalized (0–1) coordinates, which would scale them by the aspect ratio.
+ *
+ * Angle convention: `TransformParams.rotation` as rendered by transform.wgsl —
+ * positive = counter-clockwise on screen. A candidate's `angle` is the delta to
+ * add to the rotation the analysed image was rendered with.
  */
+
+import type { Rect } from '$lib/types';
 
 /** A detected line candidate for horizon/vertical straightening. */
 export interface HorizonCandidate {
-	/** Angle deviation from reference in degrees. Positive = clockwise rotation needed to straighten. */
+	/**
+	 * Rotation delta in degrees (`TransformParams.rotation` units, positive =
+	 * counter-clockwise) that levels this line when added to the rotation the
+	 * analysed image was rendered with.
+	 */
 	angle: number;
-	/** Line endpoints in normalized (0–1) coords. */
+	/** Detected segment endpoints, normalized 0–1 to the analysed image. */
 	line: { x1: number; y1: number; x2: number; y2: number };
-	/** Confidence score (0–1) based on Hough vote count. */
+	/** Score relative to the best candidate (best = 1). */
 	confidence: number;
-	/** Whether this is a horizontal or vertical reference line. */
+	/** Whether the line should become horizontal or vertical. */
 	type: 'horizontal' | 'vertical';
 }
 
+/** RGBA8 pixels, row-major, no padding (e.g. `GpuPipeline.readPixels()` output). */
+export interface RgbaPixels {
+	data: Uint8Array | Uint8ClampedArray;
+	width: number;
+	height: number;
+}
+
 export interface DetectionOptions {
-	/** Max dimension to downsample to (default: 400). Larger = slower but more precise. */
+	/** Long edge of the analysis image in px (default 720). */
 	maxDimension?: number;
-	/** Edge magnitude threshold as fraction of max (default: 0.1). */
-	edgeThreshold?: number;
-	/** Max number of candidates to return (default: 3). */
-	maxCandidates?: number;
-	/** Angle range in degrees to search around horizontal/vertical (default: 15). */
+	/** Max tilt in degrees searched around horizontal/vertical (default 15). */
 	angleRange?: number;
-	/** Minimum confidence threshold (0-1) to include a candidate (default: 0.5). */
-	minConfidence?: number;
+	/** Max number of candidates returned (default 4). */
+	maxCandidates?: number;
+	/** Normalized region to analyse (e.g. the crop); edges outside are ignored. */
+	region?: Rect | null;
 }
 
-const DEFAULT_OPTIONS: Required<DetectionOptions> = {
-	maxDimension: 400,
-	edgeThreshold: 0.1,
-	maxCandidates: 3,
-	angleRange: 15,
-	minConfidence: 0.3,
-};
+// ─── Tuning ───────────────────────────────────────────────────────────────────
 
-// ─── Image Processing Helpers ─────────────────────────────────────────────────
+/** Hough angle resolution (degrees per bin). The TLS refit gives the final precision. */
+const THETA_STEP = 0.25;
+/** Max disagreement (degrees) between an edge point's gradient and a voted line normal. */
+const ORIENT_TOL = 3;
+/** Same gate for refit inliers — slightly looser, the peak angle is approximate. */
+const INLIER_COS = Math.cos((5 * Math.PI) / 180);
+/** Absolute Sobel magnitude floor (≈ a 4-level step after blur): rejects flat-area noise. */
+const MIN_EDGE_MAG = 10;
+/** Keep the strongest (1 − EDGE_PERCENTILE) of the NMS edge points. */
+const EDGE_PERCENTILE = 0.7;
+/** Distance (analysis px) from a Hough line to count as an inlier. */
+const PEAK_INLIER_DIST = 2;
+/** Distance (analysis px) from the fitted line for the final refit. */
+const FIT_INLIER_DIST = 1.25;
+/** Max Hough peaks examined. */
+const MAX_PEAKS = 24;
+/** Peaks weaker than this fraction of the strongest are ignored. */
+const PEAK_FLOOR = 0.08;
+/** Peak suppression half-window: angle (degrees) and distance (fraction of diagonal). */
+const SUPPRESS_DEG = 1.5;
+const SUPPRESS_RHO = 0.015;
+/** A gap longer than this (fraction of diagonal) splits a line into separate runs. */
+const RUN_GAP = 0.08;
+/** Minimum covered length as a fraction of the region's width (or height for verticals). */
+const MIN_COVERAGE = 0.12;
+/** Lines whose midpoint lies this close to the region edge are likely film rebate / holder. */
+const BORDER_BAND = 0.04;
+const BORDER_PENALTY = 0.35;
+/** Verticals converge under perspective, so a single one is weaker evidence than a horizon. */
+const VERTICAL_WEIGHT = 0.8;
+/** Candidates whose angles differ by less than this (degrees) give the same rotation. */
+const DUPLICATE_DEG = 0.3;
+/** Candidates scoring below this fraction of the best are dropped. */
+const MIN_CONFIDENCE = 0.25;
+/** Pixels skipped along the image border (Sobel + NMS need neighbours). */
+const EDGE_INSET = 2;
 
-/**
- * Convert RGBA ImageData to grayscale Float32Array using luminance weights.
- */
-function toGrayscale(data: Uint8ClampedArray, width: number, height: number): Float32Array {
-	const gray = new Float32Array(width * height);
-	for (let i = 0; i < width * height; i++) {
-		const r = data[i * 4];
-		const g = data[i * 4 + 1];
-		const b = data[i * 4 + 2];
-		// ITU-R BT.601 luminance weights
-		gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-	}
-	return gray;
+const TAN_22_5 = Math.tan(Math.PI / 8);
+const DEG = Math.PI / 180;
+
+type LineType = HorizonCandidate['type'];
+
+interface Bounds {
+	x0: number;
+	y0: number;
+	x1: number;
+	y1: number;
 }
 
-/**
- * Apply 3×3 Gaussian blur to reduce noise.
- */
-function gaussianBlur3x3(src: Float32Array, width: number, height: number): Float32Array {
-	const dst = new Float32Array(width * height);
-	// Gaussian kernel (σ ≈ 0.85): [1,2,1; 2,4,2; 1,2,1] / 16
-	const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
-	const kSum = 16;
+interface Edges {
+	count: number;
+	/** Sub-pixel position in analysis px. */
+	x: Float32Array;
+	y: Float32Array;
+	/** Unit gradient direction. */
+	nx: Float32Array;
+	ny: Float32Array;
+	mag: Float32Array;
+	/** Magnitude threshold the edges passed; used to normalize vote weights. */
+	threshold: number;
+}
 
-	for (let y = 1; y < height - 1; y++) {
-		for (let x = 1; x < width - 1; x++) {
+interface Scored {
+	type: LineType;
+	angle: number;
+	/** Endpoints in analysis px. */
+	x1: number;
+	y1: number;
+	x2: number;
+	y2: number;
+	score: number;
+}
+
+// ─── Image preparation ───────────────────────────────────────────────────────
+
+/** Box-average `factor`×`factor` blocks into BT.601 luma. */
+function downsampleLuma(img: RgbaPixels, factor: number, w: number, h: number): Float32Array {
+	const { data, width } = img;
+	const luma = new Float32Array(w * h);
+	const norm = 1 / (factor * factor);
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
 			let sum = 0;
-			let ki = 0;
-			for (let ky = -1; ky <= 1; ky++) {
-				for (let kx = -1; kx <= 1; kx++) {
-					sum += src[(y + ky) * width + (x + kx)] * kernel[ki++];
+			for (let dy = 0; dy < factor; dy++) {
+				let i = ((y * factor + dy) * width + x * factor) * 4;
+				for (let dx = 0; dx < factor; dx++, i += 4) {
+					sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
 				}
 			}
-			dst[y * width + x] = sum / kSum;
+			luma[y * w + x] = sum * norm;
+		}
+	}
+	return luma;
+}
+
+/** Separable [1 4 6 4 1]/16 binomial blur (σ ≈ 1), edges clamped. */
+function blur5(src: Float32Array, w: number, h: number): Float32Array {
+	const tmp = new Float32Array(w * h);
+	const dst = new Float32Array(w * h);
+	const clampX = (x: number): number => (x < 0 ? 0 : x >= w ? w - 1 : x);
+	const clampY = (y: number): number => (y < 0 ? 0 : y >= h ? h - 1 : y);
+	for (let y = 0; y < h; y++) {
+		const r = y * w;
+		for (let x = 0; x < w; x++) {
+			tmp[r + x] =
+				(src[r + clampX(x - 2)] +
+					4 * src[r + clampX(x - 1)] +
+					6 * src[r + x] +
+					4 * src[r + clampX(x + 1)] +
+					src[r + clampX(x + 2)]) /
+				16;
+		}
+	}
+	for (let y = 0; y < h; y++) {
+		const rm2 = clampY(y - 2) * w;
+		const rm1 = clampY(y - 1) * w;
+		const r = y * w;
+		const rp1 = clampY(y + 1) * w;
+		const rp2 = clampY(y + 2) * w;
+		for (let x = 0; x < w; x++) {
+			dst[r + x] =
+				(tmp[rm2 + x] + 4 * tmp[rm1 + x] + 6 * tmp[r + x] + 4 * tmp[rp1 + x] + tmp[rp2 + x]) /
+				16;
 		}
 	}
 	return dst;
 }
 
-/**
- * Sobel edge detection. Returns gradient magnitude.
- */
-function sobelEdgeDetect(
-	gray: Float32Array,
-	width: number,
-	height: number,
-): { magnitude: Float32Array; maxMag: number } {
-	const magnitude = new Float32Array(width * height);
-	let maxMag = 0;
-
-	for (let y = 1; y < height - 1; y++) {
-		for (let x = 1; x < width - 1; x++) {
-			const idx = y * width + x;
-
-			// Compute Gx (horizontal gradient)
-			const gx =
-				-gray[(y - 1) * width + (x - 1)] +
-				gray[(y - 1) * width + (x + 1)] +
-				-2 * gray[y * width + (x - 1)] +
-				2 * gray[y * width + (x + 1)] +
-				-gray[(y + 1) * width + (x - 1)] +
-				gray[(y + 1) * width + (x + 1)];
-
-			// Compute Gy (vertical gradient)
-			const gy =
-				-gray[(y - 1) * width + (x - 1)] +
-				-2 * gray[(y - 1) * width + x] +
-				-gray[(y - 1) * width + (x + 1)] +
-				gray[(y + 1) * width + (x - 1)] +
-				2 * gray[(y + 1) * width + x] +
-				gray[(y + 1) * width + (x + 1)];
-
-			const mag = Math.sqrt(gx * gx + gy * gy);
-			magnitude[idx] = mag;
-			if (mag > maxMag) maxMag = mag;
+/** Sobel → non-maximum suppression → sub-pixel edge points inside `roi`. */
+function extractEdges(luma: Float32Array, w: number, h: number, roi: Bounds): Edges {
+	const n = w * h;
+	const gx = new Float32Array(n);
+	const gy = new Float32Array(n);
+	const mag = new Float32Array(n);
+	for (let y = 1; y < h - 1; y++) {
+		const r0 = (y - 1) * w;
+		const r1 = y * w;
+		const r2 = (y + 1) * w;
+		for (let x = 1; x < w - 1; x++) {
+			const a = luma[r0 + x - 1];
+			const b = luma[r0 + x];
+			const c = luma[r0 + x + 1];
+			const d = luma[r1 + x - 1];
+			const f = luma[r1 + x + 1];
+			const g = luma[r2 + x - 1];
+			const k = luma[r2 + x];
+			const l = luma[r2 + x + 1];
+			const sx = c + 2 * f + l - (a + 2 * d + g);
+			const sy = g + 2 * k + l - (a + 2 * b + c);
+			gx[r1 + x] = sx;
+			gy[r1 + x] = sy;
+			mag[r1 + x] = Math.hypot(sx, sy);
 		}
 	}
 
-	return { magnitude, maxMag };
-}
-
-// ─── Hough Transform ──────────────────────────────────────────────────────────
-
-interface HoughResult {
-	accumulator: Float32Array;  // Changed to float for weighted votes
-	thetas: Float32Array;  // Actual theta values in radians
-	numTheta: number;
-	numRho: number;
-	rhoMax: number;
-	width: number;
-	height: number;
-}
-
-/**
- * Hough Transform for line detection with position weighting.
- *
- * Line parameterization: ρ = x·cos(θ) + y·sin(θ)
- * where θ is the angle of the line's normal vector from the x-axis.
- *
- * For a horizontal line (normal points up), θ = 90° (π/2)
- * For a vertical line (normal points right), θ = 0°
- *
- * Position weighting: pixels in the middle third (vertically) of the image
- * get higher weight, as horizons typically appear there.
- */
-function houghTransform(
-	magnitude: Float32Array,
-	width: number,
-	height: number,
-	threshold: number,
-	angleRange: number,
-): HoughResult {
-	// θ resolution: 0.5° steps for better precision
-	const thetaStep = 0.5 * Math.PI / 180;
-
-	// We want to detect lines that are nearly horizontal or nearly vertical.
-	// Horizontal lines: θ near 90° (normal points up/down)
-	// Vertical lines: θ near 0° or 180° (normal points left/right)
-
-	const thetas: number[] = [];
-
-	// Horizontal range: 90° - range to 90° + range (0.5° steps)
-	for (let deg = 90 - angleRange; deg <= 90 + angleRange; deg += 0.5) {
-		thetas.push(deg * Math.PI / 180);
-	}
-
-	// Vertical range: -range to +range (0.5° steps)
-	for (let deg = -angleRange; deg <= angleRange; deg += 0.5) {
-		const theta = deg * Math.PI / 180;
-		// Avoid duplicates
-		if (!thetas.some(t => Math.abs(t - theta) < 0.001)) {
-			thetas.push(theta);
-		}
-	}
-
-	const numTheta = thetas.length;
-	const thetaArray = new Float32Array(thetas);
-
-	// ρ can range from -diagonal to +diagonal
-	const rhoMax = Math.sqrt(width * width + height * height);
-	const rhoStep = 1;
-	const numRho = Math.ceil(2 * rhoMax / rhoStep) + 1;
-
-	// Use Float32Array for weighted accumulator
-	const accumulator = new Float32Array(numTheta * numRho);
-
-	// Precompute sin/cos
-	const cosTable = new Float32Array(numTheta);
-	const sinTable = new Float32Array(numTheta);
-	for (let ti = 0; ti < numTheta; ti++) {
-		cosTable[ti] = Math.cos(thetaArray[ti]);
-		sinTable[ti] = Math.sin(thetaArray[ti]);
-	}
-
-	// Vote for each edge pixel with position-based weighting
-	for (let y = 0; y < height; y++) {
-		// Weight based on vertical position:
-		// - Middle third of image gets weight 1.0 (horizon zone)
-		// - Top/bottom get reduced weight
-		const yNorm = y / height;  // 0 to 1
-		let posWeight: number;
-		if (yNorm >= 0.25 && yNorm <= 0.75) {
-			// Middle half - full weight
-			posWeight = 1.0;
-		} else if (yNorm < 0.25) {
-			// Top quarter - reduced (sky, usually not horizon)
-			posWeight = 0.5 + 2 * yNorm;  // 0.5 at top, 1.0 at 0.25
-		} else {
-			// Bottom quarter - reduced (foreground)
-			posWeight = 0.5 + 2 * (1 - yNorm);  // 1.0 at 0.75, 0.5 at bottom
-		}
-
-		for (let x = 0; x < width; x++) {
-			const idx = y * width + x;
-			if (magnitude[idx] < threshold) continue;
-
-			// Weight by edge magnitude (stronger edges = more confident)
-			const magWeight = magnitude[idx] / threshold;  // >= 1.0
-			const weight = posWeight * Math.min(magWeight, 3.0);  // Cap at 3x
-
-			// Vote for all theta values
-			for (let ti = 0; ti < numTheta; ti++) {
-				const rho = x * cosTable[ti] + y * sinTable[ti];
-				// Map rho from [-rhoMax, +rhoMax] to [0, numRho-1]
-				const ri = Math.round((rho + rhoMax) / rhoStep);
-
-				if (ri >= 0 && ri < numRho) {
-					accumulator[ti * numRho + ri] += weight;
-				}
+	const cap = (roi.x1 - roi.x0) * (roi.y1 - roi.y0);
+	const px = new Float32Array(cap);
+	const py = new Float32Array(cap);
+	const pi = new Int32Array(cap);
+	let count = 0;
+	for (let y = roi.y0; y < roi.y1; y++) {
+		for (let x = roi.x0; x < roi.x1; x++) {
+			const i = y * w + x;
+			const m = mag[i];
+			if (m < MIN_EDGE_MAG) continue;
+			const sx = gx[i];
+			const sy = gy[i];
+			const ax = Math.abs(sx);
+			const ay = Math.abs(sy);
+			// Quantize the gradient direction to one of four neighbour axes.
+			let dx: number;
+			let dy: number;
+			if (ay <= ax * TAN_22_5) {
+				dx = 1;
+				dy = 0;
+			} else if (ax <= ay * TAN_22_5) {
+				dx = 0;
+				dy = 1;
+			} else {
+				dx = 1;
+				dy = sx > 0 === sy > 0 ? 1 : -1;
 			}
+			const m1 = mag[i - dy * w - dx];
+			const m2 = mag[i + dy * w + dx];
+			if (m < m1 || m <= m2) continue;
+			// Parabolic peak through (−1, m1), (0, m), (+1, m2).
+			const denom = m1 - 2 * m + m2;
+			const off = denom < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (m1 - m2)) / denom)) : 0;
+			px[count] = x + off * dx;
+			py[count] = y + off * dy;
+			pi[count] = i;
+			count++;
 		}
 	}
 
-	return { accumulator, thetas: thetaArray, numTheta, numRho, rhoMax, width, height };
+	const sorted = new Float32Array(count);
+	for (let j = 0; j < count; j++) sorted[j] = mag[pi[j]];
+	sorted.sort();
+	const threshold = Math.max(
+		MIN_EDGE_MAG,
+		count > 0 ? sorted[Math.floor(count * EDGE_PERCENTILE)] : 0,
+	);
+
+	const edges: Edges = {
+		count: 0,
+		x: new Float32Array(count),
+		y: new Float32Array(count),
+		nx: new Float32Array(count),
+		ny: new Float32Array(count),
+		mag: new Float32Array(count),
+		threshold,
+	};
+	for (let j = 0; j < count; j++) {
+		const i = pi[j];
+		const m = mag[i];
+		if (m < threshold) continue;
+		const e = edges.count++;
+		edges.x[e] = px[j];
+		edges.y[e] = py[j];
+		edges.nx[e] = gx[i] / m;
+		edges.ny[e] = gy[i] / m;
+		edges.mag[e] = m;
+	}
+	return edges;
+}
+
+// ─── Hough transform ──────────────────────────────────────────────────────────
+
+/** Line normal angles θ (degrees) searched per family: 90° ± range or 0° ± range. */
+function familyCenter(type: LineType): number {
+	return type === 'horizontal' ? 90 : 0;
+}
+
+/** Deviation (degrees, [−90, 90)) of a gradient direction from a family's normal. */
+function normalDeviation(nx: number, ny: number, type: LineType): number {
+	const phi = Math.atan2(ny, nx) / DEG;
+	const shift = type === 'horizontal' ? 0 : 90;
+	return ((((phi + shift) % 180) + 180) % 180) - 90;
+}
+
+interface Accumulator {
+	type: LineType;
+	votes: Float32Array;
+	nTheta: number;
+	nRho: number;
+	/** Offset added to rounded ρ to get its bin. */
+	rhoHalf: number;
+	angleRange: number;
+}
+
+/**
+ * ρ = (x − cx)·cos θ + (y − cy)·sin θ, measured from the image centre.
+ * Each edge point votes with weight ∝ its strength (capped) only for θ within
+ * ORIENT_TOL of its own gradient direction.
+ */
+function houghVote(
+	edges: Edges,
+	type: LineType,
+	angleRange: number,
+	cx: number,
+	cy: number,
+	rhoHalf: number,
+): Accumulator {
+	const nTheta = Math.round((2 * angleRange) / THETA_STEP) + 1;
+	const nRho = 2 * rhoHalf + 1;
+	const votes = new Float32Array(nTheta * nRho);
+	const cosT = new Float32Array(nTheta);
+	const sinT = new Float32Array(nTheta);
+	const base = familyCenter(type) - angleRange;
+	for (let k = 0; k < nTheta; k++) {
+		const t = (base + k * THETA_STEP) * DEG;
+		cosT[k] = Math.cos(t);
+		sinT[k] = Math.sin(t);
+	}
+
+	for (let e = 0; e < edges.count; e++) {
+		const dev = normalDeviation(edges.nx[e], edges.ny[e], type);
+		if (Math.abs(dev) > angleRange + ORIENT_TOL) continue;
+		const kLo = Math.max(0, Math.ceil((dev - ORIENT_TOL + angleRange) / THETA_STEP));
+		const kHi = Math.min(nTheta - 1, Math.floor((dev + ORIENT_TOL + angleRange) / THETA_STEP));
+		const x = edges.x[e] - cx;
+		const y = edges.y[e] - cy;
+		const weight = Math.min(edges.mag[e] / edges.threshold, 2);
+		for (let k = kLo; k <= kHi; k++) {
+			const ri = Math.round(x * cosT[k] + y * sinT[k]) + rhoHalf;
+			votes[k * nRho + ri] += weight;
+		}
+	}
+	return { type, votes, nTheta, nRho, rhoHalf, angleRange };
 }
 
 interface Peak {
-	theta: number;      // Radians
-	thetaDeg: number;   // Degrees (for debugging)
-	rho: number;        // Distance from origin
-	votes: number;
-	type: 'horizontal' | 'vertical';
-	/** Score combining votes with position preference (for sorting). */
-	score: number;
+	type: LineType;
+	/** Normal angle in degrees. */
+	theta: number;
+	rho: number;
 }
 
-/**
- * Find peaks in the Hough accumulator with non-maximum suppression.
- * Applies additional scoring to prefer lines passing through the middle of the image.
- */
-function findPeaks(
-	hough: HoughResult,
-	maxPeaks: number,
-): Peak[] {
-	const { accumulator, thetas, numTheta, numRho, rhoMax, width, height } = hough;
+/** Strongest accumulator cells across both families, with windowed suppression. */
+function findPeaks(accs: Accumulator[], diag: number, minVotes: number): Peak[] {
+	const work = accs.map((a) => a.votes.slice());
+	const dTheta = Math.round(SUPPRESS_DEG / THETA_STEP);
+	const dRho = Math.max(2, Math.round(SUPPRESS_RHO * diag));
 	const peaks: Peak[] = [];
+	let first = 0;
 
-	// Find global max for relative thresholding
-	let globalMax = 0;
-	for (let i = 0; i < accumulator.length; i++) {
-		if (accumulator[i] > globalMax) globalMax = accumulator[i];
-	}
-
-	if (globalMax === 0) return [];
-
-	// Minimum votes to consider (10% of global max)
-	const minVotes = globalMax * 0.10;
-
-	// Suppression window size (with 0.5° steps, need larger theta window)
-	const thetaWindow = 10;  // ±10 bins = ±5°
-	const rhoWindow = 20;    // ±20 pixels
-
-	const suppressed = new Set<number>();
-
-	// Find peaks iteratively
-	while (peaks.length < maxPeaks * 3) {  // Get extra candidates
+	while (peaks.length < MAX_PEAKS) {
+		let best = 0;
+		let bestAcc = -1;
 		let bestIdx = -1;
-		let bestVotes = minVotes;
-
-		for (let ti = 0; ti < numTheta; ti++) {
-			for (let ri = 0; ri < numRho; ri++) {
-				const idx = ti * numRho + ri;
-				if (suppressed.has(idx)) continue;
-				if (accumulator[idx] > bestVotes) {
-					bestVotes = accumulator[idx];
-					bestIdx = idx;
+		for (let a = 0; a < work.length; a++) {
+			const v = work[a];
+			for (let i = 0; i < v.length; i++) {
+				if (v[i] > best) {
+					best = v[i];
+					bestAcc = a;
+					bestIdx = i;
 				}
 			}
 		}
+		if (bestAcc < 0 || best < minVotes) break;
+		if (peaks.length === 0) first = best;
+		else if (best < first * PEAK_FLOOR) break;
 
-		if (bestIdx === -1) break;
+		const acc = accs[bestAcc];
+		const k = Math.floor(bestIdx / acc.nRho);
+		const ri = bestIdx % acc.nRho;
+		peaks.push({
+			type: acc.type,
+			theta: familyCenter(acc.type) - acc.angleRange + k * THETA_STEP,
+			rho: ri - acc.rhoHalf,
+		});
 
-		const ti = Math.floor(bestIdx / numRho);
-		const ri = bestIdx % numRho;
-		const theta = thetas[ti];
-		const thetaDeg = theta * 180 / Math.PI;
-		const rho = ri - rhoMax;  // Convert back from index to actual rho
-
-		// Determine if this is horizontal or vertical based on theta
-		// θ near 90° → horizontal line
-		// θ near 0° or 180° → vertical line
-		const normalizedDeg = ((thetaDeg % 180) + 180) % 180;  // Normalize to [0, 180)
-		const type: 'horizontal' | 'vertical' =
-			(normalizedDeg > 45 && normalizedDeg < 135) ? 'horizontal' : 'vertical';
-
-		// Calculate where this line crosses the center of the image (x = width/2)
-		// and score based on how close that y-intercept is to the middle
-		const cosT = Math.cos(theta);
-		const sinT = Math.sin(theta);
-
-		let positionScore = 1.0;
-		if (type === 'horizontal' && Math.abs(sinT) > 0.1) {
-			// For horizontal lines, find y at x = width/2
-			const yAtCenter = (rho - (width / 2) * cosT) / sinT;
-			const yNorm = yAtCenter / height;  // 0 to 1
-			// Score peaks if y is in the middle 60% of the image
-			if (yNorm >= 0.2 && yNorm <= 0.8) {
-				// Boost lines in the "horizon zone"
-				const distFromMiddle = Math.abs(yNorm - 0.5);
-				positionScore = 1.5 - distFromMiddle;  // 1.5 at center, 1.2 at edges of zone
-			} else {
-				// Penalize lines near very top or bottom
-				positionScore = 0.5;
-			}
-		}
-
-		// Also boost lines that are closer to perfectly horizontal/vertical
-		// (deviation from 90° for horizontal, deviation from 0° for vertical)
-		let angleScore = 1.0;
-		if (type === 'horizontal') {
-			const devFrom90 = Math.abs(normalizedDeg - 90);
-			angleScore = 1.0 + (20 - Math.min(devFrom90, 20)) / 40;  // 1.0 to 1.5
-		} else {
-			const devFrom0 = Math.min(normalizedDeg, 180 - normalizedDeg);
-			angleScore = 1.0 + (20 - Math.min(devFrom0, 20)) / 40;
-		}
-
-		const score = bestVotes * positionScore * angleScore;
-
-		peaks.push({ theta, thetaDeg, rho, votes: bestVotes, type, score });
-
-		// Suppress neighborhood
-		for (let dti = -thetaWindow; dti <= thetaWindow; dti++) {
-			for (let dri = -rhoWindow; dri <= rhoWindow; dri++) {
-				const nti = ti + dti;
-				const nri = ri + dri;
-				if (nti >= 0 && nti < numTheta && nri >= 0 && nri < numRho) {
-					suppressed.add(nti * numRho + nri);
-				}
+		const v = work[bestAcc];
+		for (let kk = Math.max(0, k - dTheta); kk <= Math.min(acc.nTheta - 1, k + dTheta); kk++) {
+			const row = kk * acc.nRho;
+			for (let rr = Math.max(0, ri - dRho); rr <= Math.min(acc.nRho - 1, ri + dRho); rr++) {
+				v[row + rr] = 0;
 			}
 		}
 	}
+	return peaks;
+}
 
-	// Sort by score (not just votes) and return top candidates from each type
-	const horizontal = peaks.filter(p => p.type === 'horizontal')
-		.sort((a, b) => b.score - a.score)
-		.slice(0, maxPeaks);
-	const vertical = peaks.filter(p => p.type === 'vertical')
-		.sort((a, b) => b.score - a.score)
-		.sort((a, b) => b.votes - a.votes)
-		.slice(0, maxPeaks);
+// ─── Line refit ───────────────────────────────────────────────────────────────
 
-	return [...horizontal, ...vertical];
+interface LineModel {
+	/** Weighted centroid. */
+	mx: number;
+	my: number;
+	/** Unit direction (major axis). */
+	ux: number;
+	uy: number;
+}
+
+/** Magnitude-weighted total least squares: major axis of the weighted scatter. */
+function fitLine(edges: Edges, idx: number[]): LineModel {
+	let sw = 0;
+	let mx = 0;
+	let my = 0;
+	for (const e of idx) {
+		const wgt = edges.mag[e];
+		sw += wgt;
+		mx += wgt * edges.x[e];
+		my += wgt * edges.y[e];
+	}
+	mx /= sw;
+	my /= sw;
+	let sxx = 0;
+	let syy = 0;
+	let sxy = 0;
+	for (const e of idx) {
+		const wgt = edges.mag[e];
+		const dx = edges.x[e] - mx;
+		const dy = edges.y[e] - my;
+		sxx += wgt * dx * dx;
+		syy += wgt * dy * dy;
+		sxy += wgt * dx * dy;
+	}
+	const a = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+	return { mx, my, ux: Math.cos(a), uy: Math.sin(a) };
+}
+
+/** Number of distinct 1-px bins covered by sorted positions along a line. */
+function coverage(sortedT: number[]): number {
+	let covered = 0;
+	let last = Number.NEGATIVE_INFINITY;
+	for (const t of sortedT) {
+		const bin = Math.floor(t);
+		if (bin !== last) {
+			covered++;
+			last = bin;
+		}
+	}
+	return covered;
 }
 
 /**
- * Convert a Hough peak (θ, ρ) to line endpoints in normalized coordinates.
+ * Turn a Hough peak into a scored segment: gather gradient-consistent inliers,
+ * keep the longest contiguous run, refit with TLS twice, and score it.
  */
-function peakToLine(
-	theta: number,
-	rho: number,
-	width: number,
-	height: number,
-): { x1: number; y1: number; x2: number; y2: number } | null {
-	const cosT = Math.cos(theta);
-	const sinT = Math.sin(theta);
+function refinePeak(
+	edges: Edges,
+	peak: Peak,
+	cx: number,
+	cy: number,
+	diag: number,
+	roi: Bounds,
+	angleRange: number,
+): Scored | null {
+	const nx = Math.cos(peak.theta * DEG);
+	const ny = Math.sin(peak.theta * DEG);
+	const inliers: { e: number; t: number }[] = [];
+	for (let e = 0; e < edges.count; e++) {
+		const x = edges.x[e] - cx;
+		const y = edges.y[e] - cy;
+		if (Math.abs(x * nx + y * ny - peak.rho) > PEAK_INLIER_DIST) continue;
+		if (Math.abs(edges.nx[e] * nx + edges.ny[e] * ny) < INLIER_COS) continue;
+		inliers.push({ e, t: -x * ny + y * nx });
+	}
+	if (inliers.length < 8) return null;
+	inliers.sort((a, b) => a.t - b.t);
 
-	// Line equation: x·cos(θ) + y·sin(θ) = ρ
-	// Find intersections with image boundaries
-	const points: Array<{ x: number; y: number }> = [];
-
-	// Left edge (x = 0): y = ρ / sin(θ)
-	if (Math.abs(sinT) > 1e-6) {
-		const y = rho / sinT;
-		if (y >= -1 && y <= height + 1) {
-			points.push({ x: 0, y: Math.max(0, Math.min(height, y)) });
+	// Split at gaps and keep the run covering the most length.
+	const maxGap = RUN_GAP * diag;
+	let bestRun: { e: number; t: number }[] = [];
+	let bestCov = 0;
+	let start = 0;
+	for (let i = 1; i <= inliers.length; i++) {
+		if (i < inliers.length && inliers[i].t - inliers[i - 1].t <= maxGap) continue;
+		const run = inliers.slice(start, i);
+		const cov = coverage(run.map((p) => p.t));
+		if (cov > bestCov) {
+			bestCov = cov;
+			bestRun = run;
 		}
+		start = i;
 	}
+	if (bestRun.length < 8) return null;
 
-	// Right edge (x = width): y = (ρ - width·cos(θ)) / sin(θ)
-	if (Math.abs(sinT) > 1e-6) {
-		const y = (rho - width * cosT) / sinT;
-		if (y >= -1 && y <= height + 1) {
-			points.push({ x: width, y: Math.max(0, Math.min(height, y)) });
-		}
+	let idx = bestRun.map((p) => p.e);
+	let model = fitLine(edges, idx);
+	// One re-selection pass against the fitted line tightens the estimate.
+	const tight = idx.filter(
+		(e) =>
+			Math.abs((edges.x[e] - model.mx) * -model.uy + (edges.y[e] - model.my) * model.ux) <=
+			FIT_INLIER_DIST,
+	);
+	if (tight.length < 8) return null;
+	idx = tight;
+	model = fitLine(edges, idx);
+
+	// Direction angle in y-down image space, (−90°, 90°].
+	const dirDeg = Math.atan2(model.uy, model.ux) / DEG;
+	const dir = dirDeg > 90 ? dirDeg - 180 : dirDeg <= -90 ? dirDeg + 180 : dirDeg;
+	// A line sloping down-right (dir > 0) is levelled by turning the image
+	// counter-clockwise, i.e. positive rotation. Same for verticals vs 90°.
+	let angle: number;
+	if (peak.type === 'horizontal') {
+		if (Math.abs(dir) > 45) return null;
+		angle = dir;
+	} else {
+		if (Math.abs(dir) < 45) return null;
+		angle = dir > 0 ? dir - 90 : dir + 90;
 	}
+	if (Math.abs(angle) > angleRange) return null;
 
-	// Top edge (y = 0): x = ρ / cos(θ)
-	if (Math.abs(cosT) > 1e-6) {
-		const x = rho / cosT;
-		if (x >= -1 && x <= width + 1) {
-			points.push({ x: Math.max(0, Math.min(width, x)), y: 0 });
-		}
+	const ts = idx
+		.map((e) => (edges.x[e] - model.mx) * model.ux + (edges.y[e] - model.my) * model.uy)
+		.sort((a, b) => a - b);
+	const roiW = roi.x1 - roi.x0;
+	const roiH = roi.y1 - roi.y0;
+	const coverageFrac = coverage(ts) / (peak.type === 'horizontal' ? roiW : roiH);
+	if (coverageFrac < MIN_COVERAGE) return null;
+
+	// A real boundary keeps the same light/dark side along its length;
+	// coincidentally collinear clutter does not.
+	let positive = 0;
+	for (const e of idx) {
+		if (edges.nx[e] * -model.uy + edges.ny[e] * model.ux > 0) positive++;
 	}
+	const polarity = Math.max(positive, idx.length - positive) / idx.length;
 
-	// Bottom edge (y = height): x = (ρ - height·sin(θ)) / cos(θ)
-	if (Math.abs(cosT) > 1e-6) {
-		const x = (rho - height * sinT) / cosT;
-		if (x >= -1 && x <= width + 1) {
-			points.push({ x: Math.max(0, Math.min(width, x)), y: height });
-		}
-	}
+	const tMin = ts[0];
+	const tMax = ts[ts.length - 1];
+	const x1 = model.mx + tMin * model.ux;
+	const y1 = model.my + tMin * model.uy;
+	const x2 = model.mx + tMax * model.ux;
+	const y2 = model.my + tMax * model.uy;
 
-	if (points.length < 2) {
-		return null;
-	}
+	const across =
+		peak.type === 'horizontal'
+			? ((y1 + y2) / 2 - roi.y0) / roiH
+			: ((x1 + x2) / 2 - roi.x0) / roiW;
+	const borderFactor = across < BORDER_BAND || across > 1 - BORDER_BAND ? BORDER_PENALTY : 1;
+	const typeWeight = peak.type === 'vertical' ? VERTICAL_WEIGHT : 1;
 
-	// Find the two points that are furthest apart
-	let maxDist = 0;
-	let p1 = points[0];
-	let p2 = points[1];
-	for (let i = 0; i < points.length; i++) {
-		for (let j = i + 1; j < points.length; j++) {
-			const dx = points[j].x - points[i].x;
-			const dy = points[j].y - points[i].y;
-			const dist = dx * dx + dy * dy;
-			if (dist > maxDist) {
-				maxDist = dist;
-				p1 = points[i];
-				p2 = points[j];
-			}
-		}
-	}
-
-	// Normalize to 0–1
 	return {
-		x1: p1.x / width,
-		y1: p1.y / height,
-		x2: p2.x / width,
-		y2: p2.y / height,
+		type: peak.type,
+		angle,
+		x1,
+		y1,
+		x2,
+		y2,
+		score: coverageFrac * typeWeight * borderFactor * (0.5 + 0.5 * polarity),
+	};
+}
+
+// ─── Main entry point ─────────────────────────────────────────────────────────
+
+/** Region of interest in analysis px, inset so Sobel/NMS neighbours exist. */
+function regionBounds(region: Rect | null, w: number, h: number): Bounds {
+	const r = region ?? { x: 0, y: 0, w: 1, h: 1 };
+	return {
+		x0: Math.max(EDGE_INSET, Math.floor(r.x * w)),
+		y0: Math.max(EDGE_INSET, Math.floor(r.y * h)),
+		x1: Math.min(w - EDGE_INSET, Math.ceil((r.x + r.w) * w)),
+		y1: Math.min(h - EDGE_INSET, Math.ceil((r.y + r.h) * h)),
 	};
 }
 
 /**
- * Calculate the rotation angle needed to straighten a line.
+ * Detect straight horizon/vertical candidates in an RGBA image.
  *
- * Returns the angle in degrees to rotate the image so the line becomes
- * perfectly horizontal (for horizontal type) or vertical (for vertical type).
- * Positive = clockwise rotation in the UI.
- *
- * Convention: We measure the line's angle from horizontal.
- * - A line sloping DOWN from left to right has NEGATIVE angle (e.g., -3°)
- * - A line sloping UP from left to right has POSITIVE angle (e.g., +3°)
- *
- * To straighten:
- * - If line is at -3° (slopes down-right), rotate image +3° clockwise
- * - If line is at +3° (slopes up-right), rotate image -3° counter-clockwise
- *
- * So: rotation = +lineAngle (not negative!)
- */
-function calculateStraightenAngle(
-	line: { x1: number; y1: number; x2: number; y2: number },
-	type: 'horizontal' | 'vertical',
-): number {
-	// Ensure consistent direction: always measure from left to right
-	let dx = line.x2 - line.x1;
-	let dy = line.y2 - line.y1;
-
-	// If line goes right-to-left, flip it
-	if (dx < 0) {
-		dx = -dx;
-		dy = -dy;
-	}
-
-	// Angle from horizontal: positive = slopes up-right, negative = slopes down-right
-	const lineAngleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
-
-	if (type === 'horizontal') {
-		// To make line horizontal, rotate by the line's angle
-		// (rotating the image clockwise when line slopes down-right)
-		return lineAngleDeg;
-	} else {
-		// For vertical lines, we want to make them exactly vertical (90°)
-		// Line angle from horizontal is near ±90°
-		// Deviation from vertical = lineAngle - 90 (or lineAngle + 90 if negative)
-		if (lineAngleDeg >= 0) {
-			return lineAngleDeg - 90;
-		} else {
-			return lineAngleDeg + 90;
-		}
-	}
-}
-
-// ─── Main Detection Function ──────────────────────────────────────────────────
-
-/**
- * Detect horizon/vertical line candidates in an image.
- *
- * @param imageData - Source image as ImageData (from canvas.getImageData or similar)
- * @param options - Detection options
- * @returns Array of line candidates sorted by confidence, or empty if none found
+ * @returns Candidates sorted best-first, each with a distinct rotation; empty
+ *          when nothing long and straight enough is found.
  */
 export function detectHorizonCandidates(
-	imageData: ImageData,
+	img: RgbaPixels,
 	options: DetectionOptions = {},
 ): HorizonCandidate[] {
-	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const { width: srcWidth, height: srcHeight, data } = imageData;
+	const maxDimension = options.maxDimension ?? 720;
+	const angleRange = options.angleRange ?? 15;
+	const maxCandidates = options.maxCandidates ?? 4;
 
-	console.log('[horizon] Starting detection on', srcWidth, 'x', srcHeight, 'image');
+	const factor = Math.max(1, Math.ceil(Math.max(img.width, img.height) / maxDimension));
+	const w = Math.floor(img.width / factor);
+	const h = Math.floor(img.height / factor);
+	if (w < 16 || h < 16) return [];
 
-	// 1. Downsample if needed
-	let width = srcWidth;
-	let height = srcHeight;
-	let pixels = data;
+	const roi = regionBounds(options.region ?? null, w, h);
+	const roiW = roi.x1 - roi.x0;
+	const roiH = roi.y1 - roi.y0;
+	if (roiW < 16 || roiH < 16) return [];
 
-	if (Math.max(srcWidth, srcHeight) > opts.maxDimension) {
-		const scale = opts.maxDimension / Math.max(srcWidth, srcHeight);
-		width = Math.round(srcWidth * scale);
-		height = Math.round(srcHeight * scale);
+	const luma = blur5(downsampleLuma(img, factor, w, h), w, h);
+	const edges = extractEdges(luma, w, h, roi);
+	if (edges.count === 0) return [];
 
-		console.log('[horizon] Downsampling to', width, 'x', height);
+	const cx = w / 2;
+	const cy = h / 2;
+	const diag = Math.hypot(w, h);
+	const rhoHalf = Math.ceil(diag / 2) + 1;
+	const accs = [
+		houghVote(edges, 'horizontal', angleRange, cx, cy, rhoHalf),
+		houghVote(edges, 'vertical', angleRange, cx, cy, rhoHalf),
+	];
+	// Votes ≥ 1 per edge point, so this is roughly half the minimum line length.
+	const minVotes = 0.5 * MIN_COVERAGE * Math.min(roiW, roiH);
+	const peaks = findPeaks(accs, diag, minVotes);
 
-		const oc = new OffscreenCanvas(width, height);
-		const ctx = oc.getContext('2d');
-		if (!ctx) {
-			console.error('[horizon] Failed to create OffscreenCanvas context');
-			return [];
-		}
-
-		const srcCanvas = new OffscreenCanvas(srcWidth, srcHeight);
-		const srcCtx = srcCanvas.getContext('2d');
-		if (!srcCtx) return [];
-		srcCtx.putImageData(imageData, 0, 0);
-
-		ctx.drawImage(srcCanvas, 0, 0, width, height);
-		pixels = ctx.getImageData(0, 0, width, height).data;
-	}
-
-	// 2. Convert to grayscale
-	const gray = toGrayscale(pixels, width, height);
-
-	// 3. Gaussian blur
-	const blurred = gaussianBlur3x3(gray, width, height);
-
-	// 4. Sobel edge detection
-	const { magnitude, maxMag } = sobelEdgeDetect(blurred, width, height);
-	console.log('[horizon] Edge detection maxMag:', maxMag);
-
-	// 5. Edge thresholding
-	const threshold = maxMag * opts.edgeThreshold;
-
-	// Count edge pixels for debugging
-	let edgeCount = 0;
-	for (let i = 0; i < magnitude.length; i++) {
-		if (magnitude[i] >= threshold) edgeCount++;
-	}
-	console.log('[horizon] Edge pixels above threshold:', edgeCount);
-
-	// 6. Hough Transform
-	const hough = houghTransform(magnitude, width, height, threshold, opts.angleRange);
-	console.log('[horizon] Hough accumulator size:', hough.numTheta, 'x', hough.numRho);
-
-	// 7. Find peaks
-	const peaks = findPeaks(hough, opts.maxCandidates);
-	console.log('[horizon] Found', peaks.length, 'peaks');
-
-	if (peaks.length === 0) {
-		return [];
-	}
-
-	// 8. Convert peaks to candidates
-	const maxScore = Math.max(...peaks.map(p => p.score));
-	const candidates: HorizonCandidate[] = [];
-
+	const lines: Scored[] = [];
 	for (const peak of peaks) {
-		const line = peakToLine(peak.theta, peak.rho, width, height);
-		if (!line) {
-			console.log('[horizon] Skipping peak with invalid line:', peak);
-			continue;
-		}
+		const line = refinePeak(edges, peak, cx, cy, diag, roi, angleRange);
+		if (line) lines.push(line);
+	}
+	lines.sort((a, b) => b.score - a.score);
 
-		const angle = calculateStraightenAngle(line, peak.type);
+	const kept: Scored[] = [];
+	for (const line of lines) {
+		if (kept.some((k) => Math.abs(k.angle - line.angle) < DUPLICATE_DEG)) continue;
+		kept.push(line);
+	}
+	if (kept.length === 0) return [];
 
-		// Skip if angle is too extreme (likely noise)
-		if (Math.abs(angle) > opts.angleRange) {
-			console.log('[horizon] Skipping peak with extreme angle:', angle, peak);
-			continue;
-		}
-
-		console.log('[horizon] Candidate:', {
-			type: peak.type,
-			thetaDeg: peak.thetaDeg.toFixed(1),
-			rho: peak.rho.toFixed(1),
-			votes: peak.votes.toFixed(0),
-			score: peak.score.toFixed(0),
-			angle: angle.toFixed(2),
+	// Analysis px → normalized coords of the input image (pixel centres).
+	const sx = factor / img.width;
+	const sy = factor / img.height;
+	const best = kept[0].score;
+	return kept
+		.filter((l) => l.score >= best * MIN_CONFIDENCE)
+		.slice(0, maxCandidates)
+		.map((l) => ({
+			angle: l.angle,
 			line: {
-				x1: line.x1.toFixed(3),
-				y1: line.y1.toFixed(3),
-				x2: line.x2.toFixed(3),
-				y2: line.y2.toFixed(3),
+				x1: (l.x1 + 0.5) * sx,
+				y1: (l.y1 + 0.5) * sy,
+				x2: (l.x2 + 0.5) * sx,
+				y2: (l.y2 + 0.5) * sy,
 			},
-		});
-
-		candidates.push({
-			angle,
-			line,
-			confidence: peak.score / maxScore,
-			type: peak.type,
-		});
-	}
-
-	// Sort by confidence (highest first)
-	candidates.sort((a, b) => b.confidence - a.confidence);
-
-	// Filter: remove low-confidence candidates and near-duplicates
-	const filtered: HorizonCandidate[] = [];
-	for (const c of candidates) {
-		// Skip low-confidence candidates
-		if (c.confidence < opts.minConfidence) {
-			console.log('[horizon] Skipping low-confidence candidate:', c.confidence.toFixed(2), c.type, c.angle.toFixed(1));
-			continue;
-		}
-
-		// Skip near-duplicate angles (within 1°)
-		const isDuplicate = filtered.some(
-			f => f.type === c.type && Math.abs(f.angle - c.angle) < 1.0,
-		);
-		if (isDuplicate) {
-			continue;
-		}
-
-		filtered.push(c);
-	}
-
-	console.log('[horizon] Returning', filtered.length, 'candidates after filtering');
-
-	// Return nothing if we don't have confident results
-	if (filtered.length === 0) {
-		console.log('[horizon] No confident candidates found');
-		return [];
-	}
-
-	return filtered.slice(0, opts.maxCandidates);
-}
-
-/**
- * Create ImageData from a Uint8ClampedArray of RGBA pixels.
- * Useful when reading back from GPU via readPixels().
- */
-export function createImageData(
-	pixels: Uint8ClampedArray,
-	width: number,
-	height: number,
-): ImageData {
-	// Copy to a new Uint8ClampedArray backed by a plain ArrayBuffer
-	// to satisfy ImageData constructor type requirements.
-	const data = new Uint8ClampedArray(pixels);
-	return new ImageData(data, width, height);
+			confidence: l.score / best,
+			type: l.type,
+		}));
 }

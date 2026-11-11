@@ -5,6 +5,8 @@
  * The 90° buttons simply add/subtract 90° to this value — no special handling needed.
  *
  * Zoom scales from center — values > 1.0 crop in (e.g., 2.0 = 2x zoom, shows center 50%).
+ * The host passes user zoom × rotationCoverZoom (geometry.ts), so fine
+ * rotations are zoomed just enough that no clamped corner pixels show.
  *
  * Flips are handled via CSS on the canvas element, not in this shader.
  */
@@ -14,7 +16,8 @@
 @group(0) @binding(2) var<uniform> uTransform : TransformUniforms;
 
 struct TransformUniforms {
-	// Rotation in radians (positive = clockwise)
+	// Rotation in radians (positive = counter-clockwise on screen: output p
+	// samples the source at R(θ)·p in y-down space)
 	rotation : f32,
 	// Aspect ratio of the source texture (width/height)
 	sourceAspect : f32,
@@ -62,8 +65,8 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	// optionally swapped for ±90°/±270° (the nearest-90° step). The intent:
 	// - 0°/180°: output is sized like source → identity / 180° flip works.
 	// - ±90°/±270°: output is sized as swapped source → rotation is exact.
-	// - Fine rotations (e.g. 5°): output keeps source size; rotated corners
-	//   clip into the sampler clamp region (caller crops as needed).
+	// - Fine rotations (e.g. 5°): output keeps source size; the cover zoom
+	//   folded into uTransform.zoom keeps rotated corners inside the source.
 	//
 	// We work in a "source-pixel" reference frame where the source occupies
 	// physical extent (srcAspect, 1). Depending on the nearest-90° step, the

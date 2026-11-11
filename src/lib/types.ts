@@ -59,16 +59,16 @@ export const DEFAULT_CROP_QUAD: CropQuad = {
 export interface TransformParams {
 	/** @deprecated Use `rotation` instead. Kept for backwards compatibility. */
 	rotation90?: 0 | 1 | 2 | 3;
-	/** Rotation in degrees (positive = clockwise). Supports any value. */
+	/** Rotation in degrees (positive = counter-clockwise on screen). Supports any value. */
 	rotation: number;
 	/** Horizontal flip (mirror). Applied via CSS. */
 	flipH: boolean;
 	/** Vertical flip. Applied via CSS. */
 	flipV: boolean;
 	/**
-	 * Zoom factor (1.0 = no zoom, 2.0 = 2x zoom).
-	 * Zooms from center, effectively cropping in.
-	 * Range: 1.0 to 3.0. Applied via CSS scale transform.
+	 * Zoom factor (1.0 = no zoom, 2.0 = 2x zoom), on top of the automatic
+	 * zoom that keeps a rotated image covering the frame (`rotationCoverZoom`).
+	 * Zooms from center, effectively cropping in. Range: 1.0 to 3.0.
 	 */
 	zoom: number;
 }

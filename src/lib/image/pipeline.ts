@@ -42,6 +42,7 @@ import cropWGSL from './shaders/crop.wgsl?raw';
 import transformWGSL from './shaders/transform.wgsl?raw';
 import borderWGSL from './shaders/border.wgsl?raw';
 import { buildCurveLUTs } from './curves';
+import { rotationCoverZoom } from './geometry';
 import type { BorderColor, CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
 import { TONE_PRESETS } from '$lib/types';
 import { DEFAULT_TRANSFORM } from '$lib/types';
@@ -1445,14 +1446,15 @@ function makeCropUniforms(device: GPUDevice, quad: CropQuad): GPUBuffer {
  * TransformUniforms layout (total 16 bytes):
  *   rotation     : f32   @ 0   (radians)
  *   sourceAspect : f32   @ 4   (width/height of source texture)
- *   zoom         : f32   @ 8   (1.0 = no zoom, 2.0 = 2x zoom)
+ *   zoom         : f32   @ 8   (user zoom × rotation cover zoom; 1.0 = none)
  *   outputAspect : f32   @ 12  (width/height of output texture)
  */
 function makeTransformUniforms(device: GPUDevice, t: TransformParams, sourceAspect: number, outputAspect: number): GPUBuffer {
 	const data = new Float32Array([
 		(t.rotation * Math.PI) / 180, // Convert degrees to radians
 		sourceAspect,                  // Source texture aspect ratio
-		t.zoom ?? 1,                   // Zoom factor (default 1.0 = no zoom)
+		// User zoom on top of the zoom that keeps rotated corners filled.
+		(t.zoom ?? 1) * rotationCoverZoom(t.rotation, sourceAspect),
 		outputAspect,                  // Output texture aspect ratio
 	]);
 	return makeUniformBuffer(device, data);

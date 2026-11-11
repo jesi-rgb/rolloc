@@ -2,8 +2,13 @@
 	/**
 	 * HorizonOverlay — Displays detected horizon/vertical line candidates.
 	 *
-	 * Shows detected lines as colored overlays on top of the canvas.
-	 * User can click a line to select it, then apply to straighten the image.
+	 * Shows detected segments over the canvas. Clicking one selects it; the
+	 * parent previews the selection by rotating the canvas, and the overlay
+	 * rotates its lines by the same `previewAngle` so they stay on the image
+	 * features they were detected on (the selected one ends up level).
+	 *
+	 * Keyboard (←/→, Enter, Esc) is handled by the route page so it can take
+	 * precedence over frame navigation.
 	 *
 	 * Positioning: Absolutely positioned over the canvas using offset metrics,
 	 * similar to CropOverlay.
@@ -12,12 +17,26 @@
 	import { fade } from 'svelte/transition';
 
 	interface Props {
-		/** Detected line candidates. */
+		/** Detected line candidates (coords normalized to the unrotated analysis render). */
 		candidates: HorizonCandidate[];
 		/** Canvas element to overlay — used for sizing and coord conversion. */
 		canvas: HTMLCanvasElement;
 		/** Currently selected candidate index (null = none selected). */
 		selectedIndex: number | null;
+		/**
+		 * Rotation (degrees, `TransformParams.rotation` units: positive =
+		 * counter-clockwise) the canvas currently shows on top of the render
+		 * the candidates were detected on.
+		 */
+		previewAngle: number;
+		/**
+		 * Zoom of the previewed render relative to the analysis render (the
+		 * rotation cover zoom grows with the angle); lines scale about the centre.
+		 */
+		previewScale: number;
+		/** CSS mirror flags applied to the canvas; the overlay mirrors to match. */
+		flipH: boolean;
+		flipV: boolean;
 		/** Called when user clicks a line to select it. */
 		onSelect: (index: number) => void;
 		/** Called when user clicks Apply. */
@@ -30,6 +49,10 @@
 		candidates,
 		canvas,
 		selectedIndex,
+		previewAngle,
+		previewScale,
+		flipH,
+		flipV,
 		onSelect,
 		onApply,
 		onCancel,
@@ -80,9 +103,27 @@
 	}
 
 	const lineDisplays = $derived.by(() => {
-		const displays: LineDisplay[] = [];
+		// The GPU rotates and zooms about the canvas centre in square-pixel
+		// space, so the same similarity in display px moves the lines with the
+		// image. A source point q shows up at s·R(−θ)·q (y-down), i.e.
+		// counter-clockwise for θ > 0.
+		const a = (previewAngle * Math.PI) / 180;
+		const cos = Math.cos(a) * previewScale;
+		const sin = Math.sin(a) * previewScale;
+		const cx = canvasWidth / 2;
+		const cy = canvasHeight / 2;
+		const toDisplay = (nx: number, ny: number): { x: number; y: number } => {
+			const dx = nx * canvasWidth - cx;
+			const dy = ny * canvasHeight - cy;
+			const x = cx + dx * cos + dy * sin;
+			const y = cy - dx * sin + dy * cos;
+			return {
+				x: flipH ? canvasWidth - x : x,
+				y: flipV ? canvasHeight - y : y,
+			};
+		};
 
-		candidates.forEach((c, index) => {
+		return candidates.map((c, index): LineDisplay => {
 			const isSelected = selectedIndex === index;
 			const isHorizontal = c.type === 'horizontal';
 
@@ -91,57 +132,25 @@
 			const baseColor = isHorizontal ? 'rgb(0, 255, 255)' : 'rgb(255, 0, 255)';
 			const selectedColor = isHorizontal ? 'rgb(100, 255, 255)' : 'rgb(255, 100, 255)';
 
-			const color = isSelected ? selectedColor : baseColor;
-			const width = isSelected ? 3 : 2;
-			const opacity = isSelected ? 1 : 0.5 + c.confidence * 0.3;
-
-			// Format angle label
+			// Label shows the rotation change applying this line would make.
 			const angleStr = c.angle >= 0 ? `+${c.angle.toFixed(1)}°` : `${c.angle.toFixed(1)}°`;
-			const typeStr = isHorizontal ? 'H' : 'V';
-			const label = `${typeStr}: ${angleStr}`;
+			const p1 = toDisplay(c.line.x1, c.line.y1);
+			const p2 = toDisplay(c.line.x2, c.line.y2);
 
-			displays.push({
-				x1: c.line.x1 * canvasWidth,
-				y1: c.line.y1 * canvasHeight,
-				x2: c.line.x2 * canvasWidth,
-				y2: c.line.y2 * canvasHeight,
-				color,
-				width,
-				opacity,
-				label,
+			return {
+				x1: p1.x,
+				y1: p1.y,
+				x2: p2.x,
+				y2: p2.y,
+				color: isSelected ? selectedColor : baseColor,
+				width: isSelected ? 3 : 2,
+				opacity: isSelected ? 1 : 0.5 + c.confidence * 0.3,
+				label: `${isHorizontal ? 'H' : 'V'}: ${angleStr}`,
 				candidate: c,
 				index,
-			});
+			};
 		});
-
-		return displays;
 	});
-
-	// ─── Keyboard handling ────────────────────────────────────────────────────
-
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			onCancel();
-		} else if (e.key === 'Enter' && selectedIndex !== null) {
-			onApply();
-		} else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-			// Select previous candidate
-			if (candidates.length > 0) {
-				const newIndex = selectedIndex === null
-					? 0
-					: (selectedIndex - 1 + candidates.length) % candidates.length;
-				onSelect(newIndex);
-			}
-		} else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-			// Select next candidate
-			if (candidates.length > 0) {
-				const newIndex = selectedIndex === null
-					? 0
-					: (selectedIndex + 1) % candidates.length;
-				onSelect(newIndex);
-			}
-		}
-	}
 
 	// ─── Line click handler ───────────────────────────────────────────────────
 
@@ -163,8 +172,6 @@
 		return { x: midX, y: midY + offsetY };
 	}
 </script>
-
-<svelte:window onkeydown={handleKeydown} />
 
 {#if hasMetrics && candidates.length > 0}
 	<!-- Main overlay SVG -->
@@ -251,7 +258,7 @@
 			disabled={selectedIndex === null}
 			class="px-3 py-1.5 text-xs rounded transition
 			       {selectedIndex !== null
-				? 'bg-primary text-white hover:bg-primary/90'
+				? 'bg-primary text-primary-content hover:bg-primary-muted'
 				: 'bg-base/50 text-content-muted border border-base-subtle cursor-not-allowed'}"
 		>
 			Apply
@@ -266,6 +273,6 @@
 		       transform: translateX(-50%);"
 		transition:fade={{ duration: 150 }}
 	>
-		Click a line to select, then Apply to straighten
+		Click a line or use ←/→ to choose · Enter applies · Esc cancels
 	</div>
 {/if}

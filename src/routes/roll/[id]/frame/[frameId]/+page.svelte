@@ -17,6 +17,8 @@
    *   T / G  — +/− Density
    */
   import { onMount, onDestroy } from "svelte";
+  import { fade, fly } from "svelte/transition";
+  import { quintOut } from "svelte/easing";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { getRoll, getRollPath, updateRoll, putFrame } from "$lib/db/rolls";
@@ -68,10 +70,8 @@
   import TransformControls from "$lib/components/TransformControls.svelte";
   import ExportControls from "$lib/components/ExportControls.svelte";
   import SidebarSection from "$lib/components/SidebarSection.svelte";
-  import {
-    detectHorizonCandidates,
-    createImageData,
-  } from "$lib/image/horizon-detect";
+  import { detectHorizonCandidates } from "$lib/image/horizon-detect";
+  import { rotationCoverZoom } from "$lib/image/geometry";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
   import {
     ArrowFatUpIcon,
@@ -81,12 +81,15 @@
     ArrowLeftIcon,
     CaretLeftIcon,
     CaretRightIcon,
+    CircleNotchIcon,
+    EyedropperSampleIcon,
     WarningIcon,
   } from "phosphor-svelte";
 
   /** Shared style for the compact header icon buttons. */
   const ICON_BTN =
-    "p-1.5 rounded-md text-content-muted hover:text-content hover:bg-base-muted transition " +
+    "p-1.5 rounded-md text-content-muted hover:text-content hover:bg-base-muted " +
+    "transition-[color,background-color,transform] duration-150 ease-out active:scale-95 " +
     "disabled:opacity-30 disabled:pointer-events-none";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
@@ -143,6 +146,19 @@
   let currentHistogram = $state<
     import("$lib/image/pipeline").ChannelHistograms | null
   >(null);
+  /**
+   * Id of the frame whose pixels are currently on the canvas. Lags `frameId`
+   * during navigation: the previous frame stays visible (dimmed) until the new
+   * one has decoded and painted, instead of flashing an empty overlay.
+   */
+  let paintedFrameId = $state<string | null>(null);
+  const framePending = $derived(loading || paintedFrameId !== frameId);
+  const showSpinner = $derived(
+    framePending &&
+      !gpuError &&
+      !renderError &&
+      (loading || (roll !== null && frame !== null)),
+  );
 
   // ─── Pipeline init (once, on mount) ───────────────────────────────────────
 
@@ -160,6 +176,7 @@
     pipeline?.destroy();
     currentBitmap?.close();
     currentRawBuffer = null;
+    if (horizonNoticeTimer !== null) clearTimeout(horizonNoticeTimer);
   });
 
   // ─── Create pipeline once canvas is in the DOM ────────────────────────────
@@ -275,6 +292,8 @@
     // Clear history on frame navigation — history is per-frame, in-memory only.
     historyStack = [];
     historyCursor = -1;
+    // Horizon candidates belong to the previous frame's pixels.
+    exitHorizonMode();
 
     async function load(): Promise<void> {
       const [r, f, allFrames] = await Promise.all([
@@ -508,42 +527,35 @@
 
   // ─── Re-render whenever the effective edit changes ────────────────────────
 
-  function renderFrame(editOverride?: EffectiveEdit): void {
-    if (!pipeline || !roll || !frame) return;
-    const edit = editOverride ?? resolveEdit(roll, frame);
+  /**
+   * Render `editOverride`, or the committed edit. While horizon mode is
+   * active the committed edit is shown in the horizon analysis view so that
+   * resizes and slider tweaks keep the canvas aligned with the line overlay.
+   * Resolves once the GPU work is submitted; never rejects (errors land in
+   * `renderError`).
+   */
+  function renderFrame(editOverride?: EffectiveEdit): Promise<void> {
+    if (!pipeline || !roll || !frame) return Promise.resolve();
+    const edit =
+      editOverride ??
+      (horizonActive
+        ? horizonViewEdit(resolveEdit(roll, frame), horizonPreviewAngle)
+        : resolveEdit(roll, frame));
+    const fid = frame.id;
+    const p = pipeline;
+    let job: Promise<void>;
     if (currentRawBuffer) {
       console.debug(
         "[frame] renderFrame: RAW path, byteLength =",
         currentRawBuffer.byteLength,
       );
-      pipeline
-        .renderRaw(edit, currentRawBuffer)
-        .then(() => {
-          // Capture histogram from lastLogPerc after render completes
-          currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
-          // Persist log percentiles so batch export can match this preview.
-          persistLogPerc();
-        })
-        .catch((err: unknown) => {
-          console.error("[frame] renderRaw error:", err);
-          renderError = err instanceof Error ? err.message : String(err);
-        });
+      job = p.renderRaw(edit, currentRawBuffer);
     } else if (currentDecodedBuffer) {
       console.debug(
         "[frame] renderFrame: decoded RGBA path, byteLength =",
         currentDecodedBuffer.byteLength,
       );
-      pipeline
-        .renderDecodedRgba(edit, currentDecodedBuffer)
-        .then(() => {
-          // Capture histogram from lastLogPerc after render completes
-          currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
-          persistLogPerc();
-        })
-        .catch((err: unknown) => {
-          console.error("[frame] renderDecodedRgba error:", err);
-          renderError = err instanceof Error ? err.message : String(err);
-        });
+      job = p.renderDecodedRgba(edit, currentDecodedBuffer);
     } else if (currentBitmap) {
       console.debug(
         "[frame] renderFrame: JPEG path, bitmap =",
@@ -551,21 +563,23 @@
         "x",
         currentBitmap.height,
       );
-      pipeline
-        .render(edit, currentBitmap)
-        .then(() => {
-          // Capture histogram from lastLogPerc after render completes
-          currentHistogram = pipeline?.lastLogPerc?.histograms ?? null;
-          // Persist log percentiles so background export can match this preview.
-          persistLogPerc();
-        })
-        .catch((err: unknown) => {
-          console.error("[frame] render error:", err);
-          renderError = err instanceof Error ? err.message : String(err);
-        });
+      job = p.render(edit, currentBitmap);
     } else {
       console.warn("[frame] renderFrame called but no image data available");
+      return Promise.resolve();
     }
+    return job
+      .then(() => {
+        // Capture histogram from lastLogPerc after render completes
+        currentHistogram = p.lastLogPerc?.histograms ?? null;
+        paintedFrameId = fid;
+        // Persist log percentiles so batch export can match this preview.
+        persistLogPerc();
+      })
+      .catch((err: unknown) => {
+        console.error("[frame] render error:", err);
+        renderError = err instanceof Error ? err.message : String(err);
+      });
   }
 
   /**
@@ -1093,122 +1107,166 @@
   // ─── Horizon detection mode ───────────────────────────────────────────────
   //
   // Auto-straighten workflow:
-  // 1. User clicks "Auto" button in TransformControls
-  // 2. We read canvas pixels and run Hough line detection
-  // 3. Show detected lines as overlay for user to select
-  // 4. User clicks a line to select it (preview updates rotation)
-  // 5. User clicks Apply → commit rotation, or Cancel → revert
+  // 1. User clicks "Auto" in TransformControls.
+  // 2. The frame is rendered in the analysis view — current 90° step only
+  //    (fine rotation zeroed), no crop, no matte — and read back. Zeroing the
+  //    fine rotation keeps clamped corner smear and the matte's straight edges
+  //    out of the analysis and makes the detected angle absolute.
+  // 3. Straight lines are detected (inside the saved crop, if any) and shown
+  //    as an overlay; the best one is previewed by rotating the analysis view.
+  // 4. Click / ←→ picks another line; Enter/Apply commits base + angle,
+  //    Esc/Cancel restores the committed edit.
 
-  /** Whether horizon detection is running. */
+  /** Detection is running (Auto button spinner). */
   let detectingHorizon = $state(false);
 
-  /** Detected horizon/vertical line candidates. */
+  /** Horizon mode owns the canvas: from detection start until apply/cancel. */
+  let horizonActive = $state(false);
+
+  /** Detected horizon/vertical line candidates, best first. */
   let horizonCandidates = $state<HorizonCandidate[]>([]);
 
-  /** Currently selected candidate index (for preview). */
+  /** Currently selected candidate index (previewed on the canvas). */
   let selectedHorizonIndex = $state<number | null>(null);
 
-  /** Rotation value before horizon detection started (for cancel/revert). */
-  let preHorizonRotation = $state<number>(0);
+  /** Rotation the analysis view was rendered with: the committed 90° step. */
+  let horizonBaseRotation = $state(0);
 
-  /** Whether the horizon overlay is active (showing candidates). */
+  /** Inline feedback when detection finds nothing usable. */
+  let horizonNotice = $state<string | null>(null);
+  let horizonNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Whether the horizon overlay is showing candidates. */
   const horizonModeActive = $derived(horizonCandidates.length > 0);
 
+  /** Rotation delta of the previewed candidate (0 while detecting). */
+  const horizonPreviewAngle = $derived(
+    selectedHorizonIndex === null
+      ? 0
+      : (horizonCandidates[selectedHorizonIndex]?.angle ?? 0),
+  );
+
+  /** Cover-zoom growth of the preview vs the (90°-step) analysis render. */
+  const horizonPreviewScale = $derived(
+    rotationCoverZoom(
+      horizonBaseRotation + horizonPreviewAngle,
+      originalWidth / originalHeight,
+    ) / rotationCoverZoom(horizonBaseRotation, originalWidth / originalHeight),
+  );
+
+  /** The analysis view of `edit`, rotated `delta` degrees past the 90° base. */
+  function horizonViewEdit(edit: EffectiveEdit, delta: number): EffectiveEdit {
+    return {
+      ...edit,
+      cropQuad: null,
+      inversionParams: { ...edit.inversionParams, borderWidth: 0 },
+      transform: { ...edit.transform, rotation: horizonBaseRotation + delta },
+    };
+  }
+
+  function exitHorizonMode(): void {
+    horizonActive = false;
+    horizonCandidates = [];
+    selectedHorizonIndex = null;
+  }
+
+  function showHorizonNotice(message: string): void {
+    horizonNotice = message;
+    if (horizonNoticeTimer !== null) clearTimeout(horizonNoticeTimer);
+    horizonNoticeTimer = setTimeout(() => {
+      horizonNotice = null;
+      horizonNoticeTimer = null;
+    }, 2500);
+  }
+
   /**
-   * Start horizon detection: read canvas pixels and find lines.
+   * Render the analysis view, read it back and detect line candidates.
    */
   async function startHorizonDetection(): Promise<void> {
-    if (!pipeline || !canvasEl) return;
+    if (!pipeline || !roll || !frame || horizonActive) return;
+    if (cropModeActive) commitCropAndExit();
+    wbPickerActive = false;
+    horizonNotice = null;
 
+    const p = pipeline;
+    const fid = frame.id;
+    const edit = resolveEdit(roll, frame);
+    horizonBaseRotation = Math.round(edit.transform.rotation / 90) * 90;
+    horizonCandidates = [];
+    selectedHorizonIndex = null;
+    horizonActive = true;
     detectingHorizon = true;
 
     try {
-      // Read current canvas pixels
-      const w = pipeline.lastOutputWidth;
-      const h = pipeline.lastOutputHeight;
-      const pixels = await pipeline.readPixels(0, 0, w, h);
+      await renderFrame();
+      // Navigation or cancel while rendering invalidates this run.
+      if (!horizonActive || frame?.id !== fid) return;
 
-      if (!pixels) {
-        console.error("[horizon] Failed to read pixels from canvas");
-        return;
+      const w = p.lastOutputWidth;
+      const h = p.lastOutputHeight;
+      const pixels = await p.readPixels(0, 0, w, h);
+      if (!horizonActive || frame?.id !== fid) return;
+
+      let candidates: HorizonCandidate[] = [];
+      if (pixels) {
+        // Analyse only what the saved crop keeps — this also leaves film
+        // rebate and holder edges out when the frame has been cropped.
+        const q = edit.cropQuad;
+        const region = q
+          ? {
+              x: Math.min(q.tl.x, q.bl.x),
+              y: Math.min(q.tl.y, q.tr.y),
+              w: Math.max(q.tr.x, q.br.x) - Math.min(q.tl.x, q.bl.x),
+              h: Math.max(q.bl.y, q.br.y) - Math.min(q.tl.y, q.tr.y),
+            }
+          : null;
+        candidates = detectHorizonCandidates(
+          { data: pixels, width: w, height: h },
+          { region },
+        );
+      } else {
+        console.error("[horizon] readPixels returned no data");
       }
-
-      // Create ImageData and run detection
-      const imageData = createImageData(pixels, w, h);
-      const candidates = detectHorizonCandidates(imageData);
 
       if (candidates.length === 0) {
-        console.log("[horizon] No lines detected");
-        // Do nothing — user just sees no overlay
+        exitHorizonMode();
+        showHorizonNotice("No straight horizon or vertical found");
+        await renderFrame();
         return;
       }
 
-      console.log("[horizon] Found", candidates.length, "candidates");
-
-      // Store pre-detection rotation for revert on cancel
-      preHorizonRotation = effectiveTransform.rotation;
-
-      // Set candidates and auto-select the first (highest confidence)
       horizonCandidates = candidates;
-      selectedHorizonIndex = 0;
-
-      // Preview the first candidate's rotation
-      applyHorizonPreview(0);
+      onHorizonSelect(0);
     } finally {
       detectingHorizon = false;
     }
   }
 
-  /**
-   * Preview a horizon candidate by applying its rotation.
-   */
-  function applyHorizonPreview(index: number): void {
-    const candidate = horizonCandidates[index];
-    if (!candidate) return;
-
-    // Apply the rotation adjustment (additive to current fine rotation base)
-    const newRotation = preHorizonRotation + candidate.angle;
-    onTransformChange({ ...effectiveTransform, rotation: newRotation });
-  }
-
-  /**
-   * Called when user selects a horizon candidate.
-   */
+  /** Select a candidate and preview its rotation. */
   function onHorizonSelect(index: number): void {
+    if (!horizonCandidates[index]) return;
     selectedHorizonIndex = index;
-    applyHorizonPreview(index);
+    void renderFrame();
   }
 
-  /**
-   * Called when user clicks Apply — commit the selected rotation.
-   */
+  /** Commit base + selected angle as the frame rotation. */
   function onHorizonApply(): void {
-    if (selectedHorizonIndex === null) return;
-
-    // Compute the rotation from the selected candidate
-    const candidate = horizonCandidates[selectedHorizonIndex];
+    const candidate =
+      selectedHorizonIndex === null
+        ? undefined
+        : horizonCandidates[selectedHorizonIndex];
     if (!candidate) return;
-
-    const newRotation = preHorizonRotation + candidate.angle;
-
-    // Commit the transform with the new rotation
-    onTransformCommit({ ...effectiveTransform, rotation: newRotation });
-
-    // Clear horizon mode
-    horizonCandidates = [];
-    selectedHorizonIndex = null;
+    // Hundredths are well below what the fine slider (0.1° steps) can show.
+    const rotation =
+      Math.round((horizonBaseRotation + candidate.angle) * 100) / 100;
+    exitHorizonMode();
+    onTransformCommit({ ...effectiveTransform, rotation });
   }
 
-  /**
-   * Called when user cancels horizon mode — revert rotation.
-   */
+  /** Leave horizon mode and restore the committed edit. */
   function onHorizonCancel(): void {
-    // Revert to pre-detection rotation
-    onTransformChange({ ...effectiveTransform, rotation: preHorizonRotation });
-
-    // Clear horizon mode
-    horizonCandidates = [];
-    selectedHorizonIndex = null;
+    exitHorizonMode();
+    void renderFrame();
   }
 
   // ─── Export ────────────────────────────────────────────────────────────────
@@ -1277,6 +1335,33 @@
         "PageDown",
       ]);
       if (rangeNativeKeys.has(e.key)) return;
+    }
+
+    // Horizon mode: Esc/Enter resolve it, arrows cycle candidates instead of
+    // navigating frames.
+    if (horizonModeActive) {
+      const n = horizonCandidates.length;
+      const step =
+        e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "j"
+          ? 1
+          : e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "k"
+            ? -1
+            : 0;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onHorizonCancel();
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        onHorizonApply();
+        return;
+      }
+      if (step !== 0) {
+        e.preventDefault();
+        onHorizonSelect(((selectedHorizonIndex ?? 0) + step + n) % n);
+        return;
+      }
     }
 
     // Undo / redo — intercept before other single-key shortcuts.
@@ -1384,14 +1469,12 @@
         break;
       case "Escape":
         e.preventDefault();
-        if (horizonModeActive) {
-          onHorizonCancel();
-        } else if (cropModeActive) {
+        if (cropModeActive) {
           cancelCrop();
         } else if (wbPickerActive) {
           cancelWbPicker();
         } else {
-          goto(`/roll/${rollId}`);
+          goto(`/?roll=${encodeURIComponent(rollId)}`);
         }
         break;
       case "Enter":
@@ -1461,23 +1544,47 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
+{#snippet errorState(title: string, message: string)}
+  <div
+    class="absolute inset-0 flex flex-col items-center justify-center gap-sm text-center px-l
+           bg-base-muted animate-fadein"
+  >
+    <WarningIcon size={40} weight="thin" class="mb-xs text-content-subtle" />
+    <h2 class="text-l font-semibold text-content">{title}</h2>
+    <p class="max-w-96 text-sm text-content-muted text-balance wrap-break-word">{message}</p>
+    <a
+      href="/?roll={encodeURIComponent(rollId)}"
+      class="mt-sm flex items-center gap-xs px-sm py-xs rounded-md text-sm text-content-muted
+             hover:text-content hover:bg-base transition-[color,background-color,transform]
+             duration-150 ease-out active:scale-[0.97]"
+    >
+      <ArrowLeftIcon size={14} />
+      Back to roll
+    </a>
+  </div>
+{/snippet}
+
 <div class="h-screen bg-base text-content flex flex-col overflow-hidden">
   <!-- ── Top bar ──────────────────────────────────────────────────────────── -->
   <header
     class="shrink-0 flex items-center gap-sm px-l h-12 border-b border-base-subtle"
   >
     <a
-      href="/roll/{rollId}"
-      class="-ml-xs flex items-center gap-xs px-xs py-xs rounded-md text-sm
-             text-content-muted hover:text-content hover:bg-base-muted transition"
+      href="/?roll={encodeURIComponent(rollId)}"
+      class="-ml-xs flex items-center gap-xs min-w-0 max-w-64 px-xs py-xs rounded-md text-sm
+             text-content-muted hover:text-content hover:bg-base-muted
+             transition-[color,background-color,transform] duration-150 ease-out
+             active:scale-[0.97]"
     >
-      <ArrowLeftIcon size={16} />
-      {roll?.label ?? "Roll"}
+      <ArrowLeftIcon size={16} class="shrink-0" />
+      <span class="truncate">{roll?.label ?? "Roll"}</span>
     </a>
 
     {#if frame}
-      <span class="text-content-subtle">/</span>
-      <span class="text-sm text-content font-medium truncate">{frame.filename}</span>
+      <span class="shrink-0 text-content-subtle">/</span>
+      <span class="min-w-0 text-sm text-content font-medium truncate" title={frame.filename}>
+        {frame.filename}
+      </span>
     {/if}
 
     <div class="ml-auto flex items-center gap-xs">
@@ -1507,13 +1614,13 @@
       <button
         onclick={() => navigateTo(frameIndex - 1)}
         disabled={!hasPrev}
-        title="Previous frame"
+        title="Previous frame (←)"
         aria-label="Previous frame"
         class={ICON_BTN}
       >
         <CaretLeftIcon size={16} />
       </button>
-      {#if frames.length > 0}
+      {#if frames.length > 0 && frameIndex >= 0}
         <span class="text-xs text-content-subtle tabular-nums min-w-12 text-center">
           {frameIndex + 1} / {frames.length}
         </span>
@@ -1521,7 +1628,7 @@
       <button
         onclick={() => navigateTo(frameIndex + 1)}
         disabled={!hasNext}
-        title="Next frame"
+        title="Next frame (→)"
         aria-label="Next frame"
         class={ICON_BTN}
       >
@@ -1544,18 +1651,23 @@
       <div
         class="relative w-full h-full max-w-fit max-h-fit flex items-center justify-center"
       >
+        <!-- Hidden until the first paint (avoids a blank 300×150 ghost with a
+             shadow); dimmed after a short delay while the next frame decodes so
+             fast navigations never flicker, and restored quickly once painted. -->
         <canvas
           bind:this={canvasEl}
           onclick={handleWbPickerClick}
-          class="max-w-full max-h-full object-contain rounded shadow-lg"
-          style="display: block; cursor: {wbPickerActive
-            ? 'crosshair'
-            : cropModeActive
-              ? 'crosshair'
-              : 'default'}; transform: {effectiveTransform.flipH ||
-          effectiveTransform.flipV
+          class="block max-w-full max-h-full object-contain rounded shadow-lg
+                 transition-opacity ease-out
+                 {paintedFrameId === null
+            ? 'opacity-0 duration-200'
+            : framePending
+              ? 'opacity-50 duration-200 delay-200'
+              : 'opacity-100 duration-150'}"
+          style:cursor={wbPickerActive || cropModeActive ? "crosshair" : "default"}
+          style:transform={effectiveTransform.flipH || effectiveTransform.flipV
             ? `scale(${effectiveTransform.flipH ? -1 : 1}, ${effectiveTransform.flipV ? -1 : 1})`
-            : 'none'};"
+            : undefined}
         ></canvas>
 
         <!-- Crop overlay (inside transform wrapper so it rotates with canvas) -->
@@ -1577,6 +1689,10 @@
             canvas={canvasEl}
             candidates={horizonCandidates}
             selectedIndex={selectedHorizonIndex}
+            previewAngle={horizonPreviewAngle}
+            previewScale={horizonPreviewScale}
+            flipH={effectiveTransform.flipH}
+            flipV={effectiveTransform.flipV}
             onSelect={onHorizonSelect}
             onApply={onHorizonApply}
             onCancel={onHorizonCancel}
@@ -1588,67 +1704,61 @@
       {#if wbPickerActive}
         <div
           class="absolute bottom-base left-1/2 -translate-x-1/2 flex items-center gap-sm
-					       bg-base/90 border border-primary text-content text-xs px-sm py-xs rounded shadow-lg pointer-events-none"
+                 pl-sm pr-xs py-xs rounded-full border border-base-subtle bg-surface/90
+                 backdrop-blur-sm text-xs text-content shadow-base pointer-events-none"
+          in:fly={{ y: 8, duration: 200, easing: quintOut }}
+          out:fade={{ duration: 120 }}
         >
+          <EyedropperSampleIcon size={14} weight="duotone" class="shrink-0 text-primary" />
           Click a neutral white or gray area to set color balance
           <button
-            class="pointer-events-auto text-content-muted hover:text-content transition ml-xs"
+            class="pointer-events-auto px-sm py-0.5 rounded-full text-content-muted
+                   hover:text-content hover:bg-base-subtle
+                   transition-[color,background-color,transform] duration-150 ease-out
+                   active:scale-95"
             onclick={cancelWbPicker}
             aria-label="Cancel WB picker">Cancel</button
           >
         </div>
       {/if}
 
-      <!-- Loading overlay -->
-      {#if loading}
+      <!-- Auto-straighten found nothing -->
+      {#if horizonNotice}
         <div
-          class="absolute inset-0 flex items-center justify-center bg-base-muted text-content-muted"
+          role="status"
+          class="absolute bottom-base left-1/2 -translate-x-1/2 flex items-center gap-xs
+                 px-sm py-xs rounded-full border border-base-subtle bg-surface/90
+                 backdrop-blur-sm text-xs text-content shadow-base pointer-events-none"
+          in:fly={{ y: 8, duration: 200, easing: quintOut }}
+          out:fade={{ duration: 120 }}
         >
-          Loading…
+          <WarningIcon size={14} class="shrink-0 text-content-muted" />
+          {horizonNotice}
         </div>
       {/if}
 
-      <!-- GPU error overlay -->
+      <!-- Decode indicator — delayed so cached/fast decodes never show it -->
+      {#if showSpinner}
+        <div class="absolute inset-0 grid place-items-center pointer-events-none">
+          <div
+            role="status"
+            class="flex items-center gap-xs px-sm py-xs rounded-full border border-base-subtle
+                   bg-surface/80 backdrop-blur-sm text-xs text-content-muted shadow-base
+                   animate-[fadein_200ms_ease-out_250ms_both]"
+          >
+            <CircleNotchIcon size={14} class="animate-spin [animation-duration:700ms]" />
+            Loading…
+          </div>
+        </div>
+      {/if}
+
+      <!-- Blocking states: GPU missing > render/decode failure > missing frame -->
       {#if gpuError}
-        <div
-          class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted"
-        >
-          <WarningIcon size={40} weight="thin" class="text-content-subtle" />
-          <h2 class="text-xl font-semibold text-content">WebGPU unavailable</h2>
-          <p class="text-content-muted max-w-96 text-sm">
-            {gpuError}
-          </p>
-          <a href="/roll/{rollId}" class="text-sm text-primary hover:underline"
-            >← Back to roll</a
-          >
-        </div>
-      {/if}
-
-      <!-- Frame not found overlay -->
-      {#if !loading && !gpuError && (!roll || !frame)}
-        <div
-          class="absolute inset-0 flex items-center justify-center bg-base-muted text-content-muted"
-        >
-          Frame not found.
-        </div>
-      {/if}
-
-      <!-- Render error overlay -->
-      {#if renderError}
-        <div
-          class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted"
-        >
-          <WarningIcon size={40} weight="thin" class="text-content-subtle" />
-          <h2 class="text-xl font-semibold text-content">
-            Preview unavailable
-          </h2>
-          <p class="text-content-muted text-sm">
-            {renderError}
-          </p>
-          <a href="/roll/{rollId}" class="text-sm text-primary hover:underline"
-            >← Back to roll</a
-          >
-        </div>
+        {@render errorState("WebGPU unavailable", gpuError)}
+      {:else if renderError}
+        {@render errorState("Preview unavailable", renderError)}
+      {:else if !loading && (!roll || !frame)}
+        {@render errorState("Frame not found", "This frame is no longer part of the roll.")}
       {/if}
     </div>
 
