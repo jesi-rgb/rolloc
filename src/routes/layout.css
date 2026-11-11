@@ -4,26 +4,40 @@
 /* ─────────────────────────────────────────────────────────────────────────────
    ROLLOC DESIGN TOKENS
    Tailwind v4 @theme block — all tokens become utility classes automatically.
-   Colors are semantic aliases backed by CSS custom properties that flip
-   per theme (light / dark). No dark: prefix needed in markup.
+   Colors, shadows and color-scheme are backed by CSS custom properties that
+   flip per theme (light / dark). No dark: prefix needed in markup.
+
+   Palette: lavender-gray neutrals + lavender brand + teal accent.
+   Neutrals carry very low chroma (≤ 0.012) on the brand hue so they never
+   colour-cast the photos shown on top of them. Avoid hues 85–115 for
+   neutrals: at any chroma they read olive next to warm photographs.
 
    Color families:
-     base      — page backgrounds, panels, surfaces
-     primary   — amber; CTAs, selection, brand
-     accent    — sky/teal; edit-mode UI, informational
-     danger    — red; destructive actions, reject flag
+     base      — page backgrounds, panels, wells
+     surface   — floating layers: dialogs, popovers, menus, docks, toasts
+     primary   — lavender; CTAs, selection, brand
+     accent    — teal; edit-state markers, progress, informational
+     danger    — rose-red; destructive actions, reject flag
      success   — green; pick flag, positive states
+     scrim     — translucent backdrop behind modal dialogs
 
    Each color family exposes:
-     bg-{family}          — main surface
-     bg-{family}-muted    — secondary / elevated surface
-     bg-{family}-subtle   — borders, dividers, wells
-     text-{family}-content — readable text on that surface
+     bg-{family}           — main fill
+     bg-{family}-muted     — hover / pressed shade of the fill
+     bg-{family}-subtle    — tinted wash for selected / status backgrounds
+     text-{family}-content — readable text on the main fill
 
-   Neutral text (on base surfaces):
+   Base is the exception: base → base-muted → base-subtle step away from the
+   page background; base-subtle doubles as the border / divider / hover colour.
+
+   Neutral text (on base and surface):
      text-content         — primary text
      text-content-muted   — secondary / supporting
      text-content-subtle  — placeholder, disabled, captions
+
+   Elevation: shadow-sm < shadow (= sm) < shadow-base < shadow-lg < shadow-xl.
+   Motion:    ease-out (enter / respond), ease-in-out (on-screen movement),
+              ease-drawer (sheets / docks). Keep UI transitions ≤ 300ms.
 ───────────────────────────────────────────────────────────────────────────── */
 
 @theme {
@@ -42,24 +56,27 @@
 	--color-base-muted: var(--base-muted);
 	--color-base-subtle: var(--base-subtle);
 
-	/* Content (text on base surfaces) */
+	/* Surface (floating layers) */
+	--color-surface: var(--surface);
+
+	/* Content (text on base / surface) */
 	--color-content: var(--content);
 	--color-content-muted: var(--content-muted);
 	--color-content-subtle: var(--content-subtle);
 
-	/* Primary — amber */
+	/* Primary — lavender */
 	--color-primary: var(--primary);
 	--color-primary-muted: var(--primary-muted);
 	--color-primary-subtle: var(--primary-subtle);
 	--color-primary-content: var(--primary-content);
 
-	/* Accent — sky */
+	/* Accent — teal */
 	--color-accent: var(--accent);
 	--color-accent-muted: var(--accent-muted);
 	--color-accent-subtle: var(--accent-subtle);
 	--color-accent-content: var(--accent-content);
 
-	/* Danger — red */
+	/* Danger — rose-red */
 	--color-danger: var(--danger);
 	--color-danger-muted: var(--danger-muted);
 	--color-danger-subtle: var(--danger-subtle);
@@ -70,6 +87,9 @@
 	--color-success-muted: var(--success-muted);
 	--color-success-subtle: var(--success-subtle);
 	--color-success-content: var(--success-content);
+
+	/* Modal backdrop */
+	--color-scrim: var(--scrim);
 
 	/* ── Spacing scale ───────────────────────────────────────────────────── */
 	/* Used for padding, gap, margin. Complements Tailwind's numeric scale.  */
@@ -87,18 +107,18 @@
 	/* 48px */
 
 	/* ── Typography scale ────────────────────────────────────────────────── */
-	--text-xs: 0.6875rem;
-	/* 11px */
-	--text-sm: 0.8125rem;
-	/* 13px */
-	--text-base: 0.9375rem;
-	/* 15px */
-	--text-l: 1.0625rem;
-	/* 17px */
-	--text-xl: 1.25rem;
-	/* 20px */
-	--text-2xl: 1.5rem;
-	/* 24px */
+	--text-xs: 0.75rem;
+	/* 12px */
+	--text-sm: 0.875rem;
+	/* 14px */
+	--text-base: 1rem;
+	/* 16px */
+	--text-l: 1.125rem;
+	/* 18px */
+	--text-xl: 1.3125rem;
+	/* 21px */
+	--text-2xl: 1.625rem;
+	/* 26px */
 
 	--font-weight-normal: 400;
 	--font-weight-medium: 500;
@@ -111,20 +131,35 @@
 	--tracking-widest: 0.12em;
 
 	/* ── Border radius scale ─────────────────────────────────────────────── */
+	/* Replaces Tailwind's defaults so every `rounded-*` comes from here.    */
+	--radius-*: initial;
+	--radius: 0.375rem;
+	/* 6px  — bare `rounded`: chips, keys, small controls */
 	--radius-sm: 0.25rem;
 	/* 4px  */
-	--radius-base: 0.5rem;
-	/* 8px  */
+	--radius-md: 0.5rem;
+	/* 8px  — buttons, inputs, menus */
 	--radius-lg: 0.75rem;
-	/* 12px */
-	--radius-xl: 1rem;
-	/* 16px */
+	/* 12px — panels, popovers, cards */
+	--radius-xl: 1.25rem;
+	/* 20px — dialogs */
 	--radius-full: 9999px;
 
-	/* ── Shadow / elevation ──────────────────────────────────────────────── */
-	--shadow-sm: 0 1px 2px 0 oklch(0% 0 0 / 0.3);
-	--shadow-base: 0 4px 12px -2px oklch(0% 0 0 / 0.4), 0 1px 3px -1px oklch(0% 0 0 / 0.3);
-	--shadow-lg: 0 16px 40px -4px oklch(0% 0 0 / 0.5), 0 4px 12px -2px oklch(0% 0 0 / 0.35);
+	/* ── Shadow / elevation — values flip per theme ──────────────────────── */
+	/* Replaces Tailwind's defaults so every `shadow-*` is theme-aware.      */
+	--shadow-*: initial;
+	--shadow: var(--elevation-sm);
+	--shadow-sm: var(--elevation-sm);
+	--shadow-base: var(--elevation-base);
+	--shadow-lg: var(--elevation-lg);
+	--shadow-xl: var(--elevation-xl);
+
+	/* ── Motion ──────────────────────────────────────────────────────────── */
+	/* Stronger than Tailwind's stock curves; `ease-out` / `ease-in-out`     */
+	/* utilities pick these up.                                              */
+	--ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+	--ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+	--ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 
 	/* ── Icon size scale ─────────────────────────────────────────────────── */
 	--icon-sm: 1rem;
@@ -138,125 +173,115 @@
 /* ─────────────────────────────────────────────────────────────────────────────
    LIGHT THEME
    Default values; applied when no .dark class is on <html>.
+   Pale lavender-gray background, lavender-ink text, near-white floating layers.
 ───────────────────────────────────────────────────────────────────────────── */
 :root {
-	/* Base surfaces — light end of zinc */
-	--base: oklch(97.5% 0.002 264);
-	/* ≈ zinc-50  */
-	--base-muted: oklch(94% 0.004 264);
-	/* ≈ zinc-100 */
-	--base-subtle: oklch(88% 0.006 264);
-	/* ≈ zinc-200 */
+	color-scheme: light;
 
-	/* Content — dark end of zinc */
-	--content: oklch(20% 0.006 264);
-	/* ≈ zinc-900 */
-	--content-muted: oklch(45% 0.006 264);
-	/* ≈ zinc-500 */
-	--content-subtle: oklch(62% 0.006 264);
-	/* ≈ zinc-400 */
+	/* Base surfaces — pale lavender-gray */
+	--base: oklch(96.5% 0.004 295);
+	--base-muted: oklch(93.5% 0.006 295);
+	--base-subtle: oklch(89.5% 0.010 295);
 
-	/* Primary — amber (same in both themes; it's already vibrant) */
-	--primary: oklch(76% 0.165 75);
-	/* ≈ amber-500 */
-	--primary-muted: oklch(82% 0.155 78);
-	/* ≈ amber-400 */
-	--primary-subtle: oklch(95% 0.06 88);
-	/* ≈ amber-100 */
-	--primary-content: oklch(18% 0.02 75);
-	/* near-black on amber */
+	/* Floating layers — near-white with a lavender cast */
+	--surface: oklch(98.5% 0.007 304);
 
-	/* Accent — sky */
-	--accent: oklch(64% 0.16 232);
-	/* ≈ sky-500  */
-	--accent-muted: oklch(72% 0.15 230);
-	/* ≈ sky-400  */
-	--accent-subtle: oklch(94% 0.05 225);
-	/* ≈ sky-100  */
-	--accent-content: oklch(99% 0 0);
-	/* white      */
+	/* Content — lavender ink */
+	--content: oklch(30% 0.025 296);
+	--content-muted: oklch(50% 0.014 296);
+	--content-subtle: oklch(64% 0.010 296);
 
-	/* Danger — red */
-	--danger: oklch(60% 0.22 25);
-	/* ≈ red-500  */
-	--danger-muted: oklch(68% 0.20 25);
-	/* ≈ red-400  */
-	--danger-subtle: oklch(94% 0.06 25);
-	/* ≈ red-100  */
-	--danger-content: oklch(99% 0 0);
-	/* white      */
+	/* Primary — lavender (white text; hover goes deeper) */
+	--primary: oklch(55.7% 0.156 295);
+	--primary-muted: oklch(50% 0.160 295);
+	--primary-subtle: oklch(93.8% 0.027 297);
+	--primary-content: oklch(100% 0 0);
+
+	/* Accent — teal */
+	--accent: oklch(56% 0.100 210);
+	--accent-muted: oklch(50% 0.100 210);
+	--accent-subtle: oklch(94% 0.030 210);
+	--accent-content: oklch(100% 0 0);
+
+	/* Danger — rose-red */
+	--danger: oklch(59.5% 0.162 17);
+	--danger-muted: oklch(53% 0.170 18);
+	--danger-subtle: oklch(94% 0.035 17);
+	--danger-content: oklch(100% 0 0);
 
 	/* Success — green */
-	--success: oklch(63% 0.20 145);
-	/* ≈ green-500 */
-	--success-muted: oklch(70% 0.18 148);
-	/* ≈ green-400 */
-	--success-subtle: oklch(94% 0.05 145);
-	/* ≈ green-100 */
-	--success-content: oklch(99% 0 0);
-	/* white       */
+	--success: oklch(56% 0.143 147);
+	--success-muted: oklch(50% 0.140 147);
+	--success-subtle: oklch(94% 0.040 147);
+	--success-content: oklch(100% 0 0);
+
+	/* Modal backdrop — lavender-tinted dim, light enough to keep context */
+	--scrim: oklch(30% 0.040 296 / 0.32);
+
+	/* Elevation — soft, lavender-tinted shadows */
+	--elevation-sm: 0 1px 2px 0 oklch(30% 0.04 296 / 0.06);
+	--elevation-base:
+		0 4px 10px -2px oklch(30% 0.04 296 / 0.08), 0 1px 2px -1px oklch(30% 0.04 296 / 0.06);
+	--elevation-lg:
+		0 12px 28px -6px oklch(30% 0.04 296 / 0.12), 0 4px 8px -4px oklch(30% 0.04 296 / 0.06);
+	--elevation-xl:
+		0 24px 48px -12px oklch(30% 0.04 296 / 0.18), 0 8px 16px -8px oklch(30% 0.04 296 / 0.08);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
    DARK THEME
    Applied when <html class="dark"> (default for Rolloc).
+   Lavender-charcoal background, lavender-tinted floating layers; elevation goes
+   lighter so popovers read above the panels they open from.
 ───────────────────────────────────────────────────────────────────────────── */
 :root.dark {
-	/* Base surfaces — dark end of zinc */
-	--base: oklch(11% 0.005 264);
-	/* ≈ zinc-950 */
-	--base-muted: oklch(18% 0.006 264);
-	/* ≈ zinc-900 */
-	--base-subtle: oklch(22% 0.008 264);
-	/* ≈ zinc-800 */
+	color-scheme: dark;
 
-	/* Content — light end of zinc */
-	--content: oklch(93% 0.004 264);
-	/* ≈ zinc-100 */
-	--content-muted: oklch(56% 0.006 264);
-	/* ≈ zinc-400 */
-	--content-subtle: oklch(38% 0.006 264);
-	/* ≈ zinc-600 */
+	/* Base surfaces — lavender-charcoal */
+	--base: oklch(21% 0.006 295);
+	--base-muted: oklch(26.5% 0.008 295);
+	--base-subtle: oklch(34.5% 0.012 295);
 
-	/* Primary — amber (slightly shifted for dark-bg contrast) */
-	--primary: oklch(76% 0.165 75);
-	/* ≈ amber-500 */
-	--primary-muted: oklch(82% 0.155 78);
-	/* ≈ amber-400 */
-	--primary-subtle: oklch(20% 0.06 75);
-	/* ≈ amber-950 */
-	--primary-content: oklch(11% 0.01 75);
-	/* near-black on amber */
+	/* Floating layers — lifted, lavender cast */
+	--surface: oklch(30% 0.020 297);
 
-	/* Accent — sky (lighter in dark for readability) */
-	--accent: oklch(72% 0.15 230);
-	/* ≈ sky-400  */
-	--accent-muted: oklch(79% 0.13 228);
-	/* ≈ sky-300  */
-	--accent-subtle: oklch(16% 0.05 232);
-	/* ≈ sky-950  */
-	--accent-content: oklch(11% 0.01 232);
-	/* near-black */
+	/* Content — near-white */
+	--content: oklch(93% 0.006 295);
+	--content-muted: oklch(72% 0.006 295);
+	--content-subtle: oklch(55% 0.008 295);
 
-	/* Danger — red */
-	--danger: oklch(68% 0.20 25);
-	/* ≈ red-400  */
-	--danger-muted: oklch(75% 0.18 25);
-	/* ≈ red-300  */
-	--danger-subtle: oklch(18% 0.07 25);
-	/* ≈ red-950  */
-	--danger-content: oklch(11% 0.01 25);
-	/* near-black */
+	/* Primary — lavender (lighter for dark-bg contrast; dark text) */
+	--primary: oklch(66.6% 0.128 296.5);
+	--primary-muted: oklch(73% 0.115 297);
+	--primary-subtle: oklch(31% 0.055 297);
+	--primary-content: oklch(21% 0.006 295);
+
+	/* Accent — teal */
+	--accent: oklch(74% 0.100 210);
+	--accent-muted: oklch(80% 0.090 210);
+	--accent-subtle: oklch(29% 0.040 210);
+	--accent-content: oklch(21% 0.006 295);
+
+	/* Danger — rose-red */
+	--danger: oklch(67.9% 0.153 14.5);
+	--danger-muted: oklch(74% 0.135 15);
+	--danger-subtle: oklch(28% 0.060 15);
+	--danger-content: oklch(21% 0.006 295);
 
 	/* Success — green */
-	--success: oklch(70% 0.18 148);
-	/* ≈ green-400 */
-	--success-muted: oklch(76% 0.16 150);
-	/* ≈ green-300 */
-	--success-subtle: oklch(16% 0.05 145);
-	/* ≈ green-950 */
-	--success-content: oklch(11% 0.01 145);
-	/* near-black  */
+	--success: oklch(72% 0.150 147);
+	--success-muted: oklch(78% 0.140 148);
+	--success-subtle: oklch(28% 0.050 147);
+	--success-content: oklch(21% 0.006 295);
+
+	/* Modal backdrop */
+	--scrim: oklch(12% 0.010 296 / 0.6);
+
+	/* Elevation — deep, neutral shadows */
+	--elevation-sm: 0 1px 2px 0 oklch(0% 0 0 / 0.3);
+	--elevation-base: 0 8px 20px -4px oklch(0% 0 0 / 0.4), 0 1px 2px -1px oklch(0% 0 0 / 0.4);
+	--elevation-lg: 0 16px 40px -8px oklch(0% 0 0 / 0.5), 0 4px 12px -4px oklch(0% 0 0 / 0.35);
+	--elevation-xl: 0 24px 56px -12px oklch(0% 0 0 / 0.6), 0 8px 20px -8px oklch(0% 0 0 / 0.4);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +339,7 @@ body {
 }
 
 ::selection {
-	background-color: oklch(76% 0.165 75 / 0.35);
+	background-color: color-mix(in oklab, var(--primary) 30%, transparent);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -331,5 +356,5 @@ body {
 }
 
 @utility animate-fadein {
-	animation: fadein 0.2s ease-out both;
+	animation: fadein 0.2s var(--ease-out) both;
 }

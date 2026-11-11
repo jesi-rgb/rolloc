@@ -363,7 +363,7 @@
 					onclick={toggleExifPane}
 					aria-label="Show details"
 					title="Show details"
-					class="absolute top-base right-base z-10 p-1.5 rounded-md bg-base/80 backdrop-blur
+					class="absolute top-base right-base z-10 p-1.5 rounded-md bg-surface/80 backdrop-blur
 					       border border-base-subtle text-content-muted hover:text-content transition"
 				>
 					<SidebarSimpleIcon size={16} />

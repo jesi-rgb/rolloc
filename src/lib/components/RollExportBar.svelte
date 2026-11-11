@@ -81,8 +81,8 @@
 <div
 	class="fixed top-2xl left-1/2 -translate-x-1/2 z-20
 	       flex flex-col items-stretch gap-xs
-	       rounded-lg border border-base-subtle bg-base/80 backdrop-blur-xl
-	       shadow-lg shadow-black/10
+	       rounded-lg border border-base-subtle bg-surface/80 backdrop-blur-xl
+	       shadow-lg
 	       px-base py-sm"
 >
 	<!-- Single-row toolbar ────────────────────────────────────────────── -->

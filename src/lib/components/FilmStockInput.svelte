@@ -93,7 +93,7 @@
 	{#if open && suggestions.length > 0}
 		<ul
 			role="listbox"
-			class="absolute z-50 mt-1 w-full rounded-lg border border-base-subtle bg-base-muted
+			class="absolute z-50 mt-1 w-full rounded-lg border border-base-subtle bg-surface
 			       shadow-lg overflow-hidden"
 		>
 			{#each suggestions as stock, i (stock.brand + stock.model)}

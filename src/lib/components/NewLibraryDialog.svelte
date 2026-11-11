@@ -60,13 +60,13 @@
 
 <!-- Backdrop -->
 <div
-	class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+	class="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
 	role="dialog"
 	aria-modal="true"
 	aria-labelledby="dialog-title"
 >
-	<div class="w-full max-w-md rounded-xl bg-base-muted border border-base-subtle
-	            shadow-lg p-l space-y-base">
+	<div class="w-full max-w-md rounded-xl bg-surface border border-base-subtle
+	            shadow-xl p-l space-y-base">
 		<div class="flex items-center justify-between">
 			<h2 id="dialog-title" class="text-l font-semibold text-content">New Library</h2>
 			<button

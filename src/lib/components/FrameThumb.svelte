@@ -163,14 +163,15 @@
 			</div>
 		{/if}
 
-		<!-- Focus / selection ring, drawn on top of the image -->
+		<!-- Border / focus / selection ring, drawn on top of the image.  The
+		     resting border is a faint `content` tint so it reads in both themes. -->
 		<div
 			class="absolute inset-0 pointer-events-none transition
 			       {selecting && picked
 				? 'ring-2 ring-inset ring-accent'
 				: selected
 					? 'ring-2 ring-inset ring-primary'
-					: ''}"
+					: 'ring-1 ring-inset ring-content/10'}"
 		></div>
 	</button>
 </div>

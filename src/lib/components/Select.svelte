@@ -114,7 +114,7 @@
 			role="listbox"
 			aria-label={ariaLabel}
 			class="absolute z-30 left-0 right-0 mt-xs py-xs min-w-max rounded-md
-			       border border-base-subtle bg-base shadow-base animate-fadein"
+			       border border-base-subtle bg-surface shadow-base animate-fadein"
 		>
 			{#each options as opt, i (opt.value)}
 				<li

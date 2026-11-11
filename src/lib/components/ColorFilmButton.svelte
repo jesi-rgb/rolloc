@@ -16,7 +16,7 @@
 	{onclick}
 	class="flex-1 h-12 text-sm font-bold rounded overflow-hidden transition-all
 		{selected
-		? 'ring-2 ring-content ring-offset-2 ring-offset-base'
+		? 'outline-2 outline-offset-2 outline-content'
 		: 'opacity-60 hover:opacity-100'}"
 	style="background: linear-gradient(to bottom, #FEC431 33.33%, #DE5BD2 33.33%);"
 >

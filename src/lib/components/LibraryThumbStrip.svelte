@@ -1,8 +1,7 @@
 <script lang="ts">
 	/**
-	 * Compact strip of the first ~5 thumbnails for a library card.
-	 * Mirrors the structure of RollThumbStrip, but sources images
-	 * from the library's image records instead of roll frames.
+	 * Compact strip of the first ~5 thumbnails for a library card,
+	 * sourced from the library's image records.
 	 */
 	import { onDestroy, onMount } from "svelte";
 	import { getImages } from "$lib/db/libraries";
@@ -85,7 +84,7 @@
 	{#if entries.length === 0}
 		<!-- No images yet: show the accent gradient bar -->
 		<div
-			class="w-full h-full bg-gradient-to-r from-primary to-orange-600 opacity-70"
+			class="w-full h-full bg-gradient-to-r from-primary to-accent opacity-70"
 		></div>
 	{:else}
 		{#each entries as entry (entry.image.id)}
