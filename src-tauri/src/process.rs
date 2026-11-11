@@ -29,6 +29,18 @@ const CMY_MAX_DENSITY: f32 = 0.15;
 const DENSITY_MULTIPLIER: f32 = 0.15;
 const GRADE_MULTIPLIER: f32 = 1.75;
 const D_MAX: f32 = 4.0;
+/// Neutral `density` / `grade` values — the fixed film/paper base curve. The
+/// Brightness and Contrast sliders live in those two fields but drive the
+/// Lightroom-style tone stage below instead of the H&D pivot/slope.
+/// Mirrors NEUTRAL_DENSITY / NEUTRAL_GRADE in src/lib/image/pipeline.ts.
+const NEUTRAL_DENSITY: f32 = 1.0;
+const NEUTRAL_GRADE: f32 = 2.5;
+/// Strength cap for the contrast S-curve at ±1.
+const CONTRAST_MAX: f32 = 0.85;
+/// Gamma travel of the shadows/highlights operators at ±1.
+const SH_GAMMA: f32 = 0.6;
+/// Linear-light level where the exposure shoulder starts.
+const EXP_KNEE: f32 = 0.75;
 
 /// Default analysis buffer — crops this fraction of each edge before
 /// computing log percentiles (matches NegPy's analysis_buffer = 0.07).
@@ -819,9 +831,9 @@ fn fast_sigmoid(x: f32) -> f32 {
 /// Process one channel through the full H&D pipeline.
 /// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
 ///
-/// Core H&D math matches negpy's _apply_photometric_fused_kernel.
-/// shadows/highlights are Rolloc extensions: global density level controls
-/// that use the toe/shoulder sigmoid masks to target shadow/highlight regions.
+/// Core H&D math matches negpy's _apply_photometric_fused_kernel. This is the
+/// fixed film/paper base; exposure, contrast, shadows and highlights are applied
+/// afterwards by `apply_tone` in a display-referred domain.
 #[inline(always)]
 fn hd_channel(
     pixel: f32,
@@ -834,8 +846,6 @@ fn hd_channel(
     toe_width: f32,
     shoulder: f32,
     sh_width: f32,
-    shadows: f32,
-    highlights: f32,
     d_max: f32,
 ) -> f32 {
     let eps = 1e-6_f32;
@@ -862,16 +872,10 @@ fn hd_channel(
     let shadow_color_offset = shadow_cmy * toe_mask;
     let highlight_color_offset = hi_cmy * shoulder_mask;
 
-    // 5b. Shadows/Highlights global density level controls (Rolloc extension).
-    //     Uses the same sigmoid masks as toe/shoulder to target the same regions.
-    let shadow_level_offset = shadows * toe_mask * 0.1;
-    let highlight_level_offset = highlights * shoulder_mask * 0.1;
-
-    // 6. Adjusted diff (negpy sign convention + Rolloc shadows/highlights extension)
-    let diff_adj = diff + shadow_color_offset + highlight_color_offset - toe_density_offset
-        + shoulder_density_offset
-        - shadow_level_offset
-        + highlight_level_offset;
+    // 6. Adjusted diff (negpy sign convention)
+    let diff_adj =
+        diff + shadow_color_offset + highlight_color_offset - toe_density_offset
+            + shoulder_density_offset;
 
     // 7. Contrast damping (toe/shoulder reduce effective contrast)
     let damp_toe = toe * toe_mask * 0.5;
@@ -884,6 +888,112 @@ fn hd_channel(
     // 9. Density → transmittance → perceptual gamma (from tone preset)
     let transmittance = 10.0_f32.powf(-density);
     transmittance.max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0)
+}
+
+// ─── Lightroom-style tone stage ───────────────────────────────────────────────
+//
+// Direct port of `apply_tone` in hd_curve.wgsl — keep the two in lockstep or
+// preview and export will drift. Runs after the H&D paper curve and the tone
+// preset, on display-referred RGB in [0,1]. Every operator is monotone and
+// endpoint-preserving, so nothing clips or posterises.
+
+/// Smooth Hermite interpolation between two edges (WGSL `smoothstep`).
+#[inline(always)]
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Inverse of `smoothstep(0, 1, x)` — flattens the S back out for negative contrast.
+#[inline(always)]
+fn inv_smoothstep(x: f32) -> f32 {
+    0.5 - ((1.0 - 2.0 * x).clamp(-1.0, 1.0).asin() / 3.0).sin()
+}
+
+/// Soft shoulder in linear light: identity below the knee, asymptotic to 1 above.
+#[inline(always)]
+fn soft_shoulder(x: f32) -> f32 {
+    if x <= EXP_KNEE {
+        x
+    } else {
+        EXP_KNEE + (1.0 - EXP_KNEE) * (1.0 - (-(x - EXP_KNEE) / (1.0 - EXP_KNEE)).exp())
+    }
+}
+
+/// Contrast S-curve on one channel. `amt` ∈ [-1, +1].
+#[inline(always)]
+fn contrast_channel(x: f32, amt: f32) -> f32 {
+    let k = amt.clamp(-1.0, 1.0) * CONTRAST_MAX;
+    let target = if k > 0.0 {
+        x * x * (3.0 - 2.0 * x)
+    } else {
+        inv_smoothstep(x)
+    };
+    (x + (target - x) * k.abs()).clamp(0.0, 1.0)
+}
+
+/// Apply exposure, contrast, shadows and highlights to one display-referred pixel.
+fn apply_tone(rgb: [f32; 3], p: &HDParams) -> [f32; 3] {
+    let mut out = [
+        rgb[0].clamp(0.0, 1.0),
+        rgb[1].clamp(0.0, 1.0),
+        rgb[2].clamp(0.0, 1.0),
+    ];
+
+    // ── Exposure: a true stop-based gain in linear light ─────────────────────
+    if p.exposure != 0.0 {
+        let gain = 2.0_f32.powf(p.exposure);
+        let inv_gamma = 1.0 / p.gamma;
+        for c in out.iter_mut() {
+            let lin = soft_shoulder(c.powf(p.gamma) * gain);
+            *c = lin.clamp(0.0, 1.0).powf(inv_gamma);
+        }
+    }
+
+    // ── Contrast: pivots on mid-grey, leaves black and white untouched ──────
+    if p.contrast != 0.0 {
+        for c in out.iter_mut() {
+            *c = contrast_channel(*c, p.contrast);
+        }
+    }
+
+    // ── Shadows / Highlights: broad luminance-masked gamma moves ────────────
+    // Both act on luminance and rescale RGB by the ratio, so hue and saturation
+    // survive. The masks are deliberately wide (reaching into the midtones) —
+    // that is what makes the sliders feel usable rather than band-limited.
+    if p.shadows != 0.0 || p.highlights != 0.0 {
+        let lum = LUMA_R * out[0] + LUMA_G * out[1] + LUMA_B * out[2];
+        let mut l = lum;
+
+        if p.shadows != 0.0 {
+            let s = p.shadows.clamp(-1.0, 1.0);
+            let lifted = l.powf((1.0 - SH_GAMMA * s).max(0.05));
+            let mask = 1.0 - smoothstep(0.0, 0.7, l);
+            l += (lifted - l) * mask;
+        }
+
+        if p.highlights != 0.0 {
+            let h = p.highlights.clamp(-1.0, 1.0);
+            let rolled = 1.0 - (1.0 - l).powf((1.0 + SH_GAMMA * h).max(0.05));
+            let mask = smoothstep(0.3, 1.0, l);
+            l += (rolled - l) * mask;
+        }
+
+        // Ratio-preserving rescale; falls back to an additive shift near black.
+        if lum > 1e-4 {
+            let k = l / lum;
+            for c in out.iter_mut() {
+                *c = (*c * k).clamp(0.0, 1.0);
+            }
+        } else {
+            let d = l - lum;
+            for c in out.iter_mut() {
+                *c = (*c + d).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    out
 }
 
 /// Derived H&D parameters pre-computed from InversionParams.
@@ -903,6 +1013,8 @@ struct HDParams {
     toe_width: f32,
     shoulder: f32,
     shoulder_width: f32,
+    exposure: f32,
+    contrast: f32,
     shadows: f32,
     highlights: f32,
     // Tone preset
@@ -914,11 +1026,13 @@ struct HDParams {
 
 impl HDParams {
     fn from_inversion(inv: &InversionParams, auto_exposure_adj: f32) -> Self {
-        let effective_density = inv.density - auto_exposure_adj;
+        // The base curve is fixed at the neutral density/grade; the user's
+        // Brightness/Contrast values are applied post-curve by `apply_tone`.
+        let effective_density = NEUTRAL_DENSITY - auto_exposure_adj;
         let preset = resolve_tone_preset(&inv.tone_preset);
         Self {
             pivot: 1.0 - (0.01 + effective_density * DENSITY_MULTIPLIER),
-            slope: 1.0 + inv.grade * GRADE_MULTIPLIER,
+            slope: 1.0 + NEUTRAL_GRADE * GRADE_MULTIPLIER,
             cmy_r: inv.cmy_cyan * CMY_MAX_DENSITY,
             cmy_g: inv.cmy_magenta * CMY_MAX_DENSITY,
             cmy_b: inv.cmy_yellow * CMY_MAX_DENSITY,
@@ -932,8 +1046,10 @@ impl HDParams {
             toe_width: inv.toe_width,
             shoulder: inv.shoulder,
             shoulder_width: inv.shoulder_width,
-            shadows: inv.shadows,
-            highlights: inv.highlights,
+            exposure: NEUTRAL_DENSITY - inv.density,
+            contrast: ((inv.grade - NEUTRAL_GRADE) / NEUTRAL_GRADE).clamp(-1.0, 1.0),
+            shadows: inv.shadows.clamp(-1.0, 1.0),
+            highlights: inv.highlights.clamp(-1.0, 1.0),
             gamma: preset.gamma,
             black_point: preset.black_point,
             white_point: preset.white_point,
@@ -957,8 +1073,6 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         p.toe_width,
         p.shoulder,
         p.shoulder_width,
-        p.shadows,
-        p.highlights,
         D_MAX,
     );
     let hg = hd_channel(
@@ -972,8 +1086,6 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         p.toe_width,
         p.shoulder,
         p.shoulder_width,
-        p.shadows,
-        p.highlights,
         D_MAX,
     );
     let hb = hd_channel(
@@ -987,8 +1099,6 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         p.toe_width,
         p.shoulder,
         p.shoulder_width,
-        p.shadows,
-        p.highlights,
         D_MAX,
     );
 
@@ -1008,13 +1118,15 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         ((v - p.black_point) / (p.white_point - p.black_point)).clamp(0.0, 1.0)
     };
 
-    // B&W mode: convert to luminance (Rec. 709, same as GPU shader)
+    let toned = apply_tone([apply_preset(hr), apply_preset(hg), apply_preset(hb)], p);
+
+    // B&W mode: collapse to luminance (Rec. 709) last, exactly as the GPU
+    // shader does — preset and tone stage run per channel first.
     if is_bw {
-        let lum = LUMA_R * hr + LUMA_G * hg + LUMA_B * hb;
-        let lum = apply_preset(lum);
+        let lum = LUMA_R * toned[0] + LUMA_G * toned[1] + LUMA_B * toned[2];
         [lum, lum, lum]
     } else {
-        [apply_preset(hr), apply_preset(hg), apply_preset(hb)]
+        toned
     }
 }
 

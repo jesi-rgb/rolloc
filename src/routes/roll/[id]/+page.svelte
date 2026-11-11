@@ -13,11 +13,9 @@
 	import { page } from "$app/state";
 	import { getRoll, getRollPath, putFrame } from "$lib/db/rolls";
 	import { getFrames } from "$lib/db/idb";
-	import type { Roll, Frame, FrameFlag, FilmType } from "$lib/types";
+	import type { Roll, Frame, FrameFlag } from "$lib/types";
 	import { DEFAULT_INVERSION_PARAMS, frameHasEdits } from "$lib/types";
-	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import FrameThumb from "$lib/components/FrameThumb.svelte";
-	import FrameMetaPanel from "$lib/components/FrameMetaPanel.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import RollExportBar from "$lib/components/RollExportBar.svelte";
 	import { type ExportScale } from "$lib/export/batch";
@@ -41,6 +39,7 @@
 		isFrameWarm,
 	} from "$lib/image/decode-warm";
 	import { previewMaxPx } from "$lib/image/pipeline";
+	import { ArrowLeftIcon, ExportIcon } from "phosphor-svelte";
 
 	// $page.params.id is typed string | undefined in SvelteKit; guard below
 	const rollId = $derived(page.params.id ?? "");
@@ -373,38 +372,41 @@
 <div class="h-screen bg-base text-content flex flex-col">
 	<!-- Top bar -->
 	<header
-		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
+		class="flex items-center gap-sm px-l h-12 border-b border-base-subtle shrink-0"
 	>
 		<a
 			href="/"
-			class="text-content-muted hover:text-content transition text-sm"
-			>← Library</a
+			aria-label="Back to library"
+			title="Back to library"
+			class="-ml-xs p-xs rounded-md text-content-muted hover:text-content hover:bg-base-muted transition"
 		>
+			<ArrowLeftIcon size={16} />
+		</a>
 		{#if roll}
-			<span class="font-semibold text-content">{roll.label}</span>
-			{#if roll.filmStock}
-				<span class="text-primary-muted/80 text-sm"
-					>{roll.filmStock}</span
-				>
-			{/if}
-			{#if roll.camera}
-				<span class="text-content-muted text-sm">{roll.camera}</span>
-			{/if}
-			<span class="text-xs text-content-subtle">
-				{frames.length} frame{frames.length !== 1 ? "s" : ""}
+			<span class="font-semibold text-content truncate">{roll.label}</span>
+			<span class="flex items-center gap-xs text-xs text-content-subtle whitespace-nowrap">
+				{#if roll.filmStock}
+					<span class="text-primary-muted/80">{roll.filmStock}</span>
+					<span>·</span>
+				{/if}
+				{#if roll.camera}
+					<span class="text-content-muted">{roll.camera}</span>
+					<span>·</span>
+				{/if}
+				<span class="tabular-nums">
+					{frames.length} frame{frames.length !== 1 ? "s" : ""}
+				</span>
 			</span>
-
-			<div class="flex-1"></div>
 
 			{#if !selecting && frames.length > 0}
 				<button
 					type="button"
 					onclick={enterSelectionMode}
-					class="px-sm py-xs text-xs rounded border border-base-subtle
-					       text-content-muted hover:border-content-muted hover:text-content
-					       transition"
+					class="ml-auto flex items-center gap-xs px-sm py-xs text-xs rounded-md
+					       text-content-muted hover:text-content hover:bg-base-muted transition"
 				>
-					Export…
+					<ExportIcon size={14} />
+					Export
 				</button>
 			{/if}
 		{/if}
@@ -447,12 +449,12 @@
 	{:else}
 		<!-- Main layout: resizable filmstrip grid + metadata panel -->
 
-		<div class="relative flex-1 min-h-0 py-xl">
+		<div class="relative flex-1 min-h-0">
 			<!-- Loading overlay — blocks interaction until all thumbs are ready -->
 			{#if !thumbsReady}
 				<div
 					class="absolute inset-0 z-10 flex flex-col items-center justify-center
-					gap-3 bg-base/80 backdrop-blur-sm"
+					gap-sm bg-base/80 backdrop-blur-sm"
 				>
 					<p class="text-sm text-content-muted">
 						Generating thumbnails…
@@ -483,7 +485,7 @@
 
 			<!-- Grid — pointer events blocked by inert while loading -->
 			<div inert={!thumbsReady || undefined} class="overflow-y-auto h-full">
-				<div class="px-l grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-1.5">
+				<div class="p-l grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-px">
 					{#each frames as frame, i (frame.id)}
 						<FrameThumb
 							{frame}

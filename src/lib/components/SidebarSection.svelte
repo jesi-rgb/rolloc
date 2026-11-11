@@ -2,17 +2,12 @@
 	import type { Snippet } from "svelte";
 
 	interface Props {
-		/** Whether this section uses the alternate (slightly darker) background. */
-		alternate?: boolean;
 		children: Snippet;
 	}
 
-	let { alternate = false, children }: Props = $props();
+	let { children }: Props = $props();
 </script>
 
-<section
-	class="px-l py-base {alternate ? 'border-y border-base-subtle' : ''}"
-	style={alternate ? 'background-color: var(--sidebar-section-alt);' : ''}
->
+<section class="px-l py-base border-b border-base-subtle last:border-b-0">
 	{@render children()}
 </section>

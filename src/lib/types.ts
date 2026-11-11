@@ -178,9 +178,17 @@ export interface InversionParams {
 	 */
 	autoExposure: boolean;
 
-	/** Pivot point (0–1) — controls "exposure" / density shift. Default 0.5. */
+	/**
+	 * Brightness, stored inverted: exposure in EV stops = 1.0 − density.
+	 * Drives the post-curve tone stage (linear-light gain + soft highlight
+	 * shoulder), not the H&D pivot. Default 1.0 = neutral.
+	 */
 	density: number;
-	/** Sigmoid contrast slope — equivalent to paper "grade". Default 2.0. */
+	/**
+	 * Contrast, stored in the legacy grade domain: amount = (grade − 2.5) / 2.5,
+	 * clamped to [−1, +1]. Drives an S-curve pivoted on mid-grey rather than the
+	 * H&D sigmoid slope. Default 2.5 = neutral.
+	 */
 	grade: number;
 
 	// ── Global CMY color timing (log-space offsets) ──────────────────────────
@@ -201,10 +209,16 @@ export interface InversionParams {
 	highlightMagenta: number;
 	highlightYellow: number;
 
-	// ── Tonal density adjustments ─────────────────────────────────────────────
-	/** Overall shadow density lift/pull. */
+	// ── Tonal adjustments (post-curve tone stage) ────────────────────────────
+	/**
+	 * Shadow lift/pull in [−1, +1]. Gamma move under a wide luminance mask
+	 * (Lightroom-like reach into the midtones). Positive = brighter shadows.
+	 */
 	shadows: number;
-	/** Overall highlight density lift/pull. */
+	/**
+	 * Highlight lift/recovery in [−1, +1]. Gamma move under a wide luminance
+	 * mask. Positive = brighter highlights, negative = recovery.
+	 */
 	highlights: number;
 
 	// ── Toe (shadow rolloff) ──────────────────────────────────────────────────

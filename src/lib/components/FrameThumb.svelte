@@ -6,7 +6,7 @@
 	 * scrolls near the viewport.  Thumb generation is routed through the
 	 * shared thumb-queue so the worker pool and LRU cache are reused.
 	 */
-	import { CheckIcon } from "phosphor-svelte";
+	import { CheckIcon, WarningIcon } from "phosphor-svelte";
 	import { requestThumb } from "$lib/image/thumb-queue";
 	import { join } from "@tauri-apps/api/path";
 	import type { Frame, FilmType } from "$lib/types";
@@ -103,97 +103,74 @@
 	};
 </script>
 
-<button
-	bind:this={el}
-	onclick={() => onSelect?.(frame)}
-	ondblclick={() => onDblClick?.(frame)}
-	class="relative flex flex-col overflow-hidden transition-all w-full
-	       focus:outline-none focus:ring-2 focus:ring-primary
-	focus:ring-offset-1 focus:ring-offset-base
-	       {selected ? 'ring ring-primary shadow-lg shadow-primary/20' : ''}
-	       {selecting && picked ? 'ring-2 ring-accent' : ''}"
-	aria-pressed={selecting ? picked : selected}
->
-	<!-- Film strip wrapper — subtle film rebate with sprocket holes -->
-	<div class="bg-primary-subtle w-full flex flex-col py-xs">
-		<!-- Top sprocket row -->
-		<div class="flex justify-evenly items-center h-3 px-xs shrink-0">
-			{#each { length: 8 } as _, i (i)}
-				<span class="block size-2 aspect-square bg-base"></span>
-			{/each}
-		</div>
+<!-- The div owns the 3:2 size: WebKit does not stretch a button grid item reliably. -->
+<div class="relative w-full aspect-[3/2]">
+	<button
+		bind:this={el}
+		onclick={() => onSelect?.(frame)}
+		ondblclick={() => onDblClick?.(frame)}
+		class="absolute inset-0 size-full overflow-hidden bg-base-muted focus:outline-none"
+		aria-pressed={selecting ? picked : selected}
+	>
+		{#if status === "ready" && url}
+			<img
+				src={url}
+				alt="Frame {frame.index}"
+				class="absolute inset-0 w-full h-full object-cover"
+			/>
+		{:else if status === "loading"}
+			<div class="absolute inset-0 bg-base-subtle animate-pulse"></div>
+		{:else if status === "error"}
+			<div
+				class="absolute inset-0 flex items-center justify-center text-content-subtle"
+				title="Could not load thumbnail"
+			>
+				<WarningIcon size={16} />
+			</div>
+		{/if}
 
-		<!-- Thumbnail area — 3:2 aspect ratio -->
+		<!-- Flag badges -->
+		{#if frame.flags.length > 0}
+			<div class="absolute top-1.5 left-1.5 flex gap-1">
+				{#each frame.flags as flag (flag)}
+					<span
+						class="size-2 rounded-full ring-2 ring-black/40 {flagColour[flag] ??
+							'bg-content-subtle'}"
+					></span>
+				{/each}
+			</div>
+		{/if}
+
+		<!-- Full-resolution-ready marker (the checkbox owns this corner in selection mode) -->
+		{#if fullRes && !selecting}
+			<div
+				class="absolute bottom-1.5 right-1.5 size-1.5 rounded-full bg-accent ring-2 ring-black/40"
+				title="Full resolution ready"
+			></div>
+		{/if}
+
+		<!-- Selection checkbox overlay (selection mode only) -->
+		{#if selecting}
+			<div
+				class="absolute top-1.5 right-1.5 size-5 rounded border-2
+				       flex items-center justify-center transition
+				       {picked
+					? 'bg-accent border-accent text-base'
+					: 'bg-black/40 border-white/70 text-transparent'}"
+				aria-hidden="true"
+			>
+				<CheckIcon size={12} weight="bold" />
+			</div>
+		{/if}
+
+		<!-- Focus / selection ring, drawn on top of the image -->
 		<div
-			class="relative aspect-video w-full bg-primary-subtle mx-auto rounded-md"
-		>
-			{#if status === "ready" && url}
-				<img
-					src={url}
-					alt="Frame {frame.index}"
-					class="absolute inset-0 p-2 w-full h-full object-cover rounded-md"
-				/>
-			{:else if status === "loading"}
-				<div
-					class="absolute inset-0 bg-base-subtle animate-pulse"
-				></div>
-			{:else if status === "error"}
-				<div
-					class="absolute inset-0 flex items-center justify-center text-content-subtle text-xs"
-				>
-					error
-				</div>
-			{:else}
-				<div class="absolute inset-0 bg-base-muted"></div>
-			{/if}
-
-			<!-- Flag badges -->
-			{#if frame.flags.length > 0}
-				<div class="absolute top-1.5 left-1.5 flex gap-1">
-					{#each frame.flags as flag (flag)}
-						<span
-							class="inline-block size-sm rounded-full {flagColour[
-								flag
-							] ?? 'bg-content-subtle'}"
-						></span>
-						<span
-							class="blur-xl inline-block size-xl rounded-full absolute
-							-top-base -left-base {flagColour[flag] ?? 'bg-content-subtle'}"
-						></span>
-					{/each}
-				</div>
-			{/if}
-
-			<!-- Full-resolution-ready marker.  Sits opposite the flag badges so
-			     it never collides with them, and is hidden in selection mode
-			     where the checkbox owns that corner. -->
-			{#if fullRes && !selecting}
-				<div
-					class="absolute bottom-3 right-3 size-1.5 rounded-full bg-accent"
-					title="Full resolution ready"
-				></div>
-			{/if}
-
-			<!-- Selection checkbox overlay (selection mode only) -->
-			{#if selecting}
-				<div
-					class="absolute top-1.5 right-1.5 size-5 rounded border-2
-					       flex items-center justify-center transition
-					       {picked
-						? 'bg-accent border-accent text-base'
-						: 'bg-base/80 border-content-muted text-transparent'}"
-					aria-hidden="true"
-				>
-					<CheckIcon size={12} weight="bold" />
-				</div>
-			{/if}
-		</div>
-
-		<!-- Bottom sprocket row -->
-		<div class="flex justify-evenly items-center h-3 px-1 shrink-0">
-			{#each { length: 8 } as _, i (i)}
-				<span class="block size-2 aspect-square bg-base"></span>
-			{/each}
-		</div>
-	</div>
-</button>
+			class="absolute inset-0 pointer-events-none transition
+			       {selecting && picked
+				? 'ring-2 ring-inset ring-accent'
+				: selected
+					? 'ring-2 ring-inset ring-primary'
+					: ''}"
+		></div>
+	</button>
+</div>

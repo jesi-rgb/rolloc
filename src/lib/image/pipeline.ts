@@ -56,6 +56,15 @@ const DENSITY_MULTIPLIER = 0.15;
 const GRADE_MULTIPLIER = 1.75;
 /** Maximum print density (D_max) — deepest black photographic paper can produce. */
 const D_MAX = 4.0;
+/**
+ * Neutral `density` / `grade` values. These now fix the film/paper base curve:
+ * the Brightness and Contrast sliders are stored in these two fields but drive
+ * the Lightroom-style tone stage (exposure in EV, contrast S-curve) instead of
+ * sliding the H&D pivot and slope, which produced muddy shadows and erratic
+ * contrast. Auto-exposure still nudges the pivot.
+ */
+const NEUTRAL_DENSITY = 1.0;
+const NEUTRAL_GRADE = 2.5;
 /** CLAHE tile grid dimensions (8×8 matches negpy's default grid_dim). */
 const CLAHE_TILES_X = 8;
 const CLAHE_TILES_Y = 8;
@@ -1130,13 +1139,13 @@ function makeNormalizationUniforms(
  *   filmType         : u32        @ 88   (0 = C41, 1 = BW, 2 = E6)
  *   shoulder         : f32        @ 92
  *   shoulderWidth    : f32        @ 96
- *   _unused1         : f32        @ 100  (shoulderHardness slot, unused)
+ *   exposure         : f32        @ 100  (Lightroom-style exposure, EV stops)
  *   shadows          : f32        @ 104
  *   highlights       : f32        @ 108
  *   dMax             : f32        @ 112
  *   vibrance         : f32        @ 116
  *   saturation       : f32        @ 120
- *   _pad0            : f32        @ 124
+ *   contrast         : f32        @ 124  (Lightroom-style contrast, [-1, +1])
  *
  * Note: gamma is applied here as pow(transmittance, 1/2.2) matching negpy.
  * The tonecurve pass skips sRGB encode on the negpy path (skipSrgb flag).
@@ -1154,10 +1163,22 @@ function makeHDCurveUniforms(
 	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
 	// At defaults (density=1.0, grade=2.5): pivot=0.84, slope=5.375.
 	//
+	// The base curve is fixed at the neutral density/grade; the user's Brightness
+	// and Contrast values ride in `density`/`grade` but are applied post-curve by
+	// the tone stage in hd_curve.wgsl.
+	//
 	// Auto-exposure: subtract from density to brighten (positive autoExposureAdj = dark image = needs less density).
-	const effectiveDensity = inv.density - autoExposureAdj;
+	const effectiveDensity = NEUTRAL_DENSITY - autoExposureAdj;
 	const pivot = 1.0 - (0.01 + effectiveDensity * DENSITY_MULTIPLIER);
-	const slope = 1.0 + inv.grade * GRADE_MULTIPLIER;
+	const slope = 1.0 + NEUTRAL_GRADE * GRADE_MULTIPLIER;
+
+	// Tone-stage params. Brightness is stored inverted (higher density = darker),
+	// so exposure in EV stops is the offset from neutral. Contrast maps the
+	// 0–5 grade domain onto [-1, +1] with the neutral grade at 0.
+	const exposureEV = NEUTRAL_DENSITY - inv.density;
+	const contrast = Math.max(-1, Math.min(1, (inv.grade - NEUTRAL_GRADE) / NEUTRAL_GRADE));
+	const shadows = Math.max(-1, Math.min(1, inv.shadows));
+	const highlights = Math.max(-1, Math.min(1, inv.highlights));
 
 	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
 	// NegPy convention: Cyan shifts Red channel, Magenta shifts Green, Yellow shifts Blue.
@@ -1218,13 +1239,13 @@ function makeHDCurveUniforms(
 	uintView[22] = filmTypeToNumber(inv.filmType);  // filmType @ 88 (u32)
 	floatView[23] = inv.shoulder;     // shoulder @ 92
 	floatView[24] = inv.shoulderWidth; // shoulderWidth @ 96
-	floatView[25] = 0.0;              // _unused1 @ 100
-	floatView[26] = inv.shadows;      // shadows @ 104
-	floatView[27] = inv.highlights;   // highlights @ 108
+	floatView[25] = exposureEV;       // exposure @ 100
+	floatView[26] = shadows;          // shadows @ 104
+	floatView[27] = highlights;       // highlights @ 108
 	floatView[28] = D_MAX;            // dMax @ 112
 	floatView[29] = inv.vibrance;     // vibrance @ 116
 	floatView[30] = inv.saturation;   // saturation @ 120
-	floatView[31] = 0.0;              // _pad0 @ 124
+	floatView[31] = contrast;         // contrast @ 124
 
 	// Tone preset params (vec4 @ 128)
 	const preset = TONE_PRESETS[inv.tonePreset];

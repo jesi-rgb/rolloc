@@ -60,14 +60,12 @@
     CachedLogPercentiles,
     CropAspect,
   } from "$lib/types";
-  import WhiteBalanceControls from "$lib/components/WhiteBalanceControls.svelte";
   import CurvesEditor from "$lib/components/CurvesEditor.svelte";
   import InversionControls from "$lib/components/InversionControls.svelte";
   import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
   import CropOverlay from "$lib/components/CropOverlay.svelte";
   import HorizonOverlay from "$lib/components/HorizonOverlay.svelte";
   import TransformControls from "$lib/components/TransformControls.svelte";
-  import ToggleButton from "$lib/components/ToggleButton.svelte";
   import ExportControls from "$lib/components/ExportControls.svelte";
   import SidebarSection from "$lib/components/SidebarSection.svelte";
   import {
@@ -78,10 +76,18 @@
   import {
     ArrowFatUpIcon,
     CommandIcon,
-    EyedropperSampleIcon,
-    ArrowArcLeftIcon,
-    ArrowArcRightIcon,
+    ArrowUUpLeftIcon,
+    ArrowUUpRightIcon,
+    ArrowLeftIcon,
+    CaretLeftIcon,
+    CaretRightIcon,
+    WarningIcon,
   } from "phosphor-svelte";
+
+  /** Shared style for the compact header icon buttons. */
+  const ICON_BTN =
+    "p-1.5 rounded-md text-content-muted hover:text-content hover:bg-base-muted transition " +
+    "disabled:opacity-30 disabled:pointer-events-none";
 
   // ─── Undo / redo history ──────────────────────────────────────────────────
 
@@ -1343,16 +1349,16 @@
             nudgeInversion("cmyYellow", -0.01, -1, 1, e.shiftKey);
             break;
           case "r":
-            nudgeInversion("grade", +0.1, 0, 10, e.shiftKey);
+            nudgeInversion("grade", +0.125, 0, 5, e.shiftKey);
             break;
           case "f":
-            nudgeInversion("grade", -0.1, 0, 10, e.shiftKey);
+            nudgeInversion("grade", -0.125, 0, 5, e.shiftKey);
             break;
           case "t":
-            nudgeInversion("density", +0.01, 0, 10, e.shiftKey);
+            nudgeInversion("density", +0.05, -3, 5, e.shiftKey);
             break;
           case "g":
-            nudgeInversion("density", -0.01, 0, 10, e.shiftKey);
+            nudgeInversion("density", -0.05, -3, 5, e.shiftKey);
             break;
         }
         break;
@@ -1458,46 +1464,69 @@
 <div class="h-screen bg-base text-content flex flex-col overflow-hidden">
   <!-- ── Top bar ──────────────────────────────────────────────────────────── -->
   <header
-    class="shrink-0 flex items-center gap-base px-l py-sm border-b border-base-subtle"
+    class="shrink-0 flex items-center gap-sm px-l h-12 border-b border-base-subtle"
   >
     <a
       href="/roll/{rollId}"
-      class="text-content-muted hover:text-content transition text-sm">← Roll</a
+      class="-ml-xs flex items-center gap-xs px-xs py-xs rounded-md text-sm
+             text-content-muted hover:text-content hover:bg-base-muted transition"
     >
-
-    {#if roll}
-      <span class="text-content-muted text-sm">{roll.label}</span>
-    {/if}
+      <ArrowLeftIcon size={16} />
+      {roll?.label ?? "Roll"}
+    </a>
 
     {#if frame}
-      <span class="text-content font-semibold">{frame.filename}</span>
+      <span class="text-content-subtle">/</span>
+      <span class="text-sm text-content font-medium truncate">{frame.filename}</span>
     {/if}
 
-    <!-- Frame navigation arrows -->
     <div class="ml-auto flex items-center gap-xs">
+      <!-- Undo / redo -->
+      <button
+        onclick={undo}
+        disabled={!canUndo}
+        title="Undo (Ctrl+Z)"
+        aria-label="Undo"
+        class={ICON_BTN}
+      >
+        <ArrowUUpLeftIcon size={16} />
+      </button>
+      <button
+        onclick={redo}
+        disabled={!canRedo}
+        title="Redo (Ctrl+Shift+Z)"
+        aria-label="Redo"
+        class={ICON_BTN}
+      >
+        <ArrowUUpRightIcon size={16} />
+      </button>
+
+      <span class="w-px h-4 mx-xs bg-base-subtle"></span>
+
+      <!-- Frame navigation -->
+      <button
+        onclick={() => navigateTo(frameIndex - 1)}
+        disabled={!hasPrev}
+        title="Previous frame"
+        aria-label="Previous frame"
+        class={ICON_BTN}
+      >
+        <CaretLeftIcon size={16} />
+      </button>
       {#if frames.length > 0}
-        <span class="text-xs text-content-subtle">
+        <span class="text-xs text-content-subtle tabular-nums min-w-12 text-center">
           {frameIndex + 1} / {frames.length}
         </span>
       {/if}
       <button
-        onclick={() => navigateTo(frameIndex - 1)}
-        disabled={!hasPrev}
-        aria-label="Previous frame"
-        class="w-8 h-8 flex items-center justify-center rounded
-				       border border-base-subtle text-content-muted
-				       hover:text-content hover:border-content-muted
-				       disabled:opacity-30 disabled:cursor-not-allowed transition">←</button
-      >
-      <button
         onclick={() => navigateTo(frameIndex + 1)}
         disabled={!hasNext}
+        title="Next frame"
         aria-label="Next frame"
-        class="w-8 h-8 flex items-center justify-center rounded
-				       border border-base-subtle text-content-muted
-				       hover:text-content hover:border-content-muted
-				       disabled:opacity-30 disabled:cursor-not-allowed transition">→</button
+        class={ICON_BTN}
       >
+        <CaretRightIcon size={16} />
+      </button>
     </div>
   </header>
 
@@ -1584,9 +1613,9 @@
         <div
           class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted"
         >
-          <div class="text-5xl opacity-30">⚠</div>
+          <WarningIcon size={40} weight="thin" class="text-content-subtle" />
           <h2 class="text-xl font-semibold text-content">WebGPU unavailable</h2>
-          <p class="text-content-muted max-w-sm text-sm">
+          <p class="text-content-muted max-w-96 text-sm">
             {gpuError}
           </p>
           <a href="/roll/{rollId}" class="text-sm text-primary hover:underline"
@@ -1609,7 +1638,7 @@
         <div
           class="absolute inset-0 flex flex-col items-center justify-center gap-base text-center px-l bg-base-muted"
         >
-          <div class="text-5xl opacity-30">⚠</div>
+          <WarningIcon size={40} weight="thin" class="text-content-subtle" />
           <h2 class="text-xl font-semibold text-content">
             Preview unavailable
           </h2>
@@ -1639,42 +1668,8 @@
           />
         </SidebarSection>
 
-        <!-- Undo / Redo -->
-        <SidebarSection>
-          <div class="flex items-center gap-xs">
-            <button
-              onclick={undo}
-              disabled={!canUndo}
-              title="Undo (Ctrl+Z)"
-              aria-label="Undo"
-              class="flex-1 flex items-center justify-center gap-xs
-							       px-sm py-xs rounded border text-xs transition
-							       border-base-subtle text-content-muted
-							       hover:border-content-muted hover:text-content
-							       disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <ArrowArcLeftIcon size={12} />
-              Undo
-            </button>
-            <button
-              onclick={redo}
-              disabled={!canRedo}
-              title="Redo (Ctrl+Shift+Z)"
-              aria-label="Redo"
-              class="flex-1 flex items-center justify-center gap-xs
-							       px-sm py-xs rounded border text-xs transition
-							       border-base-subtle text-content-muted
-							       hover:border-content-muted hover:text-content
-							       disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              Redo
-              <ArrowArcRightIcon size={12} />
-            </button>
-          </div>
-        </SidebarSection>
-
         <!-- Transform controls (rotation, flip, crop) -->
-        <SidebarSection alternate>
+        <SidebarSection>
           <TransformControls
             value={effectiveTransform}
             onChange={onTransformChange}
@@ -1703,9 +1698,9 @@
         </SidebarSection>
 
         <!-- Curves section -->
-        <SidebarSection alternate>
+        <SidebarSection>
           <h3
-            class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+            class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
           >
             Curves
           </h3>
@@ -1726,11 +1721,11 @@
   <!-- ── Keyboard hint bar ──────────────────────────────────────────────── -->
   <KeyboardHintBar
     hints={[
-      { keys: ["←", "→"], label: "navigate frames" },
+      { keys: ["←", "→"], label: "navigate" },
       { keys: ["C"], label: "crop" },
       { keys: ["Q–E", "A–D"], label: "+/− CMY" },
-      { keys: ["R", "F"], label: "+/− grade" },
-      { keys: ["T", "G"], label: "+/− density" },
+      { keys: ["R", "F"], label: "+/− contrast" },
+      { keys: ["T", "G"], label: "−/+ brightness" },
       {
         keys: [{ icon: ArrowFatUpIcon, eventKey: "Shift" }],
         label: "10× step",
@@ -1739,15 +1734,7 @@
         keys: [{ icon: CommandIcon, eventKey: ["Meta", "Control"] }, "Z"],
         label: "undo",
       },
-      {
-        keys: [
-          { icon: CommandIcon, eventKey: ["Meta", "Control"] },
-          { icon: ArrowFatUpIcon, eventKey: "Shift" },
-          "Z",
-        ],
-        label: "redo",
-      },
-      { keys: ["Esc"], label: "back to roll" },
+      { keys: ["Esc"], label: "back" },
     ]}
   />
 </div>

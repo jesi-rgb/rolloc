@@ -28,8 +28,12 @@
 
 @theme {
 	/* ── Fonts ────────────────────────────────────────────────────────────── */
-	--font-sans: 'AT Name Sans Variable', 'Output Sans 2 Beta';
-	--font-mono: 'AT Name Mono Variable';
+	--font-sans:
+		'AT Name Sans Variable', 'Output Sans 2 Beta', ui-sans-serif, system-ui,
+		-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	--font-mono:
+		'AT Name Mono Variable', ui-monospace, 'SF Mono', Menlo, Consolas,
+		'Liberation Mono', monospace;
 
 	/* ── Color tokens — backed by CSS vars that flip per theme ───────────── */
 
@@ -144,9 +148,6 @@
 	--base-subtle: oklch(88% 0.006 264);
 	/* ≈ zinc-200 */
 
-	/* Sidebar section alternate background */
-	--sidebar-section-alt: oklch(96% 0.004 264);
-
 	/* Content — dark end of zinc */
 	--content: oklch(20% 0.006 264);
 	/* ≈ zinc-900 */
@@ -208,9 +209,6 @@
 	/* ≈ zinc-900 */
 	--base-subtle: oklch(22% 0.008 264);
 	/* ≈ zinc-800 */
-
-	/* Sidebar section alternate background */
-	--sidebar-section-alt: oklch(14% 0.006 264);
 
 	/* Content — light end of zinc */
 	--content: oklch(93% 0.004 264);
@@ -307,6 +305,16 @@ body {
 	height: 100%;
 	overflow: hidden;
 	overscroll-behavior: none;
+}
+
+/* Thin, theme-aware scrollbars. */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--base-subtle) transparent;
+}
+
+::selection {
+	background-color: oklch(76% 0.165 75 / 0.35);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

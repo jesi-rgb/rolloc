@@ -39,13 +39,13 @@
  *   filmType      : u32         @ 88                 →  4 bytes
  *   shoulder      : f32         @ 92                 →  4 bytes
  *   shoulderWidth : f32         @ 96                 →  4 bytes
- *   _unused1      : f32         @ 100                →  4 bytes
+ *   exposure      : f32         @ 100                →  4 bytes
  *   shadows       : f32         @ 104                →  4 bytes
  *   highlights    : f32         @ 108                →  4 bytes
  *   dMax          : f32         @ 112                →  4 bytes
  *   vibrance      : f32         @ 116                →  4 bytes
  *   saturation    : f32         @ 120                →  4 bytes
- *   _pad0         : f32         @ 124                →  4 bytes
+ *   contrast      : f32         @ 124                →  4 bytes
  *   toneGamma     : f32         @ 128                →  4 bytes
  *   blackPoint    : f32         @ 132                →  4 bytes
  *   whitePoint    : f32         @ 136                →  4 bytes
@@ -69,13 +69,13 @@ struct HDCurveUniforms {
 	filmType         : u32,     // 0 = C41, 1 = BW, 2 = E6
 	shoulder         : f32,
 	shoulderWidth    : f32,
-	_unused1         : f32,
-	shadows          : f32,
-	highlights       : f32,
+	exposure         : f32,     // Lightroom-style exposure in EV stops
+	shadows          : f32,     // Lightroom-style shadows, [-1, +1]
+	highlights       : f32,     // Lightroom-style highlights, [-1, +1]
 	dMax             : f32,
 	vibrance         : f32,
 	saturation       : f32,
-	_pad0            : f32,
+	contrast         : f32,     // Lightroom-style contrast, [-1, +1]
 	// ── Tone preset params (vec4 @ 128) ──
 	toneGamma        : f32,
 	blackPoint       : f32,
@@ -118,9 +118,9 @@ fn fast_sigmoid(x : f32) -> f32 {
 /// Apply the full H&D pipeline to one channel.
 /// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
 ///
-/// Core H&D math matches negpy's _apply_photometric_fused_kernel.
-/// shadows/highlights are Rolloc extensions: global density level controls
-/// that use the toe/shoulder sigmoid masks to target shadow/highlight regions.
+/// Core H&D math matches negpy's _apply_photometric_fused_kernel. This is the
+/// fixed film/paper base; exposure, contrast, shadows and highlights are applied
+/// afterwards by `apply_tone` in a display-referred domain.
 fn hd_channel(
 	pixel       : f32,
 	pivot       : f32,
@@ -132,8 +132,6 @@ fn hd_channel(
 	toe_width   : f32,
 	shoulder    : f32,
 	sh_width    : f32,
-	shadows     : f32,
-	highlights  : f32,
 	d_max       : f32,
 ) -> f32 {
 	let eps = 1e-6;
@@ -160,18 +158,10 @@ fn hd_channel(
 	let shadow_color_offset    = shadow_cmy * toe_mask;
 	let highlight_color_offset = hi_cmy     * shoulder_mask;
 
-	// 5b. Shadows/Highlights global density level controls (Rolloc extension).
-	//     Uses the same sigmoid masks as toe/shoulder to target the same regions.
-	let shadow_level_offset    = shadows    * toe_mask      * 0.1;
-	let highlight_level_offset = highlights * shoulder_mask  * 0.1;
-
-	// 6. Adjusted diff (negpy sign convention + Rolloc shadows/highlights extension)
-	// Shadows/highlights UI convention: positive = brighter. Density adds darken,
-	// so we subtract both level offsets here.
+	// 6. Adjusted diff (negpy sign convention)
 	let diff_adj = diff
 		+ shadow_color_offset + highlight_color_offset
-		- toe_density_offset + shoulder_density_offset
-		- shadow_level_offset - highlight_level_offset;
+		- toe_density_offset + shoulder_density_offset;
 
 	// 7. Contrast damping (toe/shoulder reduce effective contrast)
 	let damp_toe      = toe      * toe_mask      * 0.5;
@@ -200,6 +190,100 @@ fn hd_channel(
 	out = clamp((out - u.blackPoint) / (u.whitePoint - u.blackPoint), 0.0, 1.0);
 
 	return out;
+}
+
+// ─── Lightroom-style tone stage ───────────────────────────────────────────────
+//
+// Runs after the H&D paper curve, on display-referred RGB in [0,1]. Every
+// operator is monotone and endpoint-preserving, so nothing clips or posterises:
+//   • Exposure   — linear-light gain with a soft highlight shoulder (EV stops)
+//   • Contrast   — S-curve pivoted on mid-grey (smoothstep / its inverse)
+//   • Shadows    — gamma lift under a wide luminance mask
+//   • Highlights — gamma roll under a wide luminance mask
+// Mirrored exactly by `apply_tone` in src-tauri/src/process.rs.
+
+/// Strength cap for the contrast S-curve at ±1.
+const CONTRAST_MAX: f32 = 0.85;
+/// Gamma travel of the shadows/highlights operators at ±1.
+const SH_GAMMA: f32 = 0.6;
+/// Linear-light level where the exposure shoulder starts.
+const EXP_KNEE: f32 = 0.75;
+
+/// Inverse of smoothstep(0, 1, x) — flattens the S back out for negative contrast.
+fn inv_smoothstep(x: f32) -> f32 {
+	return 0.5 - sin(asin(clamp(1.0 - 2.0 * x, -1.0, 1.0)) / 3.0);
+}
+
+/// Soft shoulder in linear light: identity below the knee, asymptotic to 1 above.
+fn soft_shoulder(x: f32) -> f32 {
+	if (x <= EXP_KNEE) {
+		return x;
+	}
+	return EXP_KNEE + (1.0 - EXP_KNEE) * (1.0 - exp(-(x - EXP_KNEE) / (1.0 - EXP_KNEE)));
+}
+
+/// Contrast S-curve on one channel. `amt` ∈ [-1, +1].
+fn contrast_channel(x: f32, amt: f32) -> f32 {
+	let k = clamp(amt, -1.0, 1.0) * CONTRAST_MAX;
+	let curved = select(inv_smoothstep(x), x * x * (3.0 - 2.0 * x), k > 0.0);
+	return clamp(mix(x, curved, abs(k)), 0.0, 1.0);
+}
+
+fn apply_tone(rgb_in: vec3<f32>, gamma: f32) -> vec3<f32> {
+	var rgb = clamp(rgb_in, vec3<f32>(0.0), vec3<f32>(1.0));
+
+	// ── Exposure: a true stop-based gain in linear light ─────────────────────
+	if (u.exposure != 0.0) {
+		let gain = pow(2.0, u.exposure);
+		let lin = pow(rgb, vec3<f32>(gamma)) * gain;
+		let rolled = vec3<f32>(
+			soft_shoulder(lin.r),
+			soft_shoulder(lin.g),
+			soft_shoulder(lin.b),
+		);
+		rgb = pow(clamp(rolled, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / gamma));
+	}
+
+	// ── Contrast: pivots on mid-grey, leaves black and white untouched ──────
+	if (u.contrast != 0.0) {
+		rgb = vec3<f32>(
+			contrast_channel(rgb.r, u.contrast),
+			contrast_channel(rgb.g, u.contrast),
+			contrast_channel(rgb.b, u.contrast),
+		);
+	}
+
+	// ── Shadows / Highlights: broad luminance-masked gamma moves ────────────
+	// Both act on luminance and rescale RGB by the ratio, so hue and saturation
+	// survive. The masks are deliberately wide (reaching into the midtones) —
+	// that is what makes the sliders feel usable rather than band-limited.
+	if (u.shadows != 0.0 || u.highlights != 0.0) {
+		let lum = LUMA_R * rgb.r + LUMA_G * rgb.g + LUMA_B * rgb.b;
+		var l = lum;
+
+		if (u.shadows != 0.0) {
+			let s = clamp(u.shadows, -1.0, 1.0);
+			let lifted = pow(l, max(1.0 - SH_GAMMA * s, 0.05));
+			let mask = 1.0 - smoothstep(0.0, 0.7, l);
+			l = mix(l, lifted, mask);
+		}
+
+		if (u.highlights != 0.0) {
+			let h = clamp(u.highlights, -1.0, 1.0);
+			let rolled = 1.0 - pow(1.0 - l, max(1.0 + SH_GAMMA * h, 0.05));
+			let mask = smoothstep(0.3, 1.0, l);
+			l = mix(l, rolled, mask);
+		}
+
+		// Ratio-preserving rescale; falls back to an additive shift near black.
+		if (lum > 1e-4) {
+			rgb = clamp(rgb * (l / lum), vec3<f32>(0.0), vec3<f32>(1.0));
+		} else {
+			rgb = clamp(rgb + (l - lum), vec3<f32>(0.0), vec3<f32>(1.0));
+		}
+	}
+
+	return rgb;
 }
 
 /// Apply vibrance and saturation adjustments.
@@ -246,24 +330,24 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		u.cmyOffsets.r, u.shadowCmy.r, u.highlightCmy.r,
 		u.toe, u.toeWidth,
 		u.shoulder, u.shoulderWidth,
-		u.shadows, u.highlights, u.dMax,
+		u.dMax,
 	);
 	let g = hd_channel(
 		color.g, u.pivots.g, u.slopes.g,
 		u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
 		u.toe, u.toeWidth,
 		u.shoulder, u.shoulderWidth,
-		u.shadows, u.highlights, u.dMax,
+		u.dMax,
 	);
 	let b = hd_channel(
 		color.b, u.pivots.b, u.slopes.b,
 		u.cmyOffsets.b, u.shadowCmy.b, u.highlightCmy.b,
 		u.toe, u.toeWidth,
 		u.shoulder, u.shoulderWidth,
-		u.shadows, u.highlights, u.dMax,
+		u.dMax,
 	);
 
-	var out_rgb = vec3<f32>(r, g, b);
+	var out_rgb = apply_tone(vec3<f32>(r, g, b), u.toneGamma);
 
 	// B&W mode: convert to luminance (Rec. 709) and output as grayscale
 	// This matches negpy's get_luminance() applied post-curve

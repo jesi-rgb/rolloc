@@ -2,15 +2,27 @@
 	import { onMount } from "svelte";
 	import { getRolls, deleteRoll, purgeRollFolderData } from "$lib/db/rolls";
 	import { getLibraries, deleteLibrary } from "$lib/db/libraries";
-	import { TrashIcon, FolderMinusIcon } from "phosphor-svelte";
+	import {
+		TrashIcon,
+		FolderMinusIcon,
+		FilmStripIcon,
+		ImagesIcon,
+		PlusIcon,
+	} from "phosphor-svelte";
 	import NewRollDialog from "$lib/components/NewRollDialog.svelte";
 	import NewLibraryDialog from "$lib/components/NewLibraryDialog.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import RollThumbStrip from "$lib/components/RollThumbStrip.svelte";
 	import LibraryThumbStrip from "$lib/components/LibraryThumbStrip.svelte";
+	import type { Component } from "svelte";
 	import type { Roll, Library } from "$lib/types";
 
 	type Tab = "rolls" | "libraries";
+
+	const TABS: { id: Tab; label: string }[] = [
+		{ id: "rolls", label: "Rolls" },
+		{ id: "libraries", label: "Libraries" },
+	];
 
 	let rolls = $state<Roll[]>([]);
 	let libraries = $state<Library[]>([]);
@@ -97,113 +109,59 @@
 <svelte:head><title>Rolloc — Film Archive</title></svelte:head>
 
 <div class="h-screen bg-base text-content flex flex-col overflow-hidden">
-	<!-- Top bar -->
+	<!-- Top bar: brand, tabs and primary action -->
 	<header
-		class="flex items-center justify-between px-l py-base border-b border-base-subtle"
+		class="flex items-center gap-l px-l h-14 shrink-0 border-b border-base-subtle"
 	>
-		<div class="flex items-center gap-sm">
-			<span class="text-2xl font-bold tracking-tight text-primary-muted"
-				>Rolloc</span
-			>
-			<span class="text-content-subtle text-sm hidden sm:inline"
-				>Film Archive</span
-			>
-		</div>
-		<div class="flex items-center gap-xs">
-			{#if activeTab === "rolls"}
-				<button
-					onclick={() => (showNewRoll = true)}
-					class="flex items-center gap-xs px-base py-sm rounded-lg bg-primary text-primary-content
-					       text-sm font-medium hover:bg-primary-muted transition"
-				>
-					<span class="text-base leading-none">+</span> New Roll
-				</button>
-			{:else}
-				<button
-					onclick={() => (showNewLibrary = true)}
-					class="flex items-center gap-xs px-base py-sm rounded-lg bg-primary text-primary-content
-					       text-sm font-medium hover:bg-primary-muted transition"
-				>
-					<span class="text-base leading-none">+</span> New Library
-				</button>
-			{/if}
-		</div>
-	</header>
+		<span class="text-xl font-bold tracking-tight text-primary-muted">Rolloc</span>
 
-	<!-- Tab navigation -->
-	<nav class="border-b border-base-subtle">
-		<div class="px-l flex gap-base">
-			<button
-				onclick={() => (activeTab = "rolls")}
-				class="relative px-sm py-base text-sm font-medium transition
-				       {activeTab === 'rolls'
-					? 'text-primary'
-					: 'text-content-muted hover:text-content'}"
-			>
-				Rolls
-				{#if activeTab === "rolls"}
-					<span
-						class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"
-					></span>
-				{/if}
-			</button>
-			<button
-				onclick={() => (activeTab = "libraries")}
-				class="relative px-sm py-base text-sm font-medium transition
-				       {activeTab === 'libraries'
-					? 'text-primary'
-					: 'text-content-muted hover:text-content'}"
-			>
-				Libraries
-				{#if activeTab === "libraries"}
-					<span
-						class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"
-					></span>
-				{/if}
-			</button>
-		</div>
-	</nav>
+		<nav class="flex items-center gap-xs" aria-label="Collections">
+			{#each TABS as tab (tab.id)}
+				<button
+					onclick={() => (activeTab = tab.id)}
+					aria-current={activeTab === tab.id ? "page" : undefined}
+					class="px-sm py-xs rounded-md text-sm font-medium transition
+					       {activeTab === tab.id
+						? 'bg-base-muted text-content'
+						: 'text-content-muted hover:text-content'}"
+				>
+					{tab.label}
+				</button>
+			{/each}
+		</nav>
+
+		<button
+			onclick={() =>
+				activeTab === "rolls" ? (showNewRoll = true) : (showNewLibrary = true)}
+			class="ml-auto flex items-center gap-xs px-sm py-xs rounded-md bg-primary
+			       text-primary-content text-sm font-medium hover:bg-primary-muted transition"
+		>
+			<PlusIcon size={14} weight="bold" />
+			{activeTab === "rolls" ? "New Roll" : "New Library"}
+		</button>
+	</header>
 
 	<main class="flex-1 min-h-0 overflow-y-auto w-full px-l py-xl max-w-5xl mx-auto">
 		{#if loading}
-			<p class="text-content-muted">Loading…</p>
+			<p class="text-sm text-content-muted">Loading…</p>
 		{:else if activeTab === "rolls"}
 			<!-- Rolls tab -->
 			{#if rolls.length === 0}
-				<!-- Empty state -->
-				<div
-					class="flex flex-col items-center justify-center py-24 gap-base text-center"
-				>
-					<div class="text-6xl opacity-30">🎞️</div>
-					<h2 class="text-xl font-semibold text-content">
-						No rolls yet
-					</h2>
-					<p class="text-content-muted text-sm">
-						Create your first roll by selecting a folder of film
-						scans (JPEG or TIFF).
-					</p>
-					<button
-						onclick={() => (showNewRoll = true)}
-						class="mt-2 px-base py-sm rounded-lg bg-primary text-primary-content
-						       text-sm font-medium hover:bg-primary-muted transition"
-					>
-						New Roll
-					</button>
-				</div>
+				{@render emptyState(
+					FilmStripIcon,
+					"No rolls yet",
+					"Select a folder of film scans to create your first roll.",
+					"New Roll",
+					() => (showNewRoll = true),
+				)}
 			{:else}
-				<h1
-					class="text-sm font-medium text-content-muted uppercase tracking-widest mb-l"
-				>
-					{rolls.length} Roll{rolls.length !== 1 ? "s" : ""}
-				</h1>
-
 				<ul class="flex flex-col gap-base">
 					{#each rolls as roll (roll.id)}
 						<li
-							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
-					           hover:border-content-subtle transition overflow-hidden"
+							class="group relative flex flex-col rounded-lg bg-base-muted border border-base-subtle
+							       hover:border-content-subtle transition overflow-hidden"
 						>
-							<!-- Thumbnail strip (first 5 frames) -->
+							<!-- Thumbnail strip (first frames) -->
 							<a
 								href="/roll/{roll.id}"
 								class="block overflow-hidden"
@@ -216,60 +174,53 @@
 							<!-- Metadata -->
 							<a
 								href="/roll/{roll.id}"
-								class="flex flex-col flex-1 px-sm py-sm gap-xs"
+								class="flex flex-col gap-0.5 px-base py-sm pr-20"
 							>
-								<span
-									class="font-semibold text-content truncate"
-									>{roll.label}</span
-								>
-								{#if roll.filmStock}
-									<span
-										class="text-sm text-primary-muted/80 truncate"
-										>{roll.filmStock}</span
+								<span class="flex items-baseline gap-sm min-w-0">
+									<span class="font-semibold text-content truncate"
+										>{roll.label}</span
 									>
-								{/if}
-								{#if roll.camera}
-									<span
-										class="text-xs text-content-muted truncate"
-										>{roll.camera}</span
+									<span class="text-xs text-content-subtle shrink-0"
+										>{formatDate(roll.createdAt)}</span
 									>
+								</span>
+								{#if roll.filmStock || roll.camera}
+									<span class="text-xs text-content-muted truncate">
+										{#if roll.filmStock}
+											<span class="text-primary-muted/80">{roll.filmStock}</span>
+										{/if}
+										{#if roll.filmStock && roll.camera}
+											<span class="text-content-subtle">·</span>
+										{/if}
+										{roll.camera ?? ""}
+									</span>
 								{/if}
-								<span
-									class="text-xs text-content-subtle mt-auto pt-1"
-									>{formatDate(roll.createdAt)}</span
-								>
 							</a>
 
-							<!-- Purge folder cache button (shown on hover) -->
-							<button
-								onclick={() => confirmPurgeRollFolder(roll)}
-								disabled={purging === roll.id}
-								aria-label="Delete cached edits and thumbnails from folder"
-								title="Permanently delete cached edits/thumbnails from this roll's folder"
-								class="absolute bottom-3 right-11 opacity-0 group-hover:opacity-100 transition
-							       p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle"
+							<!-- Hover actions -->
+							<div
+								class="absolute bottom-sm right-sm flex items-center gap-xs
+								       opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition"
 							>
-								{#if purging === roll.id}
-									<span class="text-xs">…</span>
-								{:else}
-									<FolderMinusIcon size={16} weight="bold" />
-								{/if}
-							</button>
-
-							<!-- Delete button (shown on hover) -->
-							<button
-								onclick={() => confirmDeleteRoll(roll)}
-								disabled={deleting === roll.id}
-								aria-label="Delete roll"
-								class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition
-							       p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle"
-							>
-								{#if deleting === roll.id}
-									<span class="text-xs">…</span>
-								{:else}
-									<TrashIcon size={16} weight="bold" />
-								{/if}
-							</button>
+								<button
+									onclick={() => confirmPurgeRollFolder(roll)}
+									disabled={purging === roll.id}
+									aria-label="Delete cached edits and thumbnails from folder"
+									title="Permanently delete cached edits/thumbnails from this roll's folder"
+									class="p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle transition disabled:opacity-40"
+								>
+									<FolderMinusIcon size={16} />
+								</button>
+								<button
+									onclick={() => confirmDeleteRoll(roll)}
+									disabled={deleting === roll.id}
+									aria-label="Delete roll"
+									title="Delete roll"
+									class="p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle transition disabled:opacity-40"
+								>
+									<TrashIcon size={16} />
+								</button>
+							</div>
 						</li>
 					{/each}
 				</ul>
@@ -277,42 +228,21 @@
 		{:else}
 			<!-- Libraries tab -->
 			{#if libraries.length === 0}
-				<!-- Empty state -->
-				<div
-					class="flex flex-col items-center justify-center py-24 gap-base text-center"
-				>
-					<div class="text-6xl opacity-30">📸</div>
-					<h2 class="text-xl font-semibold text-content">
-						No libraries yet
-					</h2>
-					<p class="text-content-muted text-sm">
-						Create your first library by selecting a folder of
-						images
-					</p>
-					<button
-						onclick={() => (showNewLibrary = true)}
-						class="mt-2 px-base py-sm rounded-lg bg-primary text-primary-content
-						       text-sm font-medium hover:bg-primary-muted transition"
-					>
-						New Library
-					</button>
-				</div>
+				{@render emptyState(
+					ImagesIcon,
+					"No libraries yet",
+					"Select a folder of images to create your first library.",
+					"New Library",
+					() => (showNewLibrary = true),
+				)}
 			{:else}
-				<h1
-					class="text-sm font-medium text-content-muted uppercase tracking-widest mb-l"
-				>
-					{libraries.length} Librar{libraries.length !== 1
-						? "ies"
-						: "y"}
-				</h1>
-
 				<ul class="flex flex-col gap-base">
 					{#each libraries as library (library.id)}
 						<li
-							class="group relative flex flex-col rounded-xl bg-base-muted border border-base-subtle
-					           hover:border-content-subtle transition overflow-hidden"
+							class="group relative flex flex-col rounded-lg bg-base-muted border border-base-subtle
+							       hover:border-content-subtle transition overflow-hidden"
 						>
-							<!-- Thumbnail strip (first 5 images) -->
+							<!-- Thumbnail strip (first images) -->
 							<a
 								href="/library/{library.id}"
 								class="block overflow-hidden"
@@ -325,38 +255,38 @@
 							<!-- Metadata -->
 							<a
 								href="/library/{library.id}"
-								class="flex flex-col flex-1 px-sm py-sm gap-xs"
+								class="flex flex-col gap-0.5 px-base py-sm pr-12"
 							>
-								<span
-									class="font-semibold text-content truncate"
-									>{library.label}</span
-								>
+								<span class="flex items-baseline gap-sm min-w-0">
+									<span class="font-semibold text-content truncate"
+										>{library.label}</span
+									>
+									<span class="text-xs text-content-subtle shrink-0"
+										>{formatDate(library.createdAt)}</span
+									>
+								</span>
 								{#if library.notes}
-									<span
-										class="text-sm text-content-muted truncate"
+									<span class="text-xs text-content-muted truncate"
 										>{library.notes}</span
 									>
 								{/if}
-								<span
-									class="text-xs text-content-subtle mt-auto pt-1"
-									>{formatDate(library.createdAt)}</span
-								>
 							</a>
 
-							<!-- Delete button (shown on hover) -->
-							<button
-								onclick={() => confirmDeleteLibrary(library)}
-								disabled={deleting === library.id}
-								aria-label="Delete library"
-								class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition
-							       p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle"
+							<!-- Hover actions -->
+							<div
+								class="absolute bottom-sm right-sm flex items-center gap-xs
+								       opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition"
 							>
-								{#if deleting === library.id}
-									<span class="text-xs">…</span>
-								{:else}
-									<TrashIcon size={16} weight="bold" />
-								{/if}
-							</button>
+								<button
+									onclick={() => confirmDeleteLibrary(library)}
+									disabled={deleting === library.id}
+									aria-label="Delete library"
+									title="Delete library"
+									class="p-1.5 rounded-md text-content-muted hover:text-danger hover:bg-base-subtle transition disabled:opacity-40"
+								>
+									<TrashIcon size={16} />
+								</button>
+							</div>
 						</li>
 					{/each}
 				</ul>
@@ -365,6 +295,28 @@
 	</main>
 	<KeyboardHintBar hints={[]} />
 </div>
+
+{#snippet emptyState(
+	Icon: Component,
+	title: string,
+	body: string,
+	action: string,
+	onAction: () => void,
+)}
+	<div class="flex flex-col items-center justify-center py-24 gap-sm text-center">
+		<Icon size={48} weight="thin" class="text-content-subtle" />
+		<h2 class="text-l font-semibold text-content mt-sm">{title}</h2>
+		<p class="text-content-muted text-sm max-w-80">{body}</p>
+		<button
+			onclick={onAction}
+			class="mt-sm flex items-center gap-xs px-sm py-xs rounded-md bg-primary
+			       text-primary-content text-sm font-medium hover:bg-primary-muted transition"
+		>
+			<PlusIcon size={14} weight="bold" />
+			{action}
+		</button>
+	</div>
+{/snippet}
 
 {#if showNewRoll}
 	<NewRollDialog

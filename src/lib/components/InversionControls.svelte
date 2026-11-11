@@ -13,6 +13,8 @@
 	import BlackWhiteFilmButton from "./BlackWhiteFilmButton.svelte";
 	import SlideFilmButton from "./SlideFilmButton.svelte";
 	import ToggleButton from "./ToggleButton.svelte";
+	import WhiteBalancePad from "./WhiteBalancePad.svelte";
+	import Select from "./Select.svelte";
 	import { EyedropperSampleIcon } from "phosphor-svelte";
 
 	interface Props {
@@ -224,7 +226,7 @@
 	<!-- ── Film Type ───────────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
 			Film type
 		</h4>
@@ -256,31 +258,30 @@
 	<!-- ── Tone Preset ────────────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
 			Tone
 		</h4>
-		<select
-			class="w-full rounded border border-base-subtle bg-surface px-sm
-			py-xs text-sm text-content-muted"
+		<Select
+			aria-label="Tone preset"
 			value={tonePreset}
-			onchange={(e) => {
-				tonePreset = (e.currentTarget as HTMLSelectElement)
-					.value as TonePreset;
+			options={[
+				{ value: "standard", label: "Standard" },
+				{ value: "soft", label: "Soft" },
+				{ value: "punch", label: "Punch" },
+			]}
+			onChange={(v: TonePreset) => {
+				tonePreset = v;
 				commit();
 			}}
-		>
-			<option value="standard">Standard</option>
-			<option value="soft">Soft</option>
-			<option value="punch">Punch</option>
-		</select>
+		/>
 	</section>
 
 	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
 	<section>
 		<div class="flex items-center justify-between mb-sm">
 			<h4
-				class="text-xs font-semibold uppercase tracking-widest text-content-subtle"
+				class="text-xs font-semibold text-content-muted uppercase tracking-wider"
 			>
 				Color timing
 			</h4>
@@ -294,6 +295,23 @@
 					White Balance
 				</ToggleButton>
 			{/if}
+		</div>
+		<div class="flex gap-md items-start mb-sm">
+			<!-- Temperature / tint pad drives the yellow and magenta timing. -->
+			<WhiteBalancePad
+				temperature={cmyYellow}
+				tint={cmyMagenta}
+				onChange={(t: number, g: number) => {
+					cmyYellow = t;
+					cmyMagenta = g;
+					emit();
+				}}
+				onCommit={(t: number, g: number) => {
+					cmyYellow = t;
+					cmyMagenta = g;
+					commit();
+				}}
+			/>
 		</div>
 		<JointSlider
 			min={-1}
@@ -343,16 +361,16 @@
 
 	<!-- ── Brightness + Contrast ──────────────────────────────────────────── -->
 	<!--
-		Brightness is the visual inverse of density: brighter = lower density.
-		We display brightness = DEFAULT_DENSITY − density so that:
-		  • 0   = default exposure  (density 1.0)
-		  • +ve = brighter          (density < 1.0)
-		  • −ve = darker            (density > 1.0)
-		Range: [−9, +1] (mirrors the full 0–10 density range, centred on default).
+		Both sliders drive the Lightroom-style tone stage and are stored in the
+		legacy `density` / `grade` fields:
+		  • Brightness = DEFAULT_DENSITY − density, read as exposure in EV stops
+		    (0 = neutral, ±4 stops of range).
+		  • Contrast   = (grade − DEFAULT_GRADE) / DEFAULT_GRADE, in [−1, +1],
+		    driving an S-curve pivoted on mid-grey.
 	-->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
 			Light
 		</h4>
@@ -360,8 +378,8 @@
 			<LabeledRange
 				id="inv-brightness"
 				label="Brightness"
-				min={DEFAULT_INVERSION_PARAMS.density - 4}
-				max={DEFAULT_INVERSION_PARAMS.density + 2}
+				min={-4}
+				max={4}
 				step={0.01}
 				signed
 				fat
@@ -376,14 +394,17 @@
 			<LabeledRange
 				id="inv-contrast"
 				label="Contrast"
-				min={0}
-				max={10}
-				step={0.1}
+				min={-1}
+				max={1}
+				step={0.01}
+				signed
 				fat
-				value={grade}
-				defaultValue={DEFAULT_INVERSION_PARAMS.grade}
+				value={(grade - DEFAULT_INVERSION_PARAMS.grade) /
+					DEFAULT_INVERSION_PARAMS.grade}
+				defaultValue={0}
 				onchange={(v) => {
-					grade = v;
+					grade =
+						DEFAULT_INVERSION_PARAMS.grade * (1 + v);
 					emit();
 				}}
 				oncommit={commit}
@@ -395,7 +416,7 @@
 	{#if filmType !== "BW"}
 		<section>
 			<h4
-				class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+				class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 			>
 				Color
 			</h4>
@@ -439,7 +460,7 @@
 	<!-- ── Detail (Clarity + Sharpening) ─────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
 			Detail
 		</h4>
@@ -472,22 +493,36 @@
 				}}
 				oncommit={commit}
 			/>
+			<LabeledRange
+				id="inv-glow"
+				label="Glow"
+				min={0}
+				max={5}
+				step={0.01}
+				value={glow}
+				defaultValue={DEFAULT_INVERSION_PARAMS.glow}
+				onchange={(v) => {
+					glow = v;
+					emit();
+				}}
+				oncommit={commit}
+			/>
 		</div>
 	</section>
 
-	<!-- ── Shadows ─────────────────────────────────────────────────────────── -->
+	<!-- ── Shadows + Highlights ────────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
-			Shadows
+			Tonal range
 		</h4>
 		<div class="flex flex-col gap-sm">
 			<LabeledRange
 				id="inv-shadows"
 				label="Shadows"
-				min={-5}
-				max={5}
+				min={-1}
+				max={1}
 				step={0.01}
 				value={shadows}
 				defaultValue={DEFAULT_INVERSION_PARAMS.shadows}
@@ -548,17 +583,7 @@
 					}}
 				/>
 			</div>
-		</div>
-	</section>
 
-	<!-- ── Highlights ──────────────────────────────────────────────────────── -->
-	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Highlights
-		</h4>
-		<div class="flex flex-col gap-sm">
 			<LabeledRange
 				id="inv-highlights"
 				label="Highlights"
@@ -629,35 +654,10 @@
 		</div>
 	</section>
 
-	<!-- ── Effects ─────────────────────────────────────────────────────────── -->
-	<section>
-		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
-		>
-			Effects
-		</h4>
-		<div class="flex flex-col gap-sm">
-			<LabeledRange
-				id="inv-glow"
-				label="Glow"
-				min={0}
-				max={5}
-				step={0.01}
-				value={glow}
-				defaultValue={DEFAULT_INVERSION_PARAMS.glow}
-				onchange={(v) => {
-					glow = v;
-					emit();
-				}}
-				oncommit={commit}
-			/>
-		</div>
-	</section>
-
 	<!-- ── Export border (matting) ─────────────────────────────────────────── -->
 	<section>
 		<h4
-			class="text-xs font-semibold uppercase tracking-widest text-content-subtle mb-sm"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
 		>
 			Border
 		</h4>

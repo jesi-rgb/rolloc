@@ -11,7 +11,7 @@
 
 <section>
   <h3
-    class="text-xs font-semibold text-content-subtle uppercase tracking-wider mb-sm"
+    class="text-xs font-semibold text-content-muted uppercase tracking-wider mb-sm"
   >
     Export
   </h3>

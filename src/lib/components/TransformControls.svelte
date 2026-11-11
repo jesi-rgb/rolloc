@@ -229,7 +229,7 @@
 	<!-- ── Header: section title + inline reset ─────────────────────────────── -->
 	<div class="flex items-center justify-between">
 		<h3
-			class="text-xs font-semibold text-content-subtle uppercase tracking-wider"
+			class="text-xs font-semibold text-content-muted uppercase tracking-wider"
 		>
 			Transform
 		</h3>

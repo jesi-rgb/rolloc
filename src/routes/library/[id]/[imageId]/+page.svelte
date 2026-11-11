@@ -21,7 +21,7 @@
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import type { PaneAPI } from "paneforge";
-	import { Sidebar, SidebarIcon } from "phosphor-svelte";
+	import { ArrowLeftIcon, SidebarSimpleIcon } from "phosphor-svelte";
 
 	interface ImageWithExif {
 		image: LibraryImage;
@@ -323,21 +323,25 @@
 <div class="h-screen bg-base text-content flex flex-col">
 	<!-- Header -->
 	<header
-		class="flex items-center justify-between px-l py-base border-b border-base-subtle shrink-0"
+		class="flex items-center justify-between gap-sm px-l h-12 border-b border-base-subtle shrink-0"
 	>
-		<div class="flex items-center gap-sm">
+		<div class="flex items-center gap-sm min-w-0">
 			<button
 				onclick={() => goto(resolve(`/library/${libraryId}`))}
-				class="text-content-muted hover:text-content transition bg-transparent border-none cursor-pointer p-0"
-				>← {library?.label || "Back"}</button
+				class="-ml-xs flex items-center gap-xs px-xs py-xs rounded-md text-sm
+				       text-content-muted hover:text-content hover:bg-base-muted transition"
 			>
-			{#if library}
-				<h1 class="text-l font-semibold text-content">
+				<ArrowLeftIcon size={16} />
+				{library?.label || "Back"}
+			</button>
+			{#if library && current}
+				<span class="text-content-subtle">/</span>
+				<h1 class="text-sm font-medium text-content truncate">
 					{current.image.filename}
 				</h1>
 			{/if}
 		</div>
-		<div class="text-sm text-content-muted tabular-nums">
+		<div class="text-xs text-content-subtle tabular-nums">
 			{#if currentIndex >= 0 && sortedImages.length > 0}
 				{currentIndex + 1} / {sortedImages.length}
 			{/if}
@@ -356,9 +360,14 @@
 		<PaneGroup direction="horizontal" class="flex-1 min-h-0 relative">
 			{#if !exifPaneOpen}
 				<button
-					class="absolute top-10 right-10"
-					onclick={toggleExifPane}><SidebarIcon /></button
+					onclick={toggleExifPane}
+					aria-label="Show details"
+					title="Show details"
+					class="absolute top-base right-base z-10 p-1.5 rounded-md bg-base/80 backdrop-blur
+					       border border-base-subtle text-content-muted hover:text-content transition"
 				>
+					<SidebarSimpleIcon size={16} />
+				</button>
 			{/if}
 			<!-- Main image viewer pane -->
 			<Pane defaultSize={75} minSize={30} order={1}>

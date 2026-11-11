@@ -153,8 +153,8 @@
 <svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} onblur={onBlur} />
 
 <footer
-	class="flex items-center gap-base px-l py-xs
-	       border-t border-base-subtle bg-base-muted select-none"
+	class="shrink-0 flex items-center gap-base px-l h-8
+	       border-t border-base-subtle bg-base select-none"
 >
 	{#each hints as hint (hint.label)}
 		<span class="text-xs text-content-subtle flex items-baseline gap-xs">
@@ -183,66 +183,65 @@
 			{hint.label}
 		</span>
 	{/each}
-	{#if progress}
-		<span class="ml-auto text-xs text-content-subtle">{progress}</span>
-	{/if}
-
-	<!-- Update available indicator -->
-	{#if update}
-		<button
-			onclick={installUpdate}
-			disabled={downloading}
-			aria-label={downloading ? "Installing update..." : `Update to ${update.version}`}
-			title={downloading ? "Installing update..." : `Update to ${update.version}`}
-			class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
-			       {downloading
-				? 'text-content-muted cursor-wait'
-				: 'text-accent hover:bg-accent/10 transition-colors'}
-			       {progress ? '' : 'ml-auto'}"
-		>
-			<DownloadSimpleIcon size={14} class={downloading ? 'animate-bounce' : ''} />
-			<span>{downloading ? 'Installing...' : `v${update.version}`}</span>
-		</button>
-	{:else if updateError}
-		<button
-			onclick={() => { clearError(); checkForUpdate(); }}
-			aria-label="Update check failed: {updateError}. Click to retry."
-			title="Update check failed: {updateError}. Click to retry."
-			class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
-			       text-red-500 hover:bg-red-500/10 transition-colors
-			       {progress ? '' : 'ml-auto'}"
-		>
-			<WarningIcon size={14} />
-			<span>update check failed</span>
-		</button>
-	{/if}
-
-	<!-- Manual "check for updates" button (Tauri only) -->
-	{#if canCheck && !update}
-		<button
-			onclick={() => checkForUpdate()}
-			disabled={checking}
-			aria-label={checking ? "Checking for updates..." : "Check for updates"}
-			title={checking ? "Checking for updates..." : "Check for updates"}
-			class="p-0.5 rounded text-content-muted hover:text-content transition-colors
-			       {checking ? 'cursor-wait' : ''}
-			       {progress || updateError ? '' : 'ml-auto'}"
-		>
-			<ArrowClockwiseIcon size={14} class={checking ? 'animate-spin' : ''} />
-		</button>
-	{/if}
-
-	<!-- Theme toggle (sun/moon) -->
-	<button
-		onclick={toggleTheme}
-		aria-label="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
-		title="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
-		class="p-0.5 rounded text-content-muted hover:text-content transition-colors {progress || update || updateError || canCheck ? '' : 'ml-auto'}"
-	>
-		{#if theme === "dark"}
-			<SunIcon size={14} />
-		{:else}
-			<MoonIcon size={14} />
+	<div class="ml-auto flex items-center gap-sm">
+		{#if progress}
+			<span class="text-xs text-content-subtle tabular-nums">{progress}</span>
 		{/if}
-	</button>
+
+		<!-- Update available indicator -->
+		{#if update}
+			<button
+				onclick={installUpdate}
+				disabled={downloading}
+				aria-label={downloading ? "Installing update..." : `Update to ${update.version}`}
+				title={downloading ? "Installing update..." : `Update to ${update.version}`}
+				class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
+				       {downloading
+					? 'text-content-muted cursor-wait'
+					: 'text-accent hover:bg-accent/10 transition-colors'}"
+			>
+				<DownloadSimpleIcon size={14} class={downloading ? 'animate-bounce' : ''} />
+				<span>{downloading ? 'Installing...' : `v${update.version}`}</span>
+			</button>
+		{:else if updateError}
+			<button
+				onclick={() => { clearError(); checkForUpdate(); }}
+				aria-label="Update check failed: {updateError}. Click to retry."
+				title="Update check failed: {updateError}. Click to retry."
+				class="flex items-center gap-xs px-xs py-0.5 rounded text-xs
+				       text-danger hover:bg-danger/10 transition-colors"
+			>
+				<WarningIcon size={14} />
+				<span>update check failed</span>
+			</button>
+		{/if}
+
+		<!-- Manual "check for updates" button (Tauri only) -->
+		{#if canCheck && !update}
+			<button
+				onclick={() => checkForUpdate()}
+				disabled={checking}
+				aria-label={checking ? "Checking for updates..." : "Check for updates"}
+				title={checking ? "Checking for updates..." : "Check for updates"}
+				class="p-0.5 rounded text-content-subtle hover:text-content transition-colors
+				       {checking ? 'cursor-wait' : ''}"
+			>
+				<ArrowClockwiseIcon size={14} class={checking ? 'animate-spin' : ''} />
+			</button>
+		{/if}
+
+		<!-- Theme toggle (sun/moon) -->
+		<button
+			onclick={toggleTheme}
+			aria-label="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
+			title="Switch to {theme === 'dark' ? 'light' : 'dark'} theme"
+			class="p-0.5 rounded text-content-subtle hover:text-content transition-colors"
+		>
+			{#if theme === "dark"}
+				<SunIcon size={14} />
+			{:else}
+				<MoonIcon size={14} />
+			{/if}
+		</button>
+	</div>
 </footer>

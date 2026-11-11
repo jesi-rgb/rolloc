@@ -24,6 +24,8 @@
 	import LibraryImageThumb from "$lib/components/LibraryImageThumb.svelte";
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import VirtualGrid from "$lib/components/VirtualGrid.svelte";
+	import Select from "$lib/components/Select.svelte";
+	import { ArrowLeftIcon } from "phosphor-svelte";
 	import {
 		resetThumbQueueProgress,
 		thumbQueueProgress,
@@ -330,56 +332,62 @@
 <div class="h-screen bg-base text-content flex flex-col">
 	<!-- Top bar -->
 	<header
-		class="flex items-center gap-base px-l py-sm border-b border-base-subtle shrink-0"
+		class="flex items-center gap-sm px-l h-12 border-b border-base-subtle shrink-0"
 	>
 		<a
 			href={resolve("/")}
-			class="text-content-muted hover:text-content transition text-sm"
-			>← Library</a
+			aria-label="Back to library"
+			title="Back to library"
+			class="-ml-xs p-xs rounded-md text-content-muted hover:text-content hover:bg-base-muted transition"
 		>
+			<ArrowLeftIcon size={16} />
+		</a>
 		{#if library}
-			<span class="font-semibold text-content">{library.label}</span>
-			{#if library.notes}
-				<span class="text-content-muted text-sm">{library.notes}</span>
-			{/if}
-			<span class="text-xs text-content-subtle">
-				{images.length} image{images.length !== 1 ? "s" : ""}
+			<span class="font-semibold text-content truncate">{library.label}</span>
+			<span class="flex items-center gap-xs text-xs text-content-subtle whitespace-nowrap">
+				{#if library.notes}
+					<span class="text-content-muted truncate max-w-80">{library.notes}</span>
+					<span>·</span>
+				{/if}
+				<span class="tabular-nums">
+					{images.length} image{images.length !== 1 ? "s" : ""}
+				</span>
 			</span>
 		{/if}
 		<div class="ml-auto flex items-center gap-base">
 			{#if !loading && library && images.length > 0}
 				<div class="flex items-center gap-xs">
 					<label for="sort-select" class="text-xs text-content-subtle"
-						>Sort by:</label
+						>Sort</label
 					>
-					<select
+					<Select
 						id="sort-select"
-						bind:value={sortBy}
-						class="text-xs px-2 py-1 rounded border border-base-subtle bg-base
-						       text-content hover:border-content-subtle focus:border-primary
-						       focus:outline-none transition"
-					>
-						<option value="createdAt-desc">Newest First</option>
-						<option value="createdAt-asc">Oldest First</option>
-					</select>
+						class="text-xs"
+						value={sortBy}
+						options={[
+							{ value: "createdAt-desc", label: "Newest first" },
+							{ value: "createdAt-asc", label: "Oldest first" },
+						]}
+						onChange={(v: SortKey) => (sortBy = v)}
+					/>
 				</div>
 				<div class="flex items-center gap-xs">
 					<label
 						for="group-select"
-						class="text-xs text-content-subtle">Group by:</label
+						class="text-xs text-content-subtle">Group</label
 					>
-					<select
+					<Select
 						id="group-select"
-						bind:value={groupBy}
-						class="text-xs px-2 py-1 rounded border border-base-subtle bg-base
-						       text-content hover:border-content-subtle focus:border-primary
-						       focus:outline-none transition"
-					>
-						<option value="none">None</option>
-						<option value="day">Day</option>
-						<option value="month">Month</option>
-						<option value="year">Year</option>
-					</select>
+						class="text-xs"
+						value={groupBy}
+						options={[
+							{ value: "none", label: "None" },
+							{ value: "day", label: "Day" },
+							{ value: "month", label: "Month" },
+							{ value: "year", label: "Year" },
+						]}
+						onChange={(v: GroupBy) => (groupBy = v)}
+					/>
 				</div>
 			{/if}
 		</div>
@@ -437,18 +445,12 @@
 					>
 						{#each groupedImages as group (group.label)}
 							<h2
-								class="text-lg font-semibold text-content mb-base mt-l
-						first:mt-0 border-b border-primary"
+								class="flex items-baseline gap-sm text-base font-semibold text-content
+								       mb-sm mt-xl first:mt-0 pb-xs border-b border-base-subtle"
 							>
 								{group.label}
-								<span
-									class="text-sm text-content-subtle font-normal ml-xs
-							"
-								>
-									({group.images.length} image{group.images
-										.length !== 1
-										? "s"
-										: ""})
+								<span class="text-xs text-content-subtle font-normal tabular-nums">
+									{group.images.length}
 								</span>
 							</h2>
 							<ul
