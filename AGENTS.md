@@ -146,7 +146,14 @@ expected when syncing writable local copies from props).
 
 ### Image processing (`src/lib/image/`)
 - `thumbgen.ts` — canvas/OffscreenCanvas resize to JPEG blob, with OPFS caching.
-- Phase 3 will add WebGPU pipeline modules here.
+- `pipeline.ts` + `shaders/` — the WebGPU preview pipeline.
+- `negative/` — the film conversion ported from NegPy: analysis (density bounds, meters,
+  neutral axis), the print curve solve, roll baseline. Pure TS, no GPU. **Mirrored module for
+  module by `src-tauri/src/negative/`** (native export + thumbnails) and by the kernel in
+  `shaders/hd_curve.wgsl`. Change all mirrors together; the `*.test.ts` files and the Rust
+  `#[cfg(test)]` modules assert the same vectors. Bump `ANALYSIS_VERSION` (TS `types.ts` and
+  Rust `negative/types.rs`) whenever a measurement changes, so cached analyses and roll
+  baselines are re-measured.
 
 ### UI (`src/lib/components/`, `src/routes/`)
 - Components are stateless or locally stateful — they do not import from `$app/stores`

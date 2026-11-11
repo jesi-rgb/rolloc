@@ -163,17 +163,24 @@ async function blobToBytes(blob: Blob): Promise<Uint8Array> {
 	return new Uint8Array(await blob.arrayBuffer());
 }
 
+// Cache file keys. The version is baked into the filename, so a change to the
+// generation pipeline invalidates stale cached files of that kind only.
+//   THUMB_VERSION   — bump when thumbnail rendering changes (size, encode, or
+//                     the film conversion in src-tauri/src/negative/).
+//   PREVIEW_VERSION — bump when PREVIEW_SIZE, JPEG_QUALITY or the preview
+//                     encode changes (previews are not film-converted).
+const THUMB_VERSION = 2;
+const PREVIEW_VERSION = 2;
+const thumbCacheFilename = (frameId: string): string => `${frameId}.v${THUMB_VERSION}.jpg`;
+const previewCacheFilename = (frameId: string): string => `${frameId}.v${PREVIEW_VERSION}.jpg`;
+
 export async function writeThumb(rollPath: string, frameId: string, blob: Blob): Promise<void> {
 	await ensureDirs(rollPath);
-	const path = await join(await thumbsDirPath(rollPath), `${frameId}.jpg`);
-	await writeFile(path, await blobToBytes(blob));
+	const dir = await thumbsDirPath(rollPath);
+	await writeFile(await join(dir, thumbCacheFilename(frameId)), await blobToBytes(blob));
+	// The unversioned thumb this one supersedes, if the roll predates versioning.
+	await remove(await join(dir, `${frameId}.jpg`)).catch(() => undefined);
 }
-
-// Preview cache file key. Version is baked into the filename so any change to
-// PREVIEW_SIZE, JPEG_QUALITY, or the encode pipeline automatically invalidates
-// stale cached previews while leaving thumbs untouched.
-const PREVIEW_VERSION = 2;
-const previewCacheFilename = (frameId: string): string => `${frameId}.v${PREVIEW_VERSION}.jpg`;
 
 export async function writePreview(rollPath: string, frameId: string, blob: Blob): Promise<void> {
 	await ensureDirs(rollPath);
@@ -183,7 +190,7 @@ export async function writePreview(rollPath: string, frameId: string, blob: Blob
 
 export async function readThumb(rollPath: string, frameId: string): Promise<Blob | null> {
 	try {
-		const path = await join(await thumbsDirPath(rollPath), `${frameId}.jpg`);
+		const path = await join(await thumbsDirPath(rollPath), thumbCacheFilename(frameId));
 		const bytes = await readFile(path);
 		return new Blob([bytes], { type: 'image/jpeg' });
 	} catch {
@@ -212,11 +219,13 @@ export async function readLegacyUnversionedPreview(rollPath: string, frameId: st
 }
 
 export async function deleteFrameCache(rollPath: string, frameId: string): Promise<void> {
-	const thumbPath = await join(await thumbsDirPath(rollPath), `${frameId}.jpg`);
+	const thumbPath = await join(await thumbsDirPath(rollPath), thumbCacheFilename(frameId));
+	const legacyThumbPath = await join(await thumbsDirPath(rollPath), `${frameId}.jpg`);
 	const previewPath = await join(await previewsDirPath(rollPath), previewCacheFilename(frameId));
 	const legacyPreviewPath = await join(await previewsDirPath(rollPath), `${frameId}.jpg`);
 	await Promise.all([
 		remove(thumbPath).catch(() => undefined),
+		remove(legacyThumbPath).catch(() => undefined),
 		remove(previewPath).catch(() => undefined),
 		remove(legacyPreviewPath).catch(() => undefined),
 	]);

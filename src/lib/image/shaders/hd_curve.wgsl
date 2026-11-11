@@ -1,56 +1,80 @@
 /**
- * NegPy Pass — H&D characteristic curve (photographic paper response)
+ * Print pass — NegPy 0.68 print curve (photographic paper response) or, for a slide, the
+ * transparency transfer, then the tone stage.
  *
- * Takes the normalized log-density image from the normalization pass and maps it
- * through a logistic sigmoid that simulates the Hurter & Driffield characteristic
- * curve of photographic paper.
+ * Takes the normalized value u (unclamped) from the normalization pass. A negative (0 = scene
+ * highlight, 1 = film base) is printed. B&W first collapses the channels to one value,
+ * u = bwWeights · (u_r, u_g, u_b), printed once on the base (green) curve. Per channel:
+ *   1. x = u + cmyOffset                                   (global filtration)
+ *   2. v = k·(x − pivot) + curv·x², held at the vertex     (straight line / Cast Removal core)
+ *   3. v += midtoneAmp · tanh((v − vStar) / gammaWidth)    (variable-gamma paper S-curve)
+ *   4. v += shadowCmy·w + highlightCmy·(1 − w),
+ *      w = sigmoid(regionalSharpness · (v − regionalCentre))   (regional CMY)
+ *   5. v1 = dMinEff + softplus(aHl·(v − dMinEff)) / aHl     (shoulder → paper white)
+ *   6. D  = dMaxEff − softplus(aSh·(dMaxEff − v1)) / aSh    (toe → paper black)
+ *   7. T  = max((10^−D − bpcBlack) / (1 − bpcBlack), 0)     (black point compensation)
+ *   8. out = T^(1/toneGamma), midtone curve, black/white point (tone preset)
+ * A slide (u = D / 3 over the fixed window, 0 = the source's white) goes through the transfer
+ * instead, exactly the identity at default settings:
+ *   1. D = k·(u + cmyOffset − pivot)                       (solve: k = 3, pivot = 0)
+ *   2. D += shadowCmy·w + highlightCmy·(1 − w), w as step 4 with the transfer's split geometry
+ *   3. D −= toe · w·softplus((D − toeKnee) / w),  w = kneeWidth            (shadow roll-off)
+ *   4. D += shoulder · w·softplus((shoulderKnee − D) / w)                  (highlight roll-off)
+ *   5. scene-linear source: T = displayRendering(sceneGain · 10^−D) (baseline EV + ACES fit);
+ *      display-referred source: T = srgbEncode(10^−D)^displayGamma
+ *   6. step 8 above (the shared tone-preset encode)
+ * then the Lightroom-style tone stage, B&W luma (a safeguard: the channels are already equal),
+ * vibrance/saturation.
  *
- * Full pipeline per channel:
- *   1. Apply global CMY log-space offset  (color timing, like dichroic filters)
- *   2. Compute diff = (val + cmy_offset) - pivot
- *   3. Compute toe / shoulder sigmoid masks for localized CMY and density shifts
- *   4. Compute toe / shoulder sigmoid damping → k_mod
- *   5. density = D_max × sigmoid(slope × diff_adj × k_mod)
- *   6. transmittance = 10^(-density)
- *   7. output = transmittance^(1/2.2)  ← gamma-encoded (matches negpy)
+ * The print ports NegPy's exposure.wgsl / negpy_core print_curve.rs, the transfer NegPy's
+ * transfer.wgsl / negpy_core transfer.rs. Every per-frame value (vStar, knees, BPC black) and
+ * every curve constant is computed on the CPU by `packPrintCurveUniforms` in
+ * src/lib/image/negative/print-curve.ts, so this kernel and the scalar mirrors (print-curve.ts,
+ * transfer.ts; src-tauri/src/negative/curve.rs, transfer.rs) share one prologue.
  *
- * The 1/2.2 gamma is part of negpy's paper simulation (not display sRGB).
- * The tonecurve pass skips its sRGB encode when receiving this output.
- * The "invert" is already baked in by the normalization pass (log stretch).
- * This pass is purely the paper-print simulation.
+ * filmType: 0 = C41, 1 = BW (one density before the curve, luminance after it), 2 = E6 (the
+ * transfer instead of the print).
  *
- * For B&W mode (filmType == 1), the output is converted to luminance after
- * the H&D curve and the result is spread across all three channels. This
- * matches negpy's approach where get_luminance() is applied post-curve.
- *
- * filmType uniform values:
- *   0 = C41 (color negative) — default behavior
- *   1 = BW  (black & white negative) — convert to luminance post-curve
- *   2 = E6  (slide/reversal positive) — same as C41 (no special handling here)
- *
- * Uniform struct is aligned to 16-byte boundaries (WGSL rules):
- *   pivots        : vec4<f32>   @ 0   (rgb + pad)    → 16 bytes
- *   slopes        : vec4<f32>   @ 16  (rgb + pad)    → 16 bytes
- *   cmyOffsets    : vec4<f32>   @ 32  (rgb + pad)    → 16 bytes
- *   shadowCmy     : vec4<f32>   @ 48  (rgb + pad)    → 16 bytes
- *   highlightCmy  : vec4<f32>   @ 64  (rgb + pad)    → 16 bytes
- *   toe           : f32         @ 80                 →  4 bytes
- *   toeWidth      : f32         @ 84                 →  4 bytes
- *   filmType      : u32         @ 88                 →  4 bytes
- *   shoulder      : f32         @ 92                 →  4 bytes
- *   shoulderWidth : f32         @ 96                 →  4 bytes
- *   exposure      : f32         @ 100                →  4 bytes
- *   shadows       : f32         @ 104                →  4 bytes
- *   highlights    : f32         @ 108                →  4 bytes
- *   dMax          : f32         @ 112                →  4 bytes
- *   vibrance      : f32         @ 116                →  4 bytes
- *   saturation    : f32         @ 120                →  4 bytes
- *   contrast      : f32         @ 124                →  4 bytes
- *   toneGamma     : f32         @ 128                →  4 bytes
- *   blackPoint    : f32         @ 132                →  4 bytes
- *   whitePoint    : f32         @ 136                →  4 bytes
- *   midtoneCurve  : f32         @ 140                →  4 bytes
- *   struct size = 144 bytes
+ * Uniform layout (std140-compatible, written by packPrintCurveUniforms):
+ *   slopes            : vec4<f32>  @ 0    (rgb + pad)
+ *   pivots            : vec4<f32>  @ 16   (rgb + pad)
+ *   curvatures        : vec4<f32>  @ 32   (rgb + pad)
+ *   cmyOffsets        : vec4<f32>  @ 48   (rgb + pad)
+ *   shadowCmy         : vec4<f32>  @ 64   (rgb + pad)
+ *   highlightCmy      : vec4<f32>  @ 80   (rgb + pad)
+ *   vStar             : f32        @ 96
+ *   dMinEff           : f32        @ 100
+ *   dMaxEff           : f32        @ 104
+ *   aHl               : f32        @ 108
+ *   aSh               : f32        @ 112
+ *   bpcBlack          : f32        @ 116
+ *   filmType          : u32        @ 120
+ *   exposure          : f32        @ 124
+ *   contrast          : f32        @ 128
+ *   shadows           : f32        @ 132
+ *   highlights        : f32        @ 136
+ *   vibrance          : f32        @ 140
+ *   saturation        : f32        @ 144
+ *   toneGamma         : f32        @ 148
+ *   blackPoint        : f32        @ 152
+ *   whitePoint        : f32        @ 156
+ *   midtoneCurve      : f32        @ 160
+ *   midtoneAmp        : f32        @ 164  (PAPER_MIDTONE_GAMMA · PAPER_GAMMA_WIDTH)
+ *   gammaWidth        : f32        @ 168  (PAPER_GAMMA_WIDTH)
+ *   regionalCentre    : f32        @ 172  (REFERENCE_PRINT_DENSITY; E6: wbSplitGeometry centre)
+ *   regionalSharpness : f32        @ 176  (REGIONAL_CMY_SHARPNESS; E6: wbSplitGeometry sharpness)
+ *   bwWeightR         : f32        @ 180  (BW_FILTER_WEIGHTS_NONE, NegPy BwFilter.NONE)
+ *   bwWeightG         : f32        @ 184
+ *   bwWeightB         : f32        @ 188
+ *   toeKnee           : f32        @ 192  (TRANSFER_TOE_KNEE)
+ *   shoulderKnee      : f32        @ 196  (TRANSFER_SHOULDER_KNEE)
+ *   kneeWidth         : f32        @ 200  (TRANSFER_KNEE_WIDTH)
+ *   toe               : f32        @ 204  (curve toe; the transfer reads it, the print its prologue)
+ *   shoulder          : f32        @ 208  (curve shoulder, likewise)
+ *   sceneGain         : f32        @ 212  (TRANSFER_BASELINE_GAIN = 2^TRANSFER_BASELINE_EV)
+ *   displayReferred   : u32        @ 216  (1 = 8-bit / bitmap source, 0 = scene-linear RAW)
+ *   displayGamma      : f32        @ 220  (STANDARD_TONE_GAMMA)
+ *   struct size = 224 bytes
  */
 
 // Rec. 709 luminance coefficients (matches negpy's LUMA_R, LUMA_G, LUMA_B)
@@ -59,28 +83,44 @@ const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
 struct HDCurveUniforms {
-	pivots           : vec4<f32>,
-	slopes           : vec4<f32>,
-	cmyOffsets       : vec4<f32>,
-	shadowCmy        : vec4<f32>,
-	highlightCmy     : vec4<f32>,
-	toe              : f32,
-	toeWidth         : f32,
-	filmType         : u32,     // 0 = C41, 1 = BW, 2 = E6
-	shoulder         : f32,
-	shoulderWidth    : f32,
-	exposure         : f32,     // Lightroom-style exposure in EV stops
-	shadows          : f32,     // Lightroom-style shadows, [-1, +1]
-	highlights       : f32,     // Lightroom-style highlights, [-1, +1]
-	dMax             : f32,
-	vibrance         : f32,
-	saturation       : f32,
-	contrast         : f32,     // Lightroom-style contrast, [-1, +1]
-	// ── Tone preset params (vec4 @ 128) ──
-	toneGamma        : f32,
-	blackPoint       : f32,
-	whitePoint       : f32,
-	midtoneCurve     : f32,
+	slopes            : vec4<f32>,
+	pivots            : vec4<f32>,
+	curvatures        : vec4<f32>,
+	cmyOffsets        : vec4<f32>,
+	shadowCmy         : vec4<f32>,
+	highlightCmy      : vec4<f32>,
+	vStar             : f32,
+	dMinEff           : f32,
+	dMaxEff           : f32,
+	aHl               : f32,
+	aSh               : f32,
+	bpcBlack          : f32,
+	filmType          : u32,     // 0 = C41, 1 = BW, 2 = E6
+	exposure          : f32,     // Lightroom-style exposure in EV stops
+	contrast          : f32,     // Lightroom-style contrast, [-1, +1]
+	shadows           : f32,     // Lightroom-style shadows, [-1, +1]
+	highlights        : f32,     // Lightroom-style highlights, [-1, +1]
+	vibrance          : f32,
+	saturation        : f32,
+	toneGamma         : f32,
+	blackPoint        : f32,
+	whitePoint        : f32,
+	midtoneCurve      : f32,
+	midtoneAmp        : f32,
+	gammaWidth        : f32,
+	regionalCentre    : f32,
+	regionalSharpness : f32,
+	bwWeightR         : f32,
+	bwWeightG         : f32,
+	bwWeightB         : f32,
+	toeKnee           : f32,
+	shoulderKnee      : f32,
+	kneeWidth         : f32,
+	toe               : f32,
+	shoulder          : f32,
+	sceneGain         : f32,
+	displayReferred   : u32,
+	displayGamma      : f32,
 }
 
 @group(0) @binding(0) var uSampler : sampler;
@@ -115,81 +155,127 @@ fn fast_sigmoid(x : f32) -> f32 {
 	return z / (1.0 + z);
 }
 
-/// Apply the full H&D pipeline to one channel.
-/// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
-///
-/// Core H&D math matches negpy's _apply_photometric_fused_kernel. This is the
-/// fixed film/paper base; exposure, contrast, shadows and highlights are applied
-/// afterwards by `apply_tone` in a display-referred domain.
-fn hd_channel(
-	pixel       : f32,
-	pivot       : f32,
-	slope       : f32,
-	cmy_offset  : f32,
-	shadow_cmy  : f32,
-	hi_cmy      : f32,
-	toe         : f32,
-	toe_width   : f32,
-	shoulder    : f32,
-	sh_width    : f32,
-	d_max       : f32,
+/// Overflow-free softplus log(1 + exp(x)).
+fn softplus(x : f32) -> f32 {
+	return max(x, 0.0) + log(1.0 + exp(-abs(x)));
+}
+
+/// Print density of one channel at normalized value `norm` (steps 1–6 of the header).
+/// Mirrors `printDensity` in src/lib/image/negative/print-curve.ts.
+fn print_density(
+	norm         : f32,
+	k            : f32,
+	pivot        : f32,
+	curv         : f32,
+	cmy_offset   : f32,
+	shadow_cmy   : f32,
+	hi_cmy       : f32,
 ) -> f32 {
-	let eps = 1e-6;
+	var x = norm + cmy_offset;
+	// NegPy quadratic_core: held at the vertex where the quadratic would fold back.
+	if (curv != 0.0) {
+		let vertex = -k / (2.0 * curv);
+		if ((curv > 0.0 && x < vertex) || (curv < 0.0 && x > vertex)) {
+			x = vertex;
+		}
+	}
+	var v = k * (x - pivot) + curv * x * x;
 
-	// 1. Global CMY shift
-	let val  = pixel + cmy_offset;
-	let diff = val - pivot;
+	// Paper S-curve. The argument is clamped because some backends build tanh from exp and
+	// overflow to NaN; tanh(±10) is already ±1 in f32, so the value is unchanged.
+	let s = clamp((v - u.vStar) / u.gammaWidth, -10.0, 10.0);
+	v = v + u.midtoneAmp * tanh(s);
 
-	// 2. Toe mask (shadows): active at high diff (dense in negative space)
-	// negpy: toe_width * (diff / max(1.0 - pivot, eps) - 0.5)
-	let t_val = toe_width * (diff / max(1.0 - pivot, eps) - 0.5);
-	let toe_mask = fast_sigmoid(t_val);
+	// Regional CMY: the shadow weight rises with density, the highlight weight falls.
+	let w = fast_sigmoid(u.regionalSharpness * (v - u.regionalCentre));
+	v = v + shadow_cmy * w + hi_cmy * (1.0 - w);
 
-	// 3. Shoulder mask (highlights): active at low diff (thin in negative space)
-	// negpy: -shoulder_width * (diff / max(pivot, eps) + 0.5)
-	let s_val = -sh_width * (diff / max(pivot, eps) + 0.5);
-	let shoulder_mask = fast_sigmoid(s_val);
+	let v1 = u.dMinEff + softplus(u.aHl * (v - u.dMinEff)) / u.aHl;
+	return u.dMaxEff - softplus(u.aSh * (u.dMaxEff - v1)) / u.aSh;
+}
 
-	// 4. Density offsets (multiplier 0.1 matches negpy)
-	let toe_density_offset      = toe      * toe_mask      * 0.1;
-	let shoulder_density_offset = shoulder * shoulder_mask  * 0.1;
+/// Density → display-referred print value (steps 7–8 of the header), in [0, 1].
+fn encode_print(density : f32) -> f32 {
+	// Black point compensation: paper black → display black.
+	let t = pow(10.0, -density);
+	return encode_tone(max((t - u.bpcBlack) / (1.0 - u.bpcBlack), 0.0));
+}
 
-	// 5. Localized CMY color shifts via toe/shoulder masks
-	let shadow_color_offset    = shadow_cmy * toe_mask;
-	let highlight_color_offset = hi_cmy     * shoulder_mask;
+/// The tone-preset encode of a display-linear value (step 8), shared by print and transfer.
+fn encode_tone(transmittance : f32) -> f32 {
+	// Perceptual encode with the tone preset gamma.
+	var out = clamp(pow(transmittance, 1.0 / u.toneGamma), 0.0, 1.0);
 
-	// 6. Adjusted diff (negpy sign convention)
-	let diff_adj = diff
-		+ shadow_color_offset + highlight_color_offset
-		- toe_density_offset + shoulder_density_offset;
-
-	// 7. Contrast damping (toe/shoulder reduce effective contrast)
-	let damp_toe      = toe      * toe_mask      * 0.5;
-	let damp_shoulder = shoulder * shoulder_mask  * 0.5;
-	var k_mod = 1.0 - damp_toe - damp_shoulder;
-	k_mod = clamp(k_mod, 0.1, 2.0);
-
-	// 8. H&D sigmoid → print density
-	let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
-
-	// 9. Density → transmittance → perceptual (gamma from tone preset)
-	// Matches negpy: transmittance ** (1.0 / gamma)
-	let transmittance = pow(10.0, -density);
-	var out = clamp(pow(max(transmittance, 0.0), 1.0 / u.toneGamma), 0.0, 1.0);
-
-	// 10. Apply midtone S-curve from tone preset
-	// midtoneCurve > 0 adds contrast, < 0 flattens.
-	// Uses a simple cubic: out = out + strength * out * (1 - out) * (2*out - 1)
-	// This preserves 0 and 1, pushes midtones toward/away from extremes.
+	// Midtone S-curve from the tone preset: midtoneCurve > 0 adds contrast, < 0 flattens.
+	// out + strength · out · (1 − out) · (2·out − 1) preserves 0 and 1.
 	if (u.midtoneCurve != 0.0) {
 		out = out + u.midtoneCurve * out * (1.0 - out) * (2.0 * out - 1.0);
 		out = clamp(out, 0.0, 1.0);
 	}
 
-	// 11. Apply black/white point from tone preset
+	// Black/white point from the tone preset.
 	out = clamp((out - u.blackPoint) / (u.whitePoint - u.blackPoint), 0.0, 1.0);
 
 	return out;
+}
+
+// ─── Transparency transfer (slides) ───────────────────────────────────────────
+
+/// width · log(1 + exp(−|x| / width)): NegPy's `_softplus(x, width)` less its max(x, 0) part,
+/// which the knees apply as a pull toward the knee instead.
+fn softplus_tail(x : f32, width : f32) -> f32 {
+	return width * log(1.0 + exp(-abs(x) / width));
+}
+
+/// Scene-linear → display-linear: Narkowicz's closed-form fit to the ACES RRT + sRGB ODT
+/// (NegPy `display_rendering`). Monotonic on [0, ∞), 0 → 0, clamped to 1.
+fn display_rendering(v : f32) -> f32 {
+	let x = max(v, 0.0);
+	let num = x * (2.51 * x + 0.03);
+	let den = x * (2.43 * x + 0.59) + 0.14;
+	return clamp(num / max(den, 1e-8), 0.0, 1.0);
+}
+
+/// IEC 61966-2-1 sRGB OETF: the inverse of the EOTF the normalization pass expanded with.
+fn srgb_encode(c : f32) -> f32 {
+	if (c <= 0.0031308) {
+		return c * 12.92;
+	}
+	return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+/// Display-linear value of one slide channel at normalized value `norm` (transfer steps 1–5 of
+/// the header). Mirrors `transferDisplay` in src/lib/image/negative/transfer.ts. Past a knee the
+/// linear part of its softplus is applied as (1 − a)·D + a·knee, so a full roll-off flattens
+/// onto the knee without cancelling D against itself and stays monotonic in f32.
+fn transfer_display(
+	norm         : f32,
+	k            : f32,
+	pivot        : f32,
+	cmy_offset   : f32,
+	shadow_cmy   : f32,
+	hi_cmy       : f32,
+) -> f32 {
+	var d = k * (norm + cmy_offset - pivot);
+	if (shadow_cmy != 0.0 || hi_cmy != 0.0) {
+		let w = fast_sigmoid(u.regionalSharpness * (d - u.regionalCentre));
+		d = d + shadow_cmy * w + hi_cmy * (1.0 - w);
+	}
+	if (u.toe != 0.0) {
+		let x = d - u.toeKnee;
+		let pulled = select(d, (1.0 - u.toe) * d + u.toe * u.toeKnee, x > 0.0);
+		d = pulled - u.toe * softplus_tail(x, u.kneeWidth);
+	}
+	if (u.shoulder != 0.0) {
+		let x = u.shoulderKnee - d;
+		let pulled = select(d, (1.0 - u.shoulder) * d + u.shoulder * u.shoulderKnee, x > 0.0);
+		d = pulled + u.shoulder * softplus_tail(x, u.kneeWidth);
+	}
+	let transmittance = pow(10.0, -d);
+	if (u.displayReferred != 0u) {
+		return pow(srgb_encode(clamp(transmittance, 0.0, 1.0)), u.displayGamma);
+	}
+	return display_rendering(transmittance * u.sceneGain);
 }
 
 // ─── Lightroom-style tone stage ───────────────────────────────────────────────
@@ -325,32 +411,50 @@ fn apply_vibrance_saturation(rgb: vec3<f32>, vibrance: f32, saturation: f32) -> 
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let color = textureSample(uTexture, uSampler, in.uv).rgb;
 
-	let r = hd_channel(
-		color.r, u.pivots.r, u.slopes.r,
-		u.cmyOffsets.r, u.shadowCmy.r, u.highlightCmy.r,
-		u.toe, u.toeWidth,
-		u.shoulder, u.shoulderWidth,
-		u.dMax,
-	);
-	let g = hd_channel(
-		color.g, u.pivots.g, u.slopes.g,
-		u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
-		u.toe, u.toeWidth,
-		u.shoulder, u.shoulderWidth,
-		u.dMax,
-	);
-	let b = hd_channel(
-		color.b, u.pivots.b, u.slopes.b,
-		u.cmyOffsets.b, u.shadowCmy.b, u.highlightCmy.b,
-		u.toe, u.toeWidth,
-		u.shoulder, u.shoulderWidth,
-		u.dMax,
-	);
+	var printed : vec3<f32>;
+	if (u.filmType == 1u) {
+		// B&W: one weighted density before the curve (NegPy exposure.wgsl `params.bw`), so
+		// channel differences in the scan cannot tint the tone scale. Solve shares one curve
+		// across the channels and zeroes the colour filtration for B&W.
+		let v = dot(color, vec3<f32>(u.bwWeightR, u.bwWeightG, u.bwWeightB));
+		printed = vec3<f32>(encode_print(print_density(
+			v, u.slopes.g, u.pivots.g, u.curvatures.g,
+			u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
+		)));
+	} else if (u.filmType == 2u) {
+		// Slide: the transparency transfer instead of the print, then the same encode.
+		printed = vec3<f32>(
+			encode_tone(transfer_display(
+				color.r, u.slopes.r, u.pivots.r, u.cmyOffsets.r, u.shadowCmy.r, u.highlightCmy.r,
+			)),
+			encode_tone(transfer_display(
+				color.g, u.slopes.g, u.pivots.g, u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
+			)),
+			encode_tone(transfer_display(
+				color.b, u.slopes.b, u.pivots.b, u.cmyOffsets.b, u.shadowCmy.b, u.highlightCmy.b,
+			)),
+		);
+	} else {
+		printed = vec3<f32>(
+			encode_print(print_density(
+				color.r, u.slopes.r, u.pivots.r, u.curvatures.r,
+				u.cmyOffsets.r, u.shadowCmy.r, u.highlightCmy.r,
+			)),
+			encode_print(print_density(
+				color.g, u.slopes.g, u.pivots.g, u.curvatures.g,
+				u.cmyOffsets.g, u.shadowCmy.g, u.highlightCmy.g,
+			)),
+			encode_print(print_density(
+				color.b, u.slopes.b, u.pivots.b, u.curvatures.b,
+				u.cmyOffsets.b, u.shadowCmy.b, u.highlightCmy.b,
+			)),
+		);
+	}
 
-	var out_rgb = apply_tone(vec3<f32>(r, g, b), u.toneGamma);
+	var out_rgb = apply_tone(printed, u.toneGamma);
 
-	// B&W mode: convert to luminance (Rec. 709) and output as grayscale
-	// This matches negpy's get_luminance() applied post-curve
+	// B&W mode: Rec. 709 luminance as grayscale. The channels are already equal here; this
+	// mirrors NegPy's post-curve collapse (exposure/processor.py) as a safeguard.
 	if (u.filmType == 1u) {
 		let lum = LUMA_R * out_rgb.r + LUMA_G * out_rgb.g + LUMA_B * out_rgb.b;
 		return vec4<f32>(lum, lum, lum, 1.0);

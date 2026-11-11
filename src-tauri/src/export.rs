@@ -22,7 +22,8 @@ use std::path::Path;
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use serde::Deserialize;
 
-use crate::process::{self, EffectiveEdit, LogPercentiles, TransformParams};
+use crate::negative::types::NegativeAnalysis;
+use crate::process::{self, EffectiveEdit, TransformParams};
 use crate::raw::{apply_orientation, read_exif_orientation};
 
 use rayon::prelude::*;
@@ -760,8 +761,9 @@ fn add_border(
 /// - `source_path` — absolute path to the RAW file on disk.
 /// - `export_path` — user-chosen destination path for the JPEG.
 /// - `edit`        — the fully-resolved edit parameters (serialized EffectiveEdit).
-/// - `log_perc`    — log percentiles from the preview render (for consistent normalization).
-///                   When null/None, percentiles are recomputed from the full-res data.
+/// - `analysis`    — the negative analysis cached from the preview render, so the export
+///                   normalizes like the preview. When null/None or stale, the full-res
+///                   data is re-measured.
 /// - `skip_wb`     — when true (film inversion), skip as-shot WB during decode.
 /// - `quality`     — JPEG quality 1–100.
 /// - `scale`       — output scale factor (0.25, 0.5, or 1.0). Defaults to 1.0 if omitted.
@@ -770,7 +772,7 @@ pub async fn export_native(
     source_path: String,
     export_path: String,
     edit: EffectiveEdit,
-    log_perc: Option<LogPercentiles>,
+    analysis: Option<NegativeAnalysis>,
     skip_wb: Option<bool>,
     quality: u8,
     scale: Option<f32>,
@@ -781,7 +783,7 @@ pub async fn export_native(
             &source_path,
             &export_path,
             &edit,
-            log_perc.as_ref(),
+            analysis.as_ref(),
             skip_wb.unwrap_or(false),
             quality,
             scale.unwrap_or(1.0),
@@ -796,7 +798,7 @@ fn inner_export_native(
     source_path: &str,
     export_path: &str,
     edit: &EffectiveEdit,
-    log_perc: Option<&LogPercentiles>,
+    analysis: Option<&NegativeAnalysis>,
     skip_wb: bool,
     quality: u8,
     scale: f32,
@@ -999,8 +1001,8 @@ fn inner_export_native(
     // Rebind as mutable for processing.
     let mut rgb_f32 = rgb_f32;
 
-    // ── Process through the CPU pipeline ─────────────────────────────────────
-    process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
+    // ── Process through the CPU pipeline (scene-linear RAW) ──────────────────
+    process::process_image(&mut rgb_f32, final_w, final_h, edit, analysis, true);
 
     // ── Apply transform (rotation + flips) and crop in a single pass ─────────
     // This combined operation correctly handles the fact that crop coordinates
@@ -1113,10 +1115,9 @@ fn srgb_to_linear(c: f32) -> f32 {
 /// - `source_path` — absolute path to the original JPEG/TIFF/PNG on disk.
 /// - `export_path` — user-chosen destination path for the JPEG.
 /// - `edit`        — fully-resolved edit parameters (matches preview).
-/// - `log_perc`    — log percentiles from the preview render (preserved so
-///                   colour normalization on the invert path matches what the
-///                   user sees). When None, `process_image` will recompute
-///                   from the full-res data.
+/// - `analysis`    — the negative analysis cached from the preview render (preserved
+///                   so the invert path matches what the user sees). When None or
+///                   stale, `process_image` re-measures the full-res data.
 /// - `quality`     — JPEG quality 1–100.
 /// - `scale`       — output scale factor (0.25, 0.5, or 1.0). Defaults to 1.0.
 #[tauri::command]
@@ -1124,7 +1125,7 @@ pub async fn export_image_native(
     source_path: String,
     export_path: String,
     edit: EffectiveEdit,
-    log_perc: Option<LogPercentiles>,
+    analysis: Option<NegativeAnalysis>,
     quality: u8,
     scale: Option<f32>,
     metadata: Option<ExifMetadata>,
@@ -1134,7 +1135,7 @@ pub async fn export_image_native(
             &source_path,
             &export_path,
             &edit,
-            log_perc.as_ref(),
+            analysis.as_ref(),
             quality,
             scale.unwrap_or(1.0),
             metadata.as_ref(),
@@ -1148,7 +1149,7 @@ fn inner_export_image_native(
     source_path: &str,
     export_path: &str,
     edit: &EffectiveEdit,
-    log_perc: Option<&LogPercentiles>,
+    analysis: Option<&NegativeAnalysis>,
     quality: u8,
     scale: f32,
     metadata: Option<&ExifMetadata>,
@@ -1216,7 +1217,8 @@ fn inner_export_image_native(
     drop(img);
 
     // ── Process through the CPU pipeline (same code path as RAW export) ─────
-    process::process_image(&mut rgb_f32, final_w, final_h, edit, log_perc);
+    // The image is display-referred: sRGB-expanded above, not scene-linear.
+    process::process_image(&mut rgb_f32, final_w, final_h, edit, analysis, false);
 
     // ── Transform + crop (rotation, flips, crop quad) ───────────────────────
     let crop = edit

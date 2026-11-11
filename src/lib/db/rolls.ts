@@ -17,7 +17,7 @@ import {
 	deleteFrame as idbDeleteFrame,
 } from './idb';
 import { listImageFiles, verifyPermission, isIgnoredPath } from '$lib/fs/directory';
-import type { Roll, Frame, FilmType } from '$lib/types';
+import type { Roll, Frame, FilmType, RollBaseline } from '$lib/types';
 import { DEFAULT_FRAME_EDIT, DEFAULT_ROLL_EDIT, DEFAULT_INVERSION_PARAMS } from '$lib/types';
 import {
 	hasSidecar,
@@ -218,6 +218,25 @@ export { getRolls, getRoll };
 export async function updateRoll(roll: Roll): Promise<void> {
 	await putRoll(roll);
 	await syncSidecarFrames(roll.id, roll);
+}
+
+/**
+ * Stores `baseline` on the roll, or removes it when null, and returns the
+ * updated roll (null when the roll no longer exists). Reads the stored roll
+ * first: a roll analysis runs for minutes, and writing back the caller's copy
+ * would drop roll edits made meanwhile.
+ */
+export async function setRollBaseline(
+	rollId: string,
+	baseline: RollBaseline | null,
+): Promise<Roll | null> {
+	const current = await getRoll(rollId);
+	if (!current) return null;
+	const next: Roll = { ...current };
+	if (baseline) next.baseline = baseline;
+	else delete next.baseline;
+	await updateRoll(next);
+	return next;
 }
 
 /**

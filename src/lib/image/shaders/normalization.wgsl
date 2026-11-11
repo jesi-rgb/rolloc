@@ -1,58 +1,50 @@
 /**
- * NegPy Pass — Log normalization
+ * Negative pass 1 — Log normalization
  *
- * Converts linear transmittance values to normalized log-density, which
+ * Converts linear transmittance to normalized log density, which
  * simultaneously inverts the negative and removes the orange mask.
  *
- * Algorithm (per channel, per pixel):
- *   0. sRGB → linear (when srgbExpand = 1) — the log-density model is defined
- *      on scene-linear transmittance.  RAW sources are already linear and set
- *      srgbExpand = 0.
- *   1. log10(max(pixel, ε))              — convert to log-density space
- *   2. (log - floor) / (ceil - floor)    — stretch per channel, UNCLAMPED
- *      For C-41/BW: floor < ceil → inverts the negative automatically.
- *      For E-6: floor > ceil → no inversion (slide film is already positive)
+ * Per channel, per pixel:
+ *   0. sRGB → linear (when srgbExpand = 1). The log-density model is defined
+ *      on scene-linear transmittance; RAW sources are already linear.
+ *   1. rgb = sourceMatrix · rgb, in linear light. Identity for a negative; a RAW
+ *      slide's camera matrix with the as-shot white balance folded in
+ *      (`slideCameraMatrix` in src/lib/image/negative/transfer.ts).
+ *   2. log10(max(pixel, ε))
+ *   3. u = (log − floor) / (ceil − floor), UNCLAMPED
  *
- * The output is deliberately NOT clamped to [0, 1].  Densities outside the
- * measured floor/ceil bounds are rolled off by the H&D curve's sigmoid in the
- * next pass, which is bounded by construction (density ∈ [0, dMax]).  Hard
- * clipping here would destroy every highlight above the ceil percentile and
- * every shadow below the floor before the curve ever saw them, producing the
- * abrupt digital clipping the softplus/sigmoid rolloff exists to avoid.
+ * `floor` is the dense end of the negative (scene highlights) and `ceil` the
+ * thin end (film base), so u = 0 is a scene highlight and u = 1 a scene
+ * shadow. The bounds are measured CPU-side (src/lib/image/negative/) and
+ * already carry the roll baseline. A slide normalizes over the transfer's fixed
+ * window (floor 0, ceil −3), so u = D / 3.
  *
- * floors / ceils are computed CPU-side from per-channel analysis of the
- * full image and passed as uniforms.  Floors use the mean of pixels below
- * the 0.001th percentile of mean luminance; ceils use the 99.999th
- * per-channel percentile.  Analysis crops 10% of each edge (matching
- * negpy's ProcessConfig.analysis_buffer = 0.10).
+ * The output is deliberately NOT clamped to [0, 1]. Densities outside the
+ * bounds are rolled off by the print curve's knees in the next pass; clipping
+ * here would destroy every highlight and shadow past the bounds before the
+ * curve ever saw them.
  *
- * For E-6 (slide) film, the percentiles are swapped (floor = bright, ceil = dark)
- * so the output is not inverted — matching negpy's behavior.
+ * Mirrored by `Normalizer` in src-tauri/src/negative/mod.rs.
  *
- * filmType uniform values:
- *   0 = C41 (color negative)
- *   1 = BW  (black & white negative)
- *   2 = E6  (slide/reversal positive)
- *
- * This pass is only executed when invert = 1u. When disabled the shader is
- * bypassed and the source texture is read directly by the hd_curve pass.
+ * Uniform layout (96 bytes):
+ *   floors     : vec4<f32>  @ 0   (rgb + pad)
+ *   ceils      : vec4<f32>  @ 16  (rgb + pad)
+ *   matrixCol0 : vec4<f32>  @ 32  (column 0 of sourceMatrix + pad)
+ *   matrixCol1 : vec4<f32>  @ 48
+ *   matrixCol2 : vec4<f32>  @ 64
+ *   srgbExpand : f32        @ 80
+ *   _pad0..2   : f32        @ 84..92
  */
 
 struct NormUniforms {
-	/// Per-channel log-density floor (0.5th percentile). vec3 + pad.
+	/// Per-channel log-density floor (dense end). vec3 + pad.
 	floors      : vec4<f32>,
-	/// Per-channel log-density ceil (99.5th percentile). vec3 + pad.
+	/// Per-channel log-density ceil (thin end). vec3 + pad.
 	ceils       : vec4<f32>,
-	/// Optional shadow cast correction vector (rgb + pad). Applied weighted by density^1.5.
-	shadowCast  : vec4<f32>,
-	/// Shadow cast correction strength [0,1].
-	shadowStrength : f32,
-	/// Manual white-point offset in log space (shifts ceils).
-	wpOffset    : f32,
-	/// Manual black-point offset in log space (shifts floors).
-	bpOffset    : f32,
-	/// Film type: 0 = C41, 1 = BW, 2 = E6
-	filmType    : u32,
+	/// Linear-light source matrix, column-major (each column vec3 + pad).
+	matrixCol0  : vec4<f32>,
+	matrixCol1  : vec4<f32>,
+	matrixCol2  : vec4<f32>,
 	/// 1.0 = source is sRGB-encoded and must be gamma-expanded to linear before
 	/// the log transform; 0.0 = source is already scene-linear (RAW path).
 	srgbExpand  : f32,
@@ -84,14 +76,8 @@ fn vs_main(in : VertIn) -> VertOut {
 	return out;
 }
 
-/// log10(v) = log(v) * log10(e)
-fn log10_f(v : f32) -> f32 {
-	return log(v) * 0.43429448190325183;
-}
-
-/// Exact IEC 61966-2-1 sRGB EOTF (gamma-encoded → linear light).
-/// Mirrors `srgb_to_linear` in invert.wgsl and export.rs so the preview and the
-/// native export feed identical linear data into the log transform.
+/// Exact IEC 61966-2-1 sRGB EOTF (gamma-encoded → linear light), so the
+/// preview and the native export feed identical linear data into the log.
 fn srgb_to_linear(c : f32) -> f32 {
 	if (c <= 0.04045) {
 		return c / 12.92;
@@ -103,10 +89,6 @@ fn srgb_to_linear(c : f32) -> f32 {
 fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 	let sampled = textureSample(uTexture, uSampler, in.uv).rgb;
 
-	// 0. sRGB → linear.  The log-density model is defined on linear
-	//    transmittance; log10 of a gamma-encoded value is not related to
-	//    log10 of the linear value by any affine map, so the floor/ceil
-	//    stretch would be measuring a different quantity than the exporter.
 	var color = sampled;
 	if (u.srgbExpand >= 0.5) {
 		color = vec3<f32>(
@@ -115,48 +97,20 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 			srgb_to_linear(sampled.b),
 		);
 	}
+	color = mat3x3<f32>(u.matrixCol0.xyz, u.matrixCol1.xyz, u.matrixCol2.xyz) * color;
 
 	let eps = 1e-6;
+	// log10(v) = ln(v) · log10(e)
+	let lc = log(max(color, vec3<f32>(eps))) * 0.43429448190325183;
 
-	// 1. Log conversion
-	let lc = vec3<f32>(
-		log10_f(max(color.r, eps)),
-		log10_f(max(color.g, eps)),
-		log10_f(max(color.b, eps)),
+	let floors = u.floors.rgb;
+	let delta  = u.ceils.rgb - floors;
+	// Sign-preserving guard against a degenerate window.
+	let safeDelta = select(
+		sign(delta) * max(abs(delta), vec3<f32>(eps)),
+		vec3<f32>(eps),
+		delta == vec3<f32>(0.0),
 	);
 
-	// 2. Per-channel linear stretch [floor, ceil] → [0, 1]
-	//    Independent per-channel stretch removes the orange mask and inverts.
-	//    For E6 (filmType == 2), the offsets are inverted to match negpy behavior.
-	var wp_off = u.wpOffset;
-	var bp_off = u.bpOffset;
-	if (u.filmType == 2u) {
-		// E6 slide film: invert the manual offset directions
-		wp_off = -u.wpOffset;
-		bp_off = -u.bpOffset;
-	}
-
-	let floors = u.floors.rgb + vec3<f32>(bp_off);
-	let ceils  = u.ceils.rgb  + vec3<f32>(wp_off);
-	let delta  = ceils - floors;
-	// Guard against degenerate range (divide by near-zero).
-	// Use sign-preserving epsilon to handle both negative (C41/BW) and positive (E6) ranges.
-	let safeDelta = sign(delta) * max(abs(delta), vec3<f32>(eps));
-
-	// Deliberately unclamped — see the header note.  The H&D sigmoid in the
-	// next pass is bounded, so out-of-range values roll off smoothly instead
-	// of being hard-clipped here.
-	var res = (lc - floors) / safeDelta;
-
-	// 3. Optional shadow cast correction (removes residual color cast in shadows).
-	if (u.shadowStrength > 0.0) {
-		// Weight by in-range density only; out-of-range values must not
-		// amplify the correction beyond its intended footprint.
-		let density = clamp((res.r + res.g + res.b) / 3.0, 0.0, 1.0);
-		let weight  = pow(density, 1.5);
-		let correction = u.shadowCast.rgb * weight * u.shadowStrength;
-		res = res + correction;
-	}
-
-	return vec4<f32>(res, 1.0);
+	return vec4<f32>((lc - floors) / safeDelta, 1.0);
 }

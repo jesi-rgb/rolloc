@@ -23,10 +23,8 @@ use std::io::{BufReader, Cursor};
 use image::{imageops::FilterType, DynamicImage};
 use tauri::ipc::Response;
 
-// ─── NegPy constants (must match process.rs / pipeline.ts) ────────────────────
-
-const D_MAX: f32 = 4.0;
-const ANALYSIS_BUFFER: f32 = 0.10;
+use crate::negative::types::FilmType;
+use crate::negative::{self, FilmCurve, Normalizer, PrintInputs};
 
 // ─── Command ──────────────────────────────────────────────────────────────────
 
@@ -39,7 +37,7 @@ const ANALYSIS_BUFFER: f32 = 0.10;
 /// - `film_type` — film processing mode:
 ///                 - "C41" — color negative (apply inversion + orange mask removal)
 ///                 - "BW"  — black & white negative (apply inversion + desaturate)
-///                 - "E6"  — slide/reversal (no inversion, just normalize)
+///                 - "E6"  — slide/reversal (the transparency transfer, no metering)
 ///                 - "none" or empty — no processing (for digital photos)
 ///
 /// Returns raw JPEG bytes as a binary `Response` (no base64 overhead).
@@ -106,229 +104,39 @@ fn apply_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
     }
 }
 
-// ─── Full NegPy inversion for thumbnails ──────────────────────────────────────
+// ─── Film render for thumbnails ───────────────────────────────────────────────
 
-/// Per-channel log-density percentiles for the normalization pass.
-struct LogPercentiles {
-    floors: [f32; 3],
-    ceils: [f32; 3],
-}
+/// Render a film thumbnail with the app's default settings: the same analysis,
+/// solve and curve as the editor preview and the native export
+/// (`crate::negative`). A negative is inverted through the print curve (B&W
+/// collapses to one density before it and prints gray); a slide goes through the
+/// transparency transfer, which at defaults returns the 8-bit source as it is.
+pub fn apply_default_render(img: &mut image::RgbImage, film_type: FilmType) {
+    let width = img.width() as usize;
+    let height = img.height() as usize;
 
-/// Compute per-channel log10 percentiles from linear f32 RGB pixels.
-/// Uses the same algorithm as process.rs for consistency.
-fn compute_log_percentiles(pixels: &[f32], width: usize, height: usize) -> LogPercentiles {
-    let log10_e: f32 = std::f32::consts::LOG10_E;
-    let eps: f32 = 1e-6;
-    let stride = 4_usize; // Sample every 4th pixel for speed
-
-    let cut_y = (height as f32 * ANALYSIS_BUFFER).floor() as usize;
-    let cut_x = (width as f32 * ANALYSIS_BUFFER).floor() as usize;
-    let start_y = cut_y;
-    let end_y = height.saturating_sub(cut_y);
-    let start_x = cut_x;
-    let end_x = width.saturating_sub(cut_x);
-
-    let mut r_log = Vec::new();
-    let mut g_log = Vec::new();
-    let mut b_log = Vec::new();
-    let mut mean_log = Vec::new();
-
-    let mut y = start_y;
-    while y < end_y {
-        let mut x = start_x;
-        while x < end_x {
-            let i = (y * width + x) * 3;
-            let r = pixels[i];
-            let g = pixels[i + 1];
-            let b = pixels[i + 2];
-
-            if r > eps && g > eps && b > eps {
-                let lr = r.ln() * log10_e;
-                let lg = g.ln() * log10_e;
-                let lb = b.ln() * log10_e;
-                r_log.push(lr);
-                g_log.push(lg);
-                b_log.push(lb);
-                mean_log.push((lr + lg + lb) / 3.0);
-            }
-            x += stride;
-        }
-        y += stride;
-    }
-
-    fn percentile(arr: &mut [f32], p: f32) -> f32 {
-        if arr.is_empty() {
-            return -1.0;
-        }
-        arr.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((p / 100.0) * (arr.len() as f32 - 1.0)).floor() as usize;
-        arr[idx.min(arr.len() - 1)]
-    }
-
-    // Floors: find the 0.001th percentile of mean luminance, select pixels
-    // at or below that threshold, and average their per-channel log values.
-    let mut mean_sorted = mean_log.clone();
-    let dark_threshold = percentile(&mut mean_sorted, 0.001);
-
-    let mut floor_r = 0.0_f32;
-    let mut floor_g = 0.0_f32;
-    let mut floor_b = 0.0_f32;
-    let mut dark_count = 0_usize;
-    for (i, &m) in mean_log.iter().enumerate() {
-        if m <= dark_threshold {
-            floor_r += r_log[i];
-            floor_g += g_log[i];
-            floor_b += b_log[i];
-            dark_count += 1;
-        }
-    }
-
-    let floors = if dark_count > 0 {
-        [
-            floor_r / dark_count as f32,
-            floor_g / dark_count as f32,
-            floor_b / dark_count as f32,
-        ]
-    } else {
-        [
-            percentile(&mut r_log.clone(), 0.001),
-            percentile(&mut g_log.clone(), 0.001),
-            percentile(&mut b_log.clone(), 0.001),
-        ]
-    };
-
-    LogPercentiles {
-        floors,
-        ceils: [
-            percentile(&mut r_log, 99.999),
-            percentile(&mut g_log, 99.999),
-            percentile(&mut b_log, 99.999),
-        ],
-    }
-}
-
-/// Numerically stable logistic sigmoid (matches process.rs).
-#[inline(always)]
-fn fast_sigmoid(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let z = x.exp();
-        z / (1.0 + z)
-    }
-}
-
-/// Process one channel through the H&D pipeline.
-/// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
-/// 
-/// Uses default NegPy parameters: density=1.0, grade=2.5
-#[inline(always)]
-fn hd_channel(pixel: f32) -> f32 {
-    // Default parameters (matching DEFAULT_INVERSION_PARAMS in types.ts)
-    let density = 1.0_f32;
-    let grade = 2.5_f32;
-    
-    // Derived values (matching process.rs constants)
-    let density_multiplier = 0.15_f32;
-    let grade_multiplier = 1.75_f32;
-    
-    let pivot = 1.0 - (0.01 + density * density_multiplier);
-    let slope = 1.0 + grade * grade_multiplier;
-    
-    let diff = pixel - pivot;
-    
-    // H&D sigmoid → print density
-    let density_out = D_MAX * fast_sigmoid(slope * diff);
-    
-    // Density → transmittance → perceptual gamma (1/2.2)
-    let transmittance = 10.0_f32.powf(-density_out);
-    transmittance.max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0)
-}
-
-/// Apply the full NegPy film-negative inversion to an RGB8 image.
-///
-/// Pipeline (matches process.rs negative path):
-///   1. Convert to f32 linear (sRGB decode)
-///   2. Compute log10 percentiles (auto black/white point)
-///   3. Log normalization — per-channel stretch inverts + removes orange mask
-///   4. H&D curve — sigmoid paper response with proper density/grade
-///   5. Gamma encode (1/2.2, already applied in hd_channel)
-pub fn apply_quick_inversion(img: &mut image::RgbImage) {
-    let (width, height) = img.dimensions();
-    let width = width as usize;
-    let height = height as usize;
-    let pixel_count = width * height;
-
-    // Skip inversion for very small images (likely corrupted or placeholders).
-    if pixel_count < 100 {
+    // Skip very small images (likely corrupted or placeholders).
+    if width * height < 100 {
         return;
     }
 
-    // ── Step 1: Convert to f32 linear ─────────────────────────────────────────
     let srgb_lut = srgb_to_linear_lut();
-    let mut pixels: Vec<f32> = Vec::with_capacity(pixel_count * 3);
-    for p in img.pixels() {
-        pixels.push(srgb_lut[p[0] as usize]);
-        pixels.push(srgb_lut[p[1] as usize]);
-        pixels.push(srgb_lut[p[2] as usize]);
-    }
+    let linear: Vec<f32> = img.as_raw().iter().map(|&v| srgb_lut[v as usize]).collect();
 
-    // ── Step 2: Compute log10 percentiles ─────────────────────────────────────
-    let perc = compute_log_percentiles(&pixels, width, height);
+    let analysis = negative::analyze(&linear, width, height, film_type, None);
+    let inputs = PrintInputs {
+        film_type,
+        ..PrintInputs::default()
+    };
+    let (bounds, curve_params) = negative::solve(&inputs, &analysis, None);
+    let normalizer = Normalizer::new(&bounds);
+    // Thumbnails decode 8-bit images: display-referred, never scene-linear.
+    let curve = FilmCurve::new(film_type, &curve_params, false);
 
-    // ── Step 3+4: Log normalization + H&D curve ───────────────────────────────
-    let log10_e: f32 = std::f32::consts::LOG10_E;
-    let eps: f32 = 1e-6;
-
-    for chunk in pixels.chunks_mut(3) {
-        let r = chunk[0];
-        let g = chunk[1];
-        let b = chunk[2];
-
-        // Log normalization (inverts + removes orange mask)
-        let lr = r.max(eps).ln() * log10_e;
-        let lg = g.max(eps).ln() * log10_e;
-        let lb = b.max(eps).ln() * log10_e;
-
-        let safe_delta = |f: f32, c: f32| -> f32 {
-            let d = c - f;
-            let abs_d = d.abs().max(eps);
-            d.signum() * abs_d
-        };
-
-        let nr = (lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0]);
-        let ng = (lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1]);
-        let nb = (lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2]);
-
-        // H&D curve (already gamma encodes to 1/2.2)
-        chunk[0] = hd_channel(nr);
-        chunk[1] = hd_channel(ng);
-        chunk[2] = hd_channel(nb);
-    }
-
-    // ── Step 5: Write back to image ───────────────────────────────────────────
-    for (i, p) in img.pixels_mut().enumerate() {
-        let idx = i * 3;
-        p[0] = (pixels[idx] * 255.0).round() as u8;
-        p[1] = (pixels[idx + 1] * 255.0).round() as u8;
-        p[2] = (pixels[idx + 2] * 255.0).round() as u8;
-    }
-}
-
-/// Apply B&W film negative inversion to an RGB8 image.
-///
-/// Same as C41 inversion but converts to grayscale after inversion.
-/// Uses luminance weights (Rec. 709) for the grayscale conversion.
-pub fn apply_bw_inversion(img: &mut image::RgbImage) {
-    // First apply the standard inversion
-    apply_quick_inversion(img);
-    
-    // Then convert to grayscale using luminance weights
-    for p in img.pixels_mut() {
-        let luma = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).round() as u8;
-        p[0] = luma;
-        p[1] = luma;
-        p[2] = luma;
+    // Standard tone preset: gamma 2.2, no tone stage.
+    let encode = |t: f32| (t.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+    for (p, lin) in img.pixels_mut().zip(linear.chunks_exact(3)) {
+        p.0 = curve.render(normalizer.apply([lin[0], lin[1], lin[2]])).map(encode);
     }
 }
 
@@ -349,74 +157,6 @@ fn srgb_to_linear_lut() -> [f32; 256] {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     })
-}
-
-/// Apply E6 slide film normalization (no inversion) to an RGB8 image.
-///
-/// Slide film is already positive — just apply auto levels normalization
-/// without the inversion step.
-pub fn apply_e6_normalize(img: &mut image::RgbImage) {
-    let (width, height) = img.dimensions();
-    let width = width as usize;
-    let height = height as usize;
-    let pixel_count = width * height;
-
-    if pixel_count < 100 {
-        return;
-    }
-
-    // Convert to f32 linear
-    let srgb_lut = srgb_to_linear_lut();
-    let mut pixels: Vec<f32> = Vec::with_capacity(pixel_count * 3);
-    for p in img.pixels() {
-        pixels.push(srgb_lut[p[0] as usize]);
-        pixels.push(srgb_lut[p[1] as usize]);
-        pixels.push(srgb_lut[p[2] as usize]);
-    }
-
-    // Compute percentiles for normalization
-    let perc = compute_log_percentiles(&pixels, width, height);
-    let log10_e: f32 = std::f32::consts::LOG10_E;
-    let eps: f32 = 1e-6;
-
-    // Normalize without inverting — stretch to full range
-    for chunk in pixels.chunks_mut(3) {
-        let r = chunk[0];
-        let g = chunk[1];
-        let b = chunk[2];
-
-        let lr = r.max(eps).ln() * log10_e;
-        let lg = g.max(eps).ln() * log10_e;
-        let lb = b.max(eps).ln() * log10_e;
-
-        let safe_delta = |f: f32, c: f32| -> f32 {
-            let d = c - f;
-            let abs_d = d.abs().max(eps);
-            d.signum() * abs_d
-        };
-
-        // Normalize but don't invert — floor becomes 0, ceil becomes 1.
-        // Unlike the C-41 path this clamp must stay: there is no bounded H&D
-        // sigmoid downstream, only `powf(1/2.2)`, which returns NaN for a
-        // negative base.
-        let nr = ((lr - perc.floors[0]) / safe_delta(perc.floors[0], perc.ceils[0])).clamp(0.0, 1.0);
-        let ng = ((lg - perc.floors[1]) / safe_delta(perc.floors[1], perc.ceils[1])).clamp(0.0, 1.0);
-        let nb = ((lb - perc.floors[2]) / safe_delta(perc.floors[2], perc.ceils[2])).clamp(0.0, 1.0);
-
-        // For E6, we DON'T invert — the normalized value IS the output
-        // Apply gamma correction (1/2.2) for display
-        chunk[0] = nr.powf(1.0 / 2.2);
-        chunk[1] = ng.powf(1.0 / 2.2);
-        chunk[2] = nb.powf(1.0 / 2.2);
-    }
-
-    // Write back
-    for (i, p) in img.pixels_mut().enumerate() {
-        let idx = i * 3;
-        p[0] = (pixels[idx] * 255.0).round() as u8;
-        p[1] = (pixels[idx + 1] * 255.0).round() as u8;
-        p[2] = (pixels[idx + 2] * 255.0).round() as u8;
-    }
 }
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
@@ -443,29 +183,20 @@ fn inner_generate(path: String, max_px: u32, quality: u8, film_type: &str) -> Re
     };
 
     // ── Film processing based on type ─────────────────────────────────────────
-    let rgb = match film_type {
-        "C41" => {
-            // Color negative — full inversion + orange mask removal
+    let film = match film_type {
+        "C41" => Some(FilmType::C41),
+        "BW" => Some(FilmType::Bw),
+        "E6" => Some(FilmType::E6),
+        // "none" or empty — no processing (digital photos / libraries)
+        _ => None,
+    };
+    let rgb = match film {
+        Some(film) => {
             let mut rgb = thumb.to_rgb8();
-            apply_quick_inversion(&mut rgb);
+            apply_default_render(&mut rgb, film);
             DynamicImage::from(rgb)
         }
-        "BW" => {
-            // B&W negative — inversion + grayscale conversion
-            let mut rgb = thumb.to_rgb8();
-            apply_bw_inversion(&mut rgb);
-            DynamicImage::from(rgb)
-        }
-        "E6" => {
-            // Slide/reversal — no inversion, just normalize
-            let mut rgb = thumb.to_rgb8();
-            apply_e6_normalize(&mut rgb);
-            DynamicImage::from(rgb)
-        }
-        _ => {
-            // "none" or empty — no processing (digital photos / libraries)
-            thumb
-        }
+        None => thumb,
     };
 
     // ── JPEG encode ───────────────────────────────────────────────────────────

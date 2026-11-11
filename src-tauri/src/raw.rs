@@ -51,7 +51,8 @@ use rawler::{
 use serde::Serialize;
 use tauri::ipc::Response;
 
-use crate::thumb::apply_quick_inversion;
+use crate::negative::types::FilmType;
+use crate::thumb::apply_default_render;
 
 // ─── EXIF orientation ────────────────────────────────────────────────────────
 
@@ -264,16 +265,16 @@ fn raw_to_float(raw: &RawImage) -> Result<Vec<f32>, String> {
 /// Fast thumbnail / preview for a RAW file.
 ///
 /// Returns raw JPEG bytes — same binary contract as `generate_thumb`.
-/// Applies quick film-negative inversion for recognizable preview.
+/// Inverts as a colour negative for a recognizable preview.
 #[tauri::command]
 pub async fn raw_thumb(path: String, max_px: u32, quality: u8) -> Result<Response, String> {
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         // ── 1. Try embedded JPEG preview ────────────────────────────────────
         if let Some(preview_img) = extract_embedded_preview(&path) {
             let resized = resize_to(preview_img, max_px);
-            // Apply quick inversion to the embedded preview
+            // Invert the embedded preview
             let mut rgb = resized.to_rgb8();
-            apply_quick_inversion(&mut rgb);
+            apply_default_render(&mut rgb, FilmType::C41);
             return encode_jpeg(DynamicImage::from(rgb), quality);
         }
 
@@ -299,9 +300,9 @@ pub async fn raw_thumb(path: String, max_px: u32, quality: u8) -> Result<Respons
             demosaic_superpixel(&raw)?
         };
         let resized = resize_to(rgb, max_px);
-        // Apply quick inversion to the demosaiced result
+        // Invert the demosaiced result
         let mut rgb_out = resized.to_rgb8();
-        apply_quick_inversion(&mut rgb_out);
+        apply_default_render(&mut rgb_out, FilmType::C41);
         encode_jpeg(DynamicImage::from(rgb_out), quality)
     })
     .await

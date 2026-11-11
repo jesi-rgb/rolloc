@@ -9,9 +9,10 @@ Built with Tauri + SvelteKit. All data stays on your machine — no backend, no 
 - Browse frames in a filmstrip grid with virtual scrolling; prefetches neighbours to eliminate flicker
 - Inspect EXIF metadata (aperture, shutter, ISO, film simulation, etc.) in a collapsible panel
 - RGB histogram per frame
-- **Inversion** (NegPy-backed pipeline): normalise → invert → colour matrix → tone/RGB curves → gamma encode
+- **Inversion** (print pipeline ported from NegPy): measure the negative's density range → log-normalise (removes the orange mask) → print curve with per-frame contrast, exposure and grey balance → tone/RGB curves
+  - Roll analysis: pool the density bounds across a roll so every frame shares its film base and mask
   - Real-time curves editor (drag control points, monotone cubic spline interpolation)
-  - White balance controls
+  - Colour timing (CMY filtration in absolute density), cast removal, grey-point picker
   - Per-channel exposure compensation
   - Roll-level defaults with per-frame overrides; originals never written
   - Undo / redo

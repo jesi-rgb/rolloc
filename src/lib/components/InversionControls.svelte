@@ -45,9 +45,7 @@
 
 	let filmType = $state<FilmType>(untrack(() => value.filmType));
 	let tonePreset = $state<TonePreset>(untrack(() => value.tonePreset));
-	let autoLevels = $state(untrack(() => value.autoLevels));
 	let autoExposure = $state(untrack(() => value.autoExposure));
-	let e6Normalize = $state(untrack(() => value.e6Normalize));
 	let density = $state(untrack(() => value.density));
 	let grade = $state(untrack(() => value.grade));
 	let cmyCyan = $state(untrack(() => value.cmyCyan));
@@ -59,6 +57,7 @@
 	let highlightCyan = $state(untrack(() => value.highlightCyan));
 	let highlightMagenta = $state(untrack(() => value.highlightMagenta));
 	let highlightYellow = $state(untrack(() => value.highlightYellow));
+	let castRemoval = $state(untrack(() => value.castRemoval));
 	let shadows = $state(untrack(() => value.shadows));
 	let highlights = $state(untrack(() => value.highlights));
 	let toe = $state(untrack(() => value.toe));
@@ -77,9 +76,7 @@
 		// then writing local copies — acceptable pattern per AGENTS.md.
 		filmType = value.filmType;
 		tonePreset = value.tonePreset;
-		autoLevels = value.autoLevels;
 		autoExposure = value.autoExposure;
-		e6Normalize = value.e6Normalize;
 		density = value.density;
 		grade = value.grade;
 		cmyCyan = value.cmyCyan;
@@ -91,6 +88,7 @@
 		highlightCyan = value.highlightCyan;
 		highlightMagenta = value.highlightMagenta;
 		highlightYellow = value.highlightYellow;
+		castRemoval = value.castRemoval;
 		shadows = value.shadows;
 		highlights = value.highlights;
 		toe = value.toe;
@@ -109,9 +107,7 @@
 		return {
 			filmType,
 			tonePreset,
-			autoLevels,
 			autoExposure,
-			e6Normalize,
 			density,
 			grade,
 			cmyCyan,
@@ -123,14 +119,11 @@
 			highlightCyan,
 			highlightMagenta,
 			highlightYellow,
+			castRemoval,
 			shadows,
 			highlights,
 			toe,
-			toeWidth: DEFAULT_INVERSION_PARAMS.toeWidth,
-			toeHardness: DEFAULT_INVERSION_PARAMS.toeHardness,
 			shoulder,
-			shoulderWidth: DEFAULT_INVERSION_PARAMS.shoulderWidth,
-			shoulderHardness: DEFAULT_INVERSION_PARAMS.shoulderHardness,
 			claheStrength,
 			vibrance,
 			saturation,
@@ -155,9 +148,7 @@
 		const d = DEFAULT_INVERSION_PARAMS;
 		filmType = d.filmType;
 		tonePreset = d.tonePreset;
-		autoLevels = d.autoLevels;
 		autoExposure = d.autoExposure;
-		e6Normalize = d.e6Normalize;
 		density = d.density;
 		grade = d.grade;
 		cmyCyan = d.cmyCyan;
@@ -169,6 +160,7 @@
 		highlightCyan = d.highlightCyan;
 		highlightMagenta = d.highlightMagenta;
 		highlightYellow = d.highlightYellow;
+		castRemoval = d.castRemoval;
 		shadows = d.shadows;
 		highlights = d.highlights;
 		toe = d.toe;
@@ -187,9 +179,7 @@
 	const isDefault = $derived(
 		filmType === DEFAULT_INVERSION_PARAMS.filmType &&
 			tonePreset === DEFAULT_INVERSION_PARAMS.tonePreset &&
-			autoLevels === DEFAULT_INVERSION_PARAMS.autoLevels &&
 			autoExposure === DEFAULT_INVERSION_PARAMS.autoExposure &&
-			e6Normalize === DEFAULT_INVERSION_PARAMS.e6Normalize &&
 			density === DEFAULT_INVERSION_PARAMS.density &&
 			grade === DEFAULT_INVERSION_PARAMS.grade &&
 			cmyCyan === DEFAULT_INVERSION_PARAMS.cmyCyan &&
@@ -201,6 +191,7 @@
 			highlightCyan === DEFAULT_INVERSION_PARAMS.highlightCyan &&
 			highlightMagenta === DEFAULT_INVERSION_PARAMS.highlightMagenta &&
 			highlightYellow === DEFAULT_INVERSION_PARAMS.highlightYellow &&
+			castRemoval === DEFAULT_INVERSION_PARAMS.castRemoval &&
 			shadows === DEFAULT_INVERSION_PARAMS.shadows &&
 			highlights === DEFAULT_INVERSION_PARAMS.highlights &&
 			toe === DEFAULT_INVERSION_PARAMS.toe &&
@@ -277,87 +268,108 @@
 		/>
 	</section>
 
-	<!-- ── Global CMY ──────────────────────────────────────────────────────── -->
-	<section>
-		<div class="flex items-center justify-between mb-sm">
-			<h4
-				class="text-xs font-semibold text-content-muted uppercase tracking-wider"
-			>
-				Color timing
-			</h4>
-			{#if onToggleWbPicker}
-				<ToggleButton
-					active={wbPickerActive}
-					onclick={onToggleWbPicker}
-					title="Pick a neutral white or gray pixel on the image to auto-set color balance"
+	<!-- ── Global CMY (B&W drops the colour filtration) ────────────────────── -->
+	{#if filmType !== "BW"}
+		<section>
+			<div class="flex items-center justify-between mb-sm">
+				<h4
+					class="text-xs font-semibold text-content-muted uppercase tracking-wider"
 				>
-					<EyedropperSampleIcon weight="duotone" size={18} />
-					White Balance
-				</ToggleButton>
-			{/if}
-		</div>
-		<div class="flex gap-md items-start mb-sm">
-			<!-- Temperature / tint pad drives the yellow and magenta timing. -->
-			<WhiteBalancePad
-				temperature={cmyYellow}
-				tint={cmyMagenta}
-				onChange={(t: number, g: number) => {
-					cmyYellow = t;
-					cmyMagenta = g;
+					Color timing
+				</h4>
+				{#if onToggleWbPicker}
+					<ToggleButton
+						active={wbPickerActive}
+						onclick={onToggleWbPicker}
+						title="Pick a neutral white or gray pixel on the image to auto-set color balance"
+					>
+						<EyedropperSampleIcon weight="duotone" size={18} />
+						White Balance
+					</ToggleButton>
+				{/if}
+			</div>
+			<div class="flex gap-md items-start mb-sm">
+				<!-- Temperature / tint pad drives the yellow and magenta timing. -->
+				<WhiteBalancePad
+					temperature={cmyYellow}
+					tint={cmyMagenta}
+					onChange={(t: number, g: number) => {
+						cmyYellow = t;
+						cmyMagenta = g;
+						emit();
+					}}
+					onCommit={(t: number, g: number) => {
+						cmyYellow = t;
+						cmyMagenta = g;
+						commit();
+					}}
+				/>
+			</div>
+			<JointSlider
+				min={-1}
+				max={1}
+				step={0.01}
+				signed
+				slots={[
+					{
+						id: "cyan",
+						label: "C",
+						value: cmyCyan,
+						color: "#00bcd4",
+						negativeColor: "#f44336",
+						defaultValue: DEFAULT_INVERSION_PARAMS.cmyCyan,
+					},
+					{
+						id: "magenta",
+						label: "M",
+						value: cmyMagenta,
+						color: "#e91e63",
+						negativeColor: "#4caf50",
+						defaultValue: DEFAULT_INVERSION_PARAMS.cmyMagenta,
+					},
+					{
+						id: "yellow",
+						label: "Y",
+						value: cmyYellow,
+						color: "#ffeb3b",
+						negativeColor: "#2196f3",
+						defaultValue: DEFAULT_INVERSION_PARAMS.cmyYellow,
+					},
+				]}
+				onChange={(id, v) => {
+					if (id === "cyan") cmyCyan = v;
+					else if (id === "magenta") cmyMagenta = v;
+					else if (id === "yellow") cmyYellow = v;
 					emit();
 				}}
-				onCommit={(t: number, g: number) => {
-					cmyYellow = t;
-					cmyMagenta = g;
+				onCommit={(id, v) => {
+					if (id === "cyan") cmyCyan = v;
+					else if (id === "magenta") cmyMagenta = v;
+					else if (id === "yellow") cmyYellow = v;
 					commit();
 				}}
 			/>
-		</div>
-		<JointSlider
-			min={-1}
-			max={1}
-			step={0.01}
-			signed
-			slots={[
-				{
-					id: "cyan",
-					label: "C",
-					value: cmyCyan,
-					color: "#00bcd4",
-					negativeColor: "#f44336",
-					defaultValue: DEFAULT_INVERSION_PARAMS.cmyCyan,
-				},
-				{
-					id: "magenta",
-					label: "M",
-					value: cmyMagenta,
-					color: "#e91e63",
-					negativeColor: "#4caf50",
-					defaultValue: DEFAULT_INVERSION_PARAMS.cmyMagenta,
-				},
-				{
-					id: "yellow",
-					label: "Y",
-					value: cmyYellow,
-					color: "#ffeb3b",
-					negativeColor: "#2196f3",
-					defaultValue: DEFAULT_INVERSION_PARAMS.cmyYellow,
-				},
-			]}
-			onChange={(id, v) => {
-				if (id === "cyan") cmyCyan = v;
-				else if (id === "magenta") cmyMagenta = v;
-				else if (id === "yellow") cmyYellow = v;
-				emit();
-			}}
-			onCommit={(id, v) => {
-				if (id === "cyan") cmyCyan = v;
-				else if (id === "magenta") cmyMagenta = v;
-				else if (id === "yellow") cmyYellow = v;
-				commit();
-			}}
-		/>
-	</section>
+			{#if filmType === "C41"}
+				<div class="mt-sm">
+					<LabeledRange
+						id="inv-cast-removal"
+						label="Cast removal"
+						min={0}
+						max={1}
+						step={0.01}
+						fat
+						value={castRemoval}
+						defaultValue={DEFAULT_INVERSION_PARAMS.castRemoval}
+						onchange={(v) => {
+							castRemoval = v;
+							emit();
+						}}
+						oncommit={commit}
+					/>
+				</div>
+			{/if}
+		</section>
+	{/if}
 
 	<!-- ── Brightness + Contrast ──────────────────────────────────────────── -->
 	<!--
@@ -533,56 +545,58 @@
 				oncommit={commit}
 				signed
 			/>
-			<!-- Shadow CMY tint -->
-			<div class="flex flex-col gap-xs">
-				<span class="text-xs text-content-subtle">Shadow tint</span>
-				<JointSlider
-					min={-1}
-					max={1}
-					step={0.01}
-					height={30}
-					signed
-					slots={[
-						{
-							id: "cyan",
-							label: "C",
-							value: shadowCyan,
-							color: "#00bcd4",
-							negativeColor: "#f44336",
-							defaultValue: DEFAULT_INVERSION_PARAMS.shadowCyan,
-						},
-						{
-							id: "magenta",
-							label: "M",
-							value: shadowMagenta,
-							color: "#e91e63",
-							negativeColor: "#4caf50",
-							defaultValue:
-								DEFAULT_INVERSION_PARAMS.shadowMagenta,
-						},
-						{
-							id: "yellow",
-							label: "Y",
-							value: shadowYellow,
-							color: "#ffeb3b",
-							negativeColor: "#2196f3",
-							defaultValue: DEFAULT_INVERSION_PARAMS.shadowYellow,
-						},
-					]}
-					onChange={(id, v) => {
-						if (id === "cyan") shadowCyan = v;
-						else if (id === "magenta") shadowMagenta = v;
-						else if (id === "yellow") shadowYellow = v;
-						emit();
-					}}
-					onCommit={(id, v) => {
-						if (id === "cyan") shadowCyan = v;
-						else if (id === "magenta") shadowMagenta = v;
-						else if (id === "yellow") shadowYellow = v;
-						commit();
-					}}
-				/>
-			</div>
+			{#if filmType !== "BW"}
+				<!-- Shadow CMY tint -->
+				<div class="flex flex-col gap-xs">
+					<span class="text-xs text-content-subtle">Shadow tint</span>
+					<JointSlider
+						min={-1}
+						max={1}
+						step={0.01}
+						height={30}
+						signed
+						slots={[
+							{
+								id: "cyan",
+								label: "C",
+								value: shadowCyan,
+								color: "#00bcd4",
+								negativeColor: "#f44336",
+								defaultValue: DEFAULT_INVERSION_PARAMS.shadowCyan,
+							},
+							{
+								id: "magenta",
+								label: "M",
+								value: shadowMagenta,
+								color: "#e91e63",
+								negativeColor: "#4caf50",
+								defaultValue:
+									DEFAULT_INVERSION_PARAMS.shadowMagenta,
+							},
+							{
+								id: "yellow",
+								label: "Y",
+								value: shadowYellow,
+								color: "#ffeb3b",
+								negativeColor: "#2196f3",
+								defaultValue: DEFAULT_INVERSION_PARAMS.shadowYellow,
+							},
+						]}
+						onChange={(id, v) => {
+							if (id === "cyan") shadowCyan = v;
+							else if (id === "magenta") shadowMagenta = v;
+							else if (id === "yellow") shadowYellow = v;
+							emit();
+						}}
+						onCommit={(id, v) => {
+							if (id === "cyan") shadowCyan = v;
+							else if (id === "magenta") shadowMagenta = v;
+							else if (id === "yellow") shadowYellow = v;
+							commit();
+						}}
+					/>
+				</div>
+			{/if}
 
 			<LabeledRange
 				id="inv-highlights"
@@ -599,58 +613,60 @@
 				oncommit={commit}
 				signed
 			/>
-			<!-- Highlight CMY tint -->
-			<div class="flex flex-col gap-xs">
-				<span class="text-xs text-content-subtle">Highlight tint</span>
-				<JointSlider
-					min={-1}
-					max={1}
-					step={0.01}
-					height={30}
-					signed
-					slots={[
-						{
-							id: "cyan",
-							label: "C",
-							value: highlightCyan,
-							color: "#00bcd4",
-							negativeColor: "#f44336",
-							defaultValue:
-								DEFAULT_INVERSION_PARAMS.highlightCyan,
-						},
-						{
-							id: "magenta",
-							label: "M",
-							value: highlightMagenta,
-							color: "#e91e63",
-							negativeColor: "#4caf50",
-							defaultValue:
-								DEFAULT_INVERSION_PARAMS.highlightMagenta,
-						},
-						{
-							id: "yellow",
-							label: "Y",
-							value: highlightYellow,
-							color: "#ffeb3b",
-							negativeColor: "#2196f3",
-							defaultValue:
-								DEFAULT_INVERSION_PARAMS.highlightYellow,
-						},
-					]}
-					onChange={(id, v) => {
-						if (id === "cyan") highlightCyan = v;
-						else if (id === "magenta") highlightMagenta = v;
-						else if (id === "yellow") highlightYellow = v;
-						emit();
-					}}
-					onCommit={(id, v) => {
-						if (id === "cyan") highlightCyan = v;
-						else if (id === "magenta") highlightMagenta = v;
-						else if (id === "yellow") highlightYellow = v;
-						commit();
-					}}
-				/>
-			</div>
+			{#if filmType !== "BW"}
+				<!-- Highlight CMY tint -->
+				<div class="flex flex-col gap-xs">
+					<span class="text-xs text-content-subtle">Highlight tint</span>
+					<JointSlider
+						min={-1}
+						max={1}
+						step={0.01}
+						height={30}
+						signed
+						slots={[
+							{
+								id: "cyan",
+								label: "C",
+								value: highlightCyan,
+								color: "#00bcd4",
+								negativeColor: "#f44336",
+								defaultValue:
+									DEFAULT_INVERSION_PARAMS.highlightCyan,
+							},
+							{
+								id: "magenta",
+								label: "M",
+								value: highlightMagenta,
+								color: "#e91e63",
+								negativeColor: "#4caf50",
+								defaultValue:
+									DEFAULT_INVERSION_PARAMS.highlightMagenta,
+							},
+							{
+								id: "yellow",
+								label: "Y",
+								value: highlightYellow,
+								color: "#ffeb3b",
+								negativeColor: "#2196f3",
+								defaultValue:
+									DEFAULT_INVERSION_PARAMS.highlightYellow,
+							},
+						]}
+						onChange={(id, v) => {
+							if (id === "cyan") highlightCyan = v;
+							else if (id === "magenta") highlightMagenta = v;
+							else if (id === "yellow") highlightYellow = v;
+							emit();
+						}}
+						onCommit={(id, v) => {
+							if (id === "cyan") highlightCyan = v;
+							else if (id === "magenta") highlightMagenta = v;
+							else if (id === "yellow") highlightYellow = v;
+							commit();
+						}}
+					/>
+				</div>
+			{/if}
 		</div>
 	</section>
 

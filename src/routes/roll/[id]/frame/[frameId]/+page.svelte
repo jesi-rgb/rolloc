@@ -59,7 +59,6 @@
     EffectiveEdit,
     CropQuad,
     TransformParams,
-    CachedLogPercentiles,
     CropAspect,
   } from "$lib/types";
   import CurvesEditor from "$lib/components/CurvesEditor.svelte";
@@ -73,6 +72,8 @@
   import { detectHorizonCandidates } from "$lib/image/horizon-detect";
   import { rotationCoverZoom } from "$lib/image/geometry";
   import type { HorizonCandidate } from "$lib/image/horizon-detect";
+  import { wbShiftsFromLog } from "$lib/image/negative/filtration";
+  import { slidePickWb } from "$lib/image/negative/transfer";
   import {
     ArrowFatUpIcon,
     CommandIcon,
@@ -144,7 +145,7 @@
   let originalHeight = $state(1);
   /** Histogram data from the last render (for curves editor visualization). */
   let currentHistogram = $state<
-    import("$lib/image/pipeline").ChannelHistograms | null
+    import("$lib/image/negative/analysis").ChannelHistograms | null
   >(null);
   /**
    * Id of the frame whose pixels are currently on the canvas. Lags `frameId`
@@ -570,11 +571,10 @@
     }
     return job
       .then(() => {
-        // Capture histogram from lastLogPerc after render completes
-        currentHistogram = p.lastLogPerc?.histograms ?? null;
+        currentHistogram = p.lastHistograms;
         paintedFrameId = fid;
-        // Persist log percentiles so batch export can match this preview.
-        persistLogPerc();
+        // Persist the analysis so batch export can match this preview.
+        persistAnalysis();
       })
       .catch((err: unknown) => {
         console.error("[frame] render error:", err);
@@ -583,35 +583,19 @@
   }
 
   /**
-   * Persist the pipeline's current log percentiles onto the frame record so
-   * batch export can reproduce the exact same normalization.  Only writes if
-   * the values actually changed (avoids IDB churn on every render).
+   * Persist the pipeline's analysis of this negative onto the frame record so
+   * batch export renders the same picture. Only writes when it changed (avoids
+   * IDB churn on every render).
    */
-  function persistLogPerc(): void {
-    const lp = pipeline?.lastLogPerc;
-    if (!lp || !frame) return;
-    const cached: CachedLogPercentiles = {
-      floors: lp.floors,
-      ceils: lp.ceils,
-      autoExposure: lp.autoExposure,
-    };
-    // Skip if unchanged.
-    const prev = frame.cachedLogPerc;
-    if (
-      prev &&
-      prev.floors[0] === cached.floors[0] &&
-      prev.floors[1] === cached.floors[1] &&
-      prev.floors[2] === cached.floors[2] &&
-      prev.ceils[0] === cached.ceils[0] &&
-      prev.ceils[1] === cached.ceils[1] &&
-      prev.ceils[2] === cached.ceils[2] &&
-      prev.autoExposure === cached.autoExposure
-    ) {
+  function persistAnalysis(): void {
+    const analysis = pipeline?.lastAnalysis;
+    if (!analysis || !frame) return;
+    if (JSON.stringify(frame.cachedAnalysis) === JSON.stringify(analysis)) {
       return;
     }
-    frame.cachedLogPerc = cached;
+    frame.cachedAnalysis = analysis;
     putFrame(structuredClone($state.snapshot(frame))).catch((err: unknown) => {
-      console.error("[frame] persistLogPerc failed:", err);
+      console.error("[frame] persistAnalysis failed:", err);
     });
   }
 
@@ -620,14 +604,8 @@
   /** When true the canvas cursor changes to crosshair and the next click samples a pixel. */
   let wbPickerActive = $state(false);
 
-  /**
-   * CMY_MAX_DENSITY from pipeline.ts — the scale factor for CMY slider units to
-   * log-density. Must stay in sync with the constant in pipeline.ts.
-   */
-  const CMY_MAX_DENSITY = 0.15;
-
   function toggleWbPicker(): void {
-    wbPickerActive = !wbPickerActive;
+    wbPickerActive = wbPickerAvailable && !wbPickerActive;
   }
 
   function cancelWbPicker(): void {
@@ -788,89 +766,44 @@
   }
 
   /**
-   * Sample a pixel from the last rendered output via GPU readback, treat it as
-   * the white/neutral point, and adjust the global CMY sliders accordingly.
-   *
-   * Uses pipeline.readPixels() which copies from the rgba8unorm output texture —
-   * the only reliable readback path for WebGPU canvases in Tauri.
+   * Neutralize the clicked patch with the global filtration: sample the log
+   * density at the click, normalize it with the bounds the frame renders with,
+   * and set absolute sliders. A negative (NegPy `_handle_wb_pick`, global region)
+   * sets magenta/yellow with cyan reset to 0; a slide (NegPy `slide_pick_wb`) sets
+   * cyan and yellow along the temperature direction and magenta as the tint. The
+   * result does not depend on the current sliders, so repeated clicks on the same
+   * patch are stable.
    */
   function handleWbPickerClick(e: MouseEvent): void {
     if (!wbPickerActive || !canvasEl || !pipeline) return;
 
-    // Map pointer coords (CSS px) to readback-texture pixel coords.
-    // The canvas backing store is sized to the display box, but readPixels()
-    // reads the full-resolution readback texture, so scale against that.
+    // Click position normalized over the displayed canvas (matte included);
+    // the pipeline undoes flips, matte, crop and rotation from here.
     const rect = canvasEl.getBoundingClientRect();
-    const readW = pipeline.lastOutputWidth;
-    const readH = pipeline.lastOutputHeight;
-    if (readW === 0 || readH === 0) return;
-    const scaleX = readW / rect.width;
-    const scaleY = readH / rect.height;
-    const px = Math.round((e.clientX - rect.left) * scaleX);
-    const py = Math.round((e.clientY - rect.top) * scaleY);
+    if (rect.width === 0 || rect.height === 0) return;
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
 
     wbPickerActive = false;
-
-    // Capture frame/roll refs before entering async context.
     if (!frame || !roll) return;
-    const currentFrame = frame;
-    const currentRoll = roll;
 
-    // Sample a 3×3 neighbourhood centred on the click to reduce noise.
-    const sampleSize = 3;
-    const half = Math.floor(sampleSize / 2);
-    const x0 = Math.max(0, px - half);
-    const y0 = Math.max(0, py - half);
-    const w = Math.min(sampleSize, readW - x0);
-    const h = Math.min(sampleSize, readH - y0);
+    const raw = pipeline.sampleSourceLog(nx, ny);
+    const bounds = pipeline.lastBounds;
+    if (!raw || !bounds) return;
 
-    pipeline
-      .readPixels(x0, y0, w, h)
-      .then((pixels) => {
-        if (!pixels) return;
-        const n = w * h;
-
-        let sumR = 0,
-          sumG = 0,
-          sumB = 0;
-        for (let i = 0; i < n; i++) {
-          sumR += pixels[i * 4];
-          sumG += pixels[i * 4 + 1];
-          sumB += pixels[i * 4 + 2];
-        }
-
-        const r = Math.max(sumR / n / 255, 1e-6);
-        const g = Math.max(sumG / n / 255, 1e-6);
-        const b = Math.max(sumB / n / 255, 1e-6);
-
-        // Ignore near-black samples — not useful as a white reference.
-        if (r < 1e-4 && g < 1e-4 && b < 1e-4) return;
-
-        const current = resolveEdit(currentRoll, currentFrame).inversionParams;
-
-        // Negpy algorithm (calculate_wb_shifts / _handle_wb_pick):
-        //   Red is the anchor channel — cyan is always reset to 0.
-        //   Magenta delta = log10(g/r) / CMY_MAX_DENSITY
-        //   Yellow  delta = log10(b/r) / CMY_MAX_DENSITY
-        //   A damping factor of 0.4 prevents overcorrection on the first click.
-        const DAMPING = 0.4;
-        const deltaMagenta = (Math.log10(g / r) / CMY_MAX_DENSITY) * DAMPING;
-        const deltaYellow = (Math.log10(b / r) / CMY_MAX_DENSITY) * DAMPING;
-
-        const clamp = (v: number): number => Math.max(-1, Math.min(1, v));
-
-        saveEdit({
-          inversionParams: {
-            ...current,
-            cmyCyan: 0,
-            cmyMagenta: clamp(current.cmyMagenta + deltaMagenta),
-            cmyYellow: clamp(current.cmyYellow + deltaYellow),
-          },
-        });
-      })
-      .catch((err: unknown) => {
-        console.error("[wb-picker] readPixels failed:", err);
-      });
+    const current = resolveEdit(roll, frame).inversionParams;
+    const filtration =
+      current.filmType === "E6"
+        ? slidePickWb(raw, bounds)
+        : { cyan: 0, ...wbShiftsFromLog(raw, bounds) };
+    saveEdit({
+      inversionParams: {
+        ...current,
+        cmyCyan: filtration.cyan,
+        cmyMagenta: filtration.magenta,
+        cmyYellow: filtration.yellow,
+      },
+    });
   }
 
   // ─── Edit helpers ──────────────────────────────────────────────────────────
@@ -1528,6 +1461,14 @@
   const effectiveInversionParams = $derived.by(() => {
     if (!frame || !roll) return DEFAULT_INVERSION_PARAMS;
     return resolveEdit(roll, frame).inversionParams;
+  });
+
+  /** B&W drops the colour filtration the WB picker writes, so it cannot be armed there. */
+  const wbPickerAvailable = $derived(effectiveInversionParams.filmType !== "BW");
+
+  // Disarm the picker when the film type changes to B&W while it is armed.
+  $effect(() => {
+    if (!wbPickerAvailable) wbPickerActive = false;
   });
 
   const effectiveTransform = $derived.by(() => {

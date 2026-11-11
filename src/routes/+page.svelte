@@ -34,6 +34,7 @@
 	import KeyboardHintBar from "$lib/components/KeyboardHintBar.svelte";
 	import NewRollDialog from "$lib/components/NewRollDialog.svelte";
 	import RollExportBar from "$lib/components/RollExportBar.svelte";
+	import RollBaselineControl from "$lib/components/RollBaselineControl.svelte";
 	import RollSidebar from "$lib/components/RollSidebar.svelte";
 	import { PaneGroup, Pane, PaneResizer } from "paneforge";
 	import { type ExportScale } from "$lib/export/batch";
@@ -477,6 +478,12 @@
 		frames = frames.map((f) => (f.id === updated.id ? updated : f));
 	}
 
+	/** A roll-level change saved by a toolbar control (the roll baseline). */
+	function onRollUpdated(updated: Roll): void {
+		if (roll?.id === updated.id) roll = updated;
+		rolls = rolls.map((r) => (r.id === updated.id ? updated : r));
+	}
+
 	// ─── Keyboard shortcuts ───────────────────────────────────────────────────
 
 	async function handleKeydown(e: KeyboardEvent) {
@@ -690,6 +697,12 @@
 							</span>
 
 							<div class="ml-auto flex items-center gap-xs">
+								{#if frames.length > 0}
+									<!-- Keyed: switching rolls unmounts it, which cancels a running analysis. -->
+									{#key roll.id}
+										<RollBaselineControl {roll} {frames} onRollChange={onRollUpdated} />
+									{/key}
+								{/if}
 								{#if !selecting && frames.length > 0}
 									<button
 										type="button"

@@ -1,44 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { computeCropHomography } from './negative/pick-geometry';
 import type { CropQuad } from '$lib/types';
-
-// Minimal re-implementation of the homography helper for parity testing.
-// Keep in sync with `computeCropHomography` in `pipeline.ts`.
-function computeCropHomographyTS(quad: CropQuad): [number, number, number, number, number, number, number, number] {
-	const x0 = quad.tl.x;
-	const y0 = quad.tl.y;
-	const x1 = quad.tr.x;
-	const y1 = quad.tr.y;
-	const x2 = quad.bl.x;
-	const y2 = quad.bl.y;
-	const x3 = quad.br.x;
-	const y3 = quad.br.y;
-
-	const a = x1 - x3;
-	const b = x2 - x3;
-	const rx = x0 - x1 - x2 + x3;
-	const c = y1 - y3;
-	const d = y2 - y3;
-	const ry = y0 - y1 - y2 + y3;
-
-	const det = a * d - b * c;
-	let g = 0.0;
-	let h = 0.0;
-	if (Math.abs(det) > 1e-10) {
-		g = (rx * d - b * ry) / det;
-		h = (a * ry - rx * c) / det;
-	}
-
-	return [
-		(g + 1) * x1 - x0,
-		(h + 1) * x2 - x0,
-		x0,
-		(g + 1) * y1 - y0,
-		(h + 1) * y2 - y0,
-		y0,
-		g,
-		h,
-	];
-}
 
 function applyHomography(h: number[], u: number, v: number): { x: number; y: number } {
 	const w = h[6] * u + h[7] * v + 1;
@@ -56,7 +18,7 @@ describe('computeCropHomography', () => {
 			br: { x: 0.85, y: 0.95 },
 			bl: { x: 0.15, y: 0.9 },
 		};
-		const h = computeCropHomographyTS(quad);
+		const h = computeCropHomography(quad);
 
 		expect(applyHomography(h, 0, 0).x).toBeCloseTo(quad.tl.x, 10);
 		expect(applyHomography(h, 0, 0).y).toBeCloseTo(quad.tl.y, 10);
@@ -76,7 +38,7 @@ describe('computeCropHomography', () => {
 			br: { x: 0.95, y: 0.9 },
 			bl: { x: 0.05, y: 0.9 },
 		};
-		const h = computeCropHomographyTS(quad);
+		const h = computeCropHomography(quad);
 
 		// Sample three points along a horizontal output line (v = 0.5)
 		const a = applyHomography(h, 0.2, 0.5);
@@ -97,7 +59,7 @@ describe('computeCropHomography', () => {
 			br: { x: 1, y: 1 },
 			bl: { x: 0, y: 1 },
 		};
-		const h = computeCropHomographyTS(quad);
+		const h = computeCropHomography(quad);
 		const expected = [
 			{ uv: [0, 0], p: { x: 0, y: 0 } },
 			{ uv: [1, 0], p: { x: 1, y: 0 } },

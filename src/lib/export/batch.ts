@@ -140,17 +140,17 @@ export async function exportFramesBatch(
 				scanned_at: frame.capturedAt ?? null,
 			};
 
-			// Use cached log percentiles from the preview render if available, so the
-			// export matches what the user saw in the editor.  Falls back to null
-			// (Rust recomputes from full-res) for frames never opened in the editor.
-			const logPerc = frame.cachedLogPerc ?? null;
+			// Hand the exporter the analysis cached from the preview render, so the
+			// export matches what the user saw in the editor. Null for frames never
+			// opened in the editor: Rust then measures the full-res data itself.
+			const analysis = frame.cachedAnalysis ?? null;
 
 			if (isRawExtension(leaf)) {
 				await invoke('export_native', {
 					sourcePath,
 					exportPath,
 					edit,
-					logPerc,
+					analysis,
 					skipWb: roll.rollEdit.invert,
 					quality,
 					scale,
@@ -162,7 +162,7 @@ export async function exportFramesBatch(
 					sourcePath,
 					exportPath,
 					edit,
-					logPerc,
+					analysis,
 					quality,
 					scale,
 					metadata,

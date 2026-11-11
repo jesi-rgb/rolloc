@@ -2,6 +2,7 @@ pub mod decode;
 mod decode_cache;
 mod demosaic;
 mod export;
+mod negative;
 mod process;
 mod raw;
 mod thumb;

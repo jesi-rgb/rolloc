@@ -6,15 +6,17 @@
 //! Two pipeline configurations (mirroring pipeline.ts):
 //!
 //! **Negative path** (invert = true):
-//!   1. Log normalization — log10 per-channel percentile stretch on camera-native data
-//!      (removes orange mask, inverts; per-channel stretch handles color separation)
-//!   2. H&D curve — sigmoid paper response with CMY timing, toe/shoulder
-//!   3. CLAHE — contrast limited adaptive histogram equalization (local contrast)
-//!   4. Tone curve — WB multipliers + RGB LUTs + global tone LUT (sRGB skipped, H&D already 1/2.2)
+//!   1. Log normalization — log10 per-channel stretch between the measured density
+//!      bounds on camera-native data (removes the orange mask, inverts)
+//!   2. Print curve — straight line in density between a shoulder and a toe, with CMY
+//!      filtration; slope, pivot and gray balance solved per frame (`crate::negative`)
+//!   3. Tone stage, glow, CLAHE, sharpening
+//!   4. Tone curve — RGB LUTs + global tone LUT (sRGB skipped, the print is already encoded)
 //!
-//!   No color matrix in the negative path: the per-channel log normalization already
-//!   handles color separation. Applying cam→sRGB after H&D causes a magenta tint
-//!   because the matrix expects linear camera-native values, not post-processed data.
+//!   No color matrix after the curve: the per-channel log normalization already
+//!   handles color separation. A slide (film type E6) takes the same steps with the
+//!   transparency transfer as step 2 over a fixed window, and a RAW slide's camera
+//!   matrix applied in linear light inside step 1.
 //!
 //! **Positive path** (invert = false):
 //!   1. Normalize/invert — black/white point + exposure compensation
@@ -23,16 +25,15 @@
 
 use rayon::prelude::*;
 
-// ─── NegPy constants (must match pipeline.ts) ─────────────────────────────────
+use crate::negative::types::{AppliedBaseline, FilmType, NegativeAnalysis};
+use crate::negative::{self, FilmCurve, Normalizer, PrintInputs};
 
-const CMY_MAX_DENSITY: f32 = 0.15;
-const DENSITY_MULTIPLIER: f32 = 0.15;
-const GRADE_MULTIPLIER: f32 = 1.75;
-const D_MAX: f32 = 4.0;
-/// Neutral `density` / `grade` values — the fixed film/paper base curve. The
-/// Brightness and Contrast sliders live in those two fields but drive the
-/// Lightroom-style tone stage below instead of the H&D pivot/slope.
-/// Mirrors NEUTRAL_DENSITY / NEUTRAL_GRADE in src/lib/image/pipeline.ts.
+// ─── Tone stage constants (must match pipeline.ts) ────────────────────────────
+
+/// Neutral `density` / `grade` values. The Brightness and Contrast sliders are
+/// stored in those two fields and drive the Lightroom-style tone stage below,
+/// never the print curve. Mirrors NEUTRAL_DENSITY / NEUTRAL_GRADE in
+/// src/lib/image/pipeline.ts.
 const NEUTRAL_DENSITY: f32 = 1.0;
 const NEUTRAL_GRADE: f32 = 2.5;
 /// Strength cap for the contrast S-curve at ±1.
@@ -41,10 +42,6 @@ const CONTRAST_MAX: f32 = 0.85;
 const SH_GAMMA: f32 = 0.6;
 /// Linear-light level where the exposure shoulder starts.
 const EXP_KNEE: f32 = 0.75;
-
-/// Default analysis buffer — crops this fraction of each edge before
-/// computing log percentiles (matches NegPy's analysis_buffer = 0.07).
-const ANALYSIS_BUFFER: f32 = 0.10;
 
 // ─── Types (deserialized from JS) ─────────────────────────────────────────────
 
@@ -93,6 +90,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_cast_removal() -> f32 {
+    0.5
+}
+
 fn default_tone_preset() -> String {
     "standard".to_string()
 }
@@ -138,8 +139,9 @@ fn resolve_tone_preset(name: &str) -> TonePresetParams {
 #[serde(rename_all = "camelCase")]
 pub struct EffectiveEdit {
     pub camera_color_matrix: [f32; 9],
+    /// As-shot white balance [R, G, B], G = 1. A RAW slide folds it back into its
+    /// camera matrix, since the inversion path decodes without it.
     #[serde(rename = "ashotWBCoeffs")]
-    #[allow(dead_code)]
     pub ashot_wb_coeffs: [f32; 3],
     #[allow(dead_code)]
     pub light_source_temp: f32,
@@ -149,6 +151,9 @@ pub struct EffectiveEdit {
     pub rgb_curves: [CurvePoints; 3],
     pub invert: bool,
     pub inversion_params: InversionParams,
+    /// Roll baseline bounds applying to this frame; `None` = the frame's own.
+    #[serde(default)]
+    pub roll_baseline: Option<AppliedBaseline>,
     /// Not used in export processing but present in the type.
     #[serde(default)]
     #[allow(dead_code)]
@@ -182,14 +187,8 @@ pub struct CurvePoint {
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct InversionParams {
-    /// When true, computes per-channel floors/ceils with rebate-aware histogram
-    /// valley detection (matches Photoshop "Levels"-style auto-adjust). When
-    /// false, uses the negpy "darkest pixels by mean luminance" method.
-    /// Defaults to true (UI default).
-    #[serde(default = "default_true")]
-    pub auto_levels: bool,
-    /// When true, computes an exposure correction in density units from the
-    /// median luminance and subtracts it from the pivot. Defaults to true.
+    /// Auto Density: the print curve's pivot follows the frame's metered
+    /// midtone. Defaults to true.
     #[serde(default = "default_true")]
     pub auto_exposure: bool,
     pub density: f32,
@@ -203,16 +202,15 @@ pub struct InversionParams {
     pub highlight_cyan: f32,
     pub highlight_magenta: f32,
     pub highlight_yellow: f32,
+    /// Cast Removal strength, 0–1. Colour negatives only.
+    #[serde(default = "default_cast_removal")]
+    pub cast_removal: f32,
     pub shadows: f32,
     pub highlights: f32,
+    /// Lifts paper black: positive softens the shadow roll-off. [-1, +1]
     pub toe: f32,
-    pub toe_width: f32,
-    #[allow(dead_code)] // Present in TS type but not yet used in processing
-    pub toe_hardness: f32,
+    /// Lifts paper white: positive holds highlight density. [-1, +1]
     pub shoulder: f32,
-    pub shoulder_width: f32,
-    #[allow(dead_code)] // Present in TS type but not yet used in processing
-    pub shoulder_hardness: f32,
     /// CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default.
     pub clahe_strength: f32,
     /// Glow (highlight bloom) strength [0,1]. 0 = off.
@@ -230,10 +228,6 @@ pub struct InversionParams {
     pub sharpen: f32,
     /// Film type: "C41" (color negative), "BW" (black & white), "E6" (slide).
     pub film_type: String,
-    /// E6 normalize mode — not used in CPU processing yet.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub e6_normalize: bool,
     /// Tone preset: "standard", "soft", "punch", or "linear".
     #[serde(default = "default_tone_preset")]
     pub tone_preset: String,
@@ -246,16 +240,24 @@ pub struct InversionParams {
     pub border_color: String,
 }
 
-/// Per-channel log-density percentiles for the normalization pass.
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct LogPercentiles {
-    pub floors: [f32; 3],
-    pub ceils: [f32; 3],
-    /// Auto-exposure correction in density units (matches GPU pipeline).
-    /// Positive = image is dark, needs brightening (reduce pivot density).
-    /// When `None`, treated as 0.0 (e.g. server-side compute_log_percentiles).
-    #[serde(default, rename = "autoExposure")]
-    pub auto_exposure: Option<f32>,
+impl InversionParams {
+    /// The inputs of the print curve solve.
+    fn print_inputs(&self) -> PrintInputs {
+        PrintInputs {
+            film_type: FilmType::parse(&self.film_type),
+            auto_exposure: self.auto_exposure,
+            cast_removal: self.cast_removal,
+            cmy: [self.cmy_cyan, self.cmy_magenta, self.cmy_yellow],
+            shadow_cmy: [self.shadow_cyan, self.shadow_magenta, self.shadow_yellow],
+            highlight_cmy: [
+                self.highlight_cyan,
+                self.highlight_magenta,
+                self.highlight_yellow,
+            ],
+            toe: self.toe,
+            shoulder: self.shoulder,
+        }
+    }
 }
 
 // ─── Curve LUT building (Fritsch–Carlson monotone cubic) ──────────────────────
@@ -419,477 +421,6 @@ fn linear_to_srgb(c: f32) -> f32 {
     }
 }
 
-// ─── Log percentile computation ───────────────────────────────────────────────
-
-/// Compute per-channel log10 percentiles from linear f32 RGB pixels.
-///
-/// Backwards-compatible wrapper around [`compute_log_percentiles_full`] that
-/// uses the legacy negpy "darkest pixels" floor method, no auto-exposure, and
-/// C-41 semantics. Newer callers should prefer the `_full` variant which
-/// honours the per-frame `autoLevels` / `autoExposure` toggles.
-///
-/// `pixels` is a flat slice of [R, G, B, R, G, B, ...] f32 values in [0, 1].
-/// `color_matrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
-#[allow(dead_code)]
-pub fn compute_log_percentiles(
-    pixels: &[f32],
-    width: usize,
-    height: usize,
-    color_matrix: Option<&[f32; 9]>,
-) -> LogPercentiles {
-    compute_log_percentiles_full(pixels, width, height, color_matrix, false, "C41", false)
-}
-
-// ─── Auto-levels: histogram valley detection ─────────────────────────────────
-//
-// Constants mirror pipeline.ts so the Rust implementation produces identical
-// output for the same input (modulo trivial floating-point ordering).
-
-const AUTO_LEVELS_CUMULATIVE_PERCENT: f32 = 0.001; // 0.1%
-const VALLEY_HISTOGRAM_BINS: usize = 256;
-const VALLEY_THRESHOLD: f32 = 0.02;
-const REBATE_MIN_FRACTION: f32 = 0.05;
-const REBATE_PEAK_RATIO: f32 = 3.0;
-
-struct ValleyResult {
-    valley_value: f32,
-    rebate_detected: bool,
-}
-
-/// Mirror of `findHistogramValley` in pipeline.ts.
-/// Detects the rebate spike at the bright end of a per-channel log-density
-/// histogram and returns the valley value separating image data from rebate.
-fn find_histogram_valley(values: &[f32]) -> ValleyResult {
-    if values.is_empty() {
-        return ValleyResult {
-            valley_value: 0.0,
-            rebate_detected: false,
-        };
-    }
-
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let min_val = sorted[0];
-    let max_val = sorted[sorted.len() - 1];
-    let range = max_val - min_val;
-
-    let fallback_idx =
-        ((sorted.len() as f32) * (1.0 - AUTO_LEVELS_CUMULATIVE_PERCENT)).floor() as usize;
-    let fallback_value = sorted[fallback_idx.min(sorted.len() - 1)];
-
-    if range < 0.001 {
-        return ValleyResult {
-            valley_value: fallback_value,
-            rebate_detected: false,
-        };
-    }
-
-    let num_bins = VALLEY_HISTOGRAM_BINS;
-    let bin_width = range / num_bins as f32;
-    let mut histogram = vec![0u32; num_bins];
-
-    for &v in values {
-        let mut bin = ((v - min_val) / bin_width).floor() as isize;
-        if bin < 0 {
-            bin = 0;
-        } else if bin as usize >= num_bins {
-            bin = num_bins as isize - 1;
-        }
-        histogram[bin as usize] += 1;
-    }
-
-    // Median bin count over the lower 75% of bins (image region, not rebate).
-    let image_region_end = (num_bins as f32 * 0.75).floor() as usize;
-    let mut image_region: Vec<u32> = histogram[..image_region_end].to_vec();
-    image_region.sort_unstable();
-    let median_image_bin_count = image_region[image_region.len() / 2].max(1);
-
-    // Find peak in the top 15% of the histogram (likely rebate).
-    let search_start = (num_bins as f32 * 0.85).floor() as usize;
-    let mut peak_bin = search_start;
-    let mut peak_count = histogram[search_start];
-    for i in search_start..num_bins {
-        if histogram[i] > peak_count {
-            peak_count = histogram[i];
-            peak_bin = i;
-        }
-    }
-
-    let total_pixels = values.len() as u32;
-    let has_enough_pixels =
-        peak_count as f32 >= total_pixels as f32 * REBATE_MIN_FRACTION;
-    let is_significant_spike =
-        peak_count as f32 > median_image_bin_count as f32 * REBATE_PEAK_RATIO;
-
-    if !has_enough_pixels || !is_significant_spike {
-        return ValleyResult {
-            valley_value: fallback_value,
-            rebate_detected: false,
-        };
-    }
-
-    // Scan backward from the peak for the valley.
-    let threshold = peak_count as f32 * VALLEY_THRESHOLD;
-    let mut valley_bin = peak_bin;
-    let mut found_valley = false;
-
-    let mut i: isize = peak_bin as isize - 1;
-    while i >= 1 {
-        let idx = i as usize;
-        let count = histogram[idx] as f32;
-        if count < threshold {
-            valley_bin = idx;
-            found_valley = true;
-            break;
-        }
-        // Local minimum check
-        if histogram[idx] < histogram[idx - 1] && histogram[idx] < histogram[idx + 1] {
-            if (histogram[idx] as f32) < peak_count as f32 * 0.1 {
-                valley_bin = idx;
-                found_valley = true;
-                break;
-            }
-        }
-        i -= 1;
-    }
-
-    if !found_valley {
-        return ValleyResult {
-            valley_value: fallback_value,
-            rebate_detected: false,
-        };
-    }
-
-    let valley_value = min_val + (valley_bin as f32 + 0.5) * bin_width;
-    ValleyResult {
-        valley_value,
-        rebate_detected: true,
-    }
-}
-
-/// Mirror of `computeAutoLevelsFloorsAndCeils` in pipeline.ts.
-fn compute_auto_levels_floors_and_ceils(
-    r_log: &[f32],
-    g_log: &[f32],
-    b_log: &[f32],
-    is_e6: bool,
-) -> ([f32; 3], [f32; 3]) {
-    if r_log.is_empty() {
-        return ([-1.0, -1.0, -1.0], [0.0, 0.0, 0.0]);
-    }
-
-    fn find_floor(values: &[f32]) -> f32 {
-        if values.is_empty() {
-            return -1.0;
-        }
-        let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let low_idx = (sorted.len() as f32 * AUTO_LEVELS_CUMULATIVE_PERCENT).floor() as usize;
-        sorted[low_idx.min(sorted.len() - 1)]
-    }
-
-    fn find_ceil_excluding_rebate(values: &[f32]) -> f32 {
-        if values.is_empty() {
-            return 0.0;
-        }
-        let valley = find_histogram_valley(values);
-        let filtered: Vec<f32> = if valley.rebate_detected {
-            values.iter().copied().filter(|&v| v <= valley.valley_value).collect()
-        } else {
-            values.to_vec()
-        };
-        let mut filtered = if filtered.is_empty() {
-            values.to_vec()
-        } else {
-            filtered
-        };
-        filtered.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let high_idx =
-            (filtered.len() as f32 * (1.0 - AUTO_LEVELS_CUMULATIVE_PERCENT)).floor() as usize;
-        filtered[high_idx.min(filtered.len() - 1)]
-    }
-
-    let r_floor = find_floor(r_log);
-    let g_floor = find_floor(g_log);
-    let b_floor = find_floor(b_log);
-
-    let r_ceil = find_ceil_excluding_rebate(r_log);
-    let g_ceil = find_ceil_excluding_rebate(g_log);
-    let b_ceil = find_ceil_excluding_rebate(b_log);
-
-    if is_e6 {
-        // E6 has dark rebate; swap interpretations.
-        ([r_ceil, g_ceil, b_ceil], [r_floor, g_floor, b_floor])
-    } else {
-        ([r_floor, g_floor, b_floor], [r_ceil, g_ceil, b_ceil])
-    }
-}
-
-/// Full implementation of log-percentile computation.
-///
-/// `auto_levels`           — when true, uses the per-channel rebate-aware
-///                           histogram method (matches the TS pipeline default).
-/// `film_type`             — "C41" | "BW" | "E6". E6 inverts floor/ceil semantics.
-/// `compute_auto_exposure` — when true, populates `auto_exposure` from the
-///                           median luminance vs. middle gray.
-pub fn compute_log_percentiles_full(
-    pixels: &[f32],
-    width: usize,
-    height: usize,
-    color_matrix: Option<&[f32; 9]>,
-    auto_levels: bool,
-    film_type: &str,
-    compute_auto_exposure: bool,
-) -> LogPercentiles {
-    let log10_e: f32 = std::f32::consts::LOG10_E;
-    let eps: f32 = 1e-6;
-    let stride = 8_usize;
-
-    let cut_y = (height as f32 * ANALYSIS_BUFFER).floor() as usize;
-    let cut_x = (width as f32 * ANALYSIS_BUFFER).floor() as usize;
-    let start_y = cut_y;
-    let end_y = height - cut_y;
-    let start_x = cut_x;
-    let end_x = width - cut_x;
-
-    let mut r_log: Vec<f32> = Vec::new();
-    let mut g_log: Vec<f32> = Vec::new();
-    let mut b_log: Vec<f32> = Vec::new();
-    let mut mean_log: Vec<f32> = Vec::new();
-
-    let mut y = start_y;
-    while y < end_y {
-        let mut x = start_x;
-        while x < end_x {
-            let i = (y * width + x) * 3;
-            let mut r = pixels[i];
-            let mut g = pixels[i + 1];
-            let mut b = pixels[i + 2];
-
-            if let Some(m) = color_matrix {
-                let cr = (m[0] * r + m[1] * g + m[2] * b).max(0.0);
-                let cg = (m[3] * r + m[4] * g + m[5] * b).max(0.0);
-                let cb = (m[6] * r + m[7] * g + m[8] * b).max(0.0);
-                r = cr;
-                g = cg;
-                b = cb;
-            }
-
-            if r > eps && g > eps && b > eps {
-                let lr = r.ln() * log10_e;
-                let lg = g.ln() * log10_e;
-                let lb = b.ln() * log10_e;
-                r_log.push(lr);
-                g_log.push(lg);
-                b_log.push(lb);
-                mean_log.push((lr + lg + lb) / 3.0);
-            }
-            x += stride;
-        }
-        y += stride;
-    }
-
-    fn percentile(arr: &mut [f32], p: f32) -> f32 {
-        if arr.is_empty() {
-            return -1.0;
-        }
-        arr.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((p / 100.0) * (arr.len() as f32 - 1.0)).floor() as usize;
-        arr[idx.min(arr.len() - 1)]
-    }
-
-    let is_e6 = film_type == "E6";
-
-    let (floors, ceils) = if auto_levels {
-        compute_auto_levels_floors_and_ceils(&r_log, &g_log, &b_log, is_e6)
-    } else {
-        // negpy method: floors from darkest pixels (by mean luminance);
-        // ceils from per-channel high percentile.
-        let p_low: f32 = if is_e6 { 99.999 } else { 0.001 };
-        let p_high: f32 = if is_e6 { 0.001 } else { 99.999 };
-
-        let mut mean_sorted = mean_log.clone();
-        let dark_threshold = percentile(&mut mean_sorted, p_low);
-
-        let mut floor_r = 0.0_f32;
-        let mut floor_g = 0.0_f32;
-        let mut floor_b = 0.0_f32;
-        let mut dark_count = 0_usize;
-        for (i, &m) in mean_log.iter().enumerate() {
-            let is_dark = if is_e6 {
-                m >= dark_threshold
-            } else {
-                m <= dark_threshold
-            };
-            if is_dark {
-                floor_r += r_log[i];
-                floor_g += g_log[i];
-                floor_b += b_log[i];
-                dark_count += 1;
-            }
-        }
-
-        let floors = if dark_count > 0 {
-            [
-                floor_r / dark_count as f32,
-                floor_g / dark_count as f32,
-                floor_b / dark_count as f32,
-            ]
-        } else {
-            [
-                percentile(&mut r_log.clone(), p_low),
-                percentile(&mut g_log.clone(), p_low),
-                percentile(&mut b_log.clone(), p_low),
-            ]
-        };
-
-        let ceils = [
-            percentile(&mut r_log.clone(), p_high),
-            percentile(&mut g_log.clone(), p_high),
-            percentile(&mut b_log.clone(), p_high),
-        ];
-
-        (floors, ceils)
-    };
-
-    // ── Auto-exposure (mirrors pipeline.ts) ──────────────────────────────────
-    let auto_exposure = if compute_auto_exposure {
-        let median_r = percentile(&mut r_log.clone(), 50.0);
-        let median_g = percentile(&mut g_log.clone(), 50.0);
-        let median_b = percentile(&mut b_log.clone(), 50.0);
-
-        let range_r = (ceils[0] - floors[0]).max(0.001);
-        let range_g = (ceils[1] - floors[1]).max(0.001);
-        let range_b = (ceils[2] - floors[2]).max(0.001);
-
-        let norm_median_r = (median_r - floors[0]) / range_r;
-        let norm_median_g = (median_g - floors[1]) / range_g;
-        let norm_median_b = (median_b - floors[2]) / range_b;
-
-        let avg_norm_median =
-            0.2126 * norm_median_r + 0.7152 * norm_median_g + 0.0722 * norm_median_b;
-
-        const TARGET_MEDIAN: f32 = 0.5;
-        const EXPOSURE_SCALE: f32 = 4.0;
-        Some((avg_norm_median - TARGET_MEDIAN) * EXPOSURE_SCALE)
-    } else {
-        None
-    };
-
-    LogPercentiles {
-        floors,
-        ceils,
-        auto_exposure,
-    }
-}
-
-// ─── Normalization pass (negative path, step 1) ──────────────────────────────
-
-/// Apply log10 normalization per-channel: maps [floor, ceil] → [0, 1].
-/// This simultaneously inverts the negative and removes the orange mask.
-///
-/// The result is deliberately **not** clamped to [0, 1] — mirrors
-/// `normalization.wgsl`.  Densities outside the measured bounds are rolled off
-/// by the bounded H&D sigmoid in `hd_channel`; clipping them here would destroy
-/// every highlight above the ceil percentile before the curve saw it.
-fn normalize_pixel(r: f32, g: f32, b: f32, perc: &LogPercentiles) -> [f32; 3] {
-    let eps: f32 = 1e-6;
-    let log10_e: f32 = std::f32::consts::LOG10_E;
-
-    let lr = r.max(eps).ln() * log10_e;
-    let lg = g.max(eps).ln() * log10_e;
-    let lb = b.max(eps).ln() * log10_e;
-
-    let floors = perc.floors;
-    let ceils = perc.ceils;
-
-    let safe_delta = |d: f32| -> f32 {
-        let abs_d = d.abs().max(eps);
-        d.signum() * abs_d
-    };
-
-    [
-        (lr - floors[0]) / safe_delta(ceils[0] - floors[0]),
-        (lg - floors[1]) / safe_delta(ceils[1] - floors[1]),
-        (lb - floors[2]) / safe_delta(ceils[2] - floors[2]),
-    ]
-}
-
-// ─── H&D curve pass (negative path, step 2) ──────────────────────────────────
-
-/// Numerically stable logistic sigmoid.
-#[inline(always)]
-fn fast_sigmoid(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let z = x.exp();
-        z / (1.0 + z)
-    }
-}
-
-/// Process one channel through the full H&D pipeline.
-/// Returns gamma-encoded (1/2.2) transmittance in [0, 1].
-///
-/// Core H&D math matches negpy's _apply_photometric_fused_kernel. This is the
-/// fixed film/paper base; exposure, contrast, shadows and highlights are applied
-/// afterwards by `apply_tone` in a display-referred domain.
-#[inline(always)]
-fn hd_channel(
-    pixel: f32,
-    pivot: f32,
-    slope: f32,
-    cmy_offset: f32,
-    shadow_cmy: f32,
-    hi_cmy: f32,
-    toe: f32,
-    toe_width: f32,
-    shoulder: f32,
-    sh_width: f32,
-    d_max: f32,
-) -> f32 {
-    let eps = 1e-6_f32;
-
-    // 1. Global CMY shift
-    let val = pixel + cmy_offset;
-    let diff = val - pivot;
-
-    // 2. Toe mask (shadows): active at high diff (dense in negative space)
-    // negpy: toe_width * (diff / max(1.0 - pivot, eps) - 0.5)
-    let t_val = toe_width * (diff / (1.0 - pivot).max(eps) - 0.5);
-    let toe_mask = fast_sigmoid(t_val);
-
-    // 3. Shoulder mask (highlights): active at low diff (thin in negative space)
-    // negpy: -shoulder_width * (diff / max(pivot, eps) + 0.5)
-    let s_val = -sh_width * (diff / pivot.max(eps) + 0.5);
-    let shoulder_mask = fast_sigmoid(s_val);
-
-    // 4. Density offsets (multiplier 0.1 matches negpy)
-    let toe_density_offset = toe * toe_mask * 0.1;
-    let shoulder_density_offset = shoulder * shoulder_mask * 0.1;
-
-    // 5. Localized CMY color shifts via toe/shoulder masks
-    let shadow_color_offset = shadow_cmy * toe_mask;
-    let highlight_color_offset = hi_cmy * shoulder_mask;
-
-    // 6. Adjusted diff (negpy sign convention)
-    let diff_adj =
-        diff + shadow_color_offset + highlight_color_offset - toe_density_offset
-            + shoulder_density_offset;
-
-    // 7. Contrast damping (toe/shoulder reduce effective contrast)
-    let damp_toe = toe * toe_mask * 0.5;
-    let damp_shoulder = shoulder * shoulder_mask * 0.5;
-    let k_mod = (1.0 - damp_toe - damp_shoulder).clamp(0.1, 2.0);
-
-    // 8. H&D sigmoid → print density
-    let density = d_max * fast_sigmoid(slope * diff_adj * k_mod);
-
-    // 9. Density → transmittance → perceptual gamma (from tone preset)
-    let transmittance = 10.0_f32.powf(-density);
-    transmittance.max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0)
-}
-
 // ─── Lightroom-style tone stage ───────────────────────────────────────────────
 //
 // Direct port of `apply_tone` in hd_curve.wgsl — keep the two in lockstep or
@@ -933,7 +464,7 @@ fn contrast_channel(x: f32, amt: f32) -> f32 {
 }
 
 /// Apply exposure, contrast, shadows and highlights to one display-referred pixel.
-fn apply_tone(rgb: [f32; 3], p: &HDParams) -> [f32; 3] {
+fn apply_tone(rgb: [f32; 3], p: &ToneParams) -> [f32; 3] {
     let mut out = [
         rgb[0].clamp(0.0, 1.0),
         rgb[1].clamp(0.0, 1.0),
@@ -996,23 +527,8 @@ fn apply_tone(rgb: [f32; 3], p: &HDParams) -> [f32; 3] {
     out
 }
 
-/// Derived H&D parameters pre-computed from InversionParams.
-struct HDParams {
-    pivot: f32,
-    slope: f32,
-    cmy_r: f32,
-    cmy_g: f32,
-    cmy_b: f32,
-    s_cmy_r: f32,
-    s_cmy_g: f32,
-    s_cmy_b: f32,
-    h_cmy_r: f32,
-    h_cmy_g: f32,
-    h_cmy_b: f32,
-    toe: f32,
-    toe_width: f32,
-    shoulder: f32,
-    shoulder_width: f32,
+/// Tone preset and tone-stage parameters pre-computed from InversionParams.
+struct ToneParams {
     exposure: f32,
     contrast: f32,
     shadows: f32,
@@ -1024,28 +540,10 @@ struct HDParams {
     midtone_curve: f32,
 }
 
-impl HDParams {
-    fn from_inversion(inv: &InversionParams, auto_exposure_adj: f32) -> Self {
-        // The base curve is fixed at the neutral density/grade; the user's
-        // Brightness/Contrast values are applied post-curve by `apply_tone`.
-        let effective_density = NEUTRAL_DENSITY - auto_exposure_adj;
+impl ToneParams {
+    fn from_inversion(inv: &InversionParams) -> Self {
         let preset = resolve_tone_preset(&inv.tone_preset);
         Self {
-            pivot: 1.0 - (0.01 + effective_density * DENSITY_MULTIPLIER),
-            slope: 1.0 + NEUTRAL_GRADE * GRADE_MULTIPLIER,
-            cmy_r: inv.cmy_cyan * CMY_MAX_DENSITY,
-            cmy_g: inv.cmy_magenta * CMY_MAX_DENSITY,
-            cmy_b: inv.cmy_yellow * CMY_MAX_DENSITY,
-            s_cmy_r: inv.shadow_cyan * CMY_MAX_DENSITY,
-            s_cmy_g: inv.shadow_magenta * CMY_MAX_DENSITY,
-            s_cmy_b: inv.shadow_yellow * CMY_MAX_DENSITY,
-            h_cmy_r: inv.highlight_cyan * CMY_MAX_DENSITY,
-            h_cmy_g: inv.highlight_magenta * CMY_MAX_DENSITY,
-            h_cmy_b: inv.highlight_yellow * CMY_MAX_DENSITY,
-            toe: inv.toe,
-            toe_width: inv.toe_width,
-            shoulder: inv.shoulder,
-            shoulder_width: inv.shoulder_width,
             exposure: NEUTRAL_DENSITY - inv.density,
             contrast: ((inv.grade - NEUTRAL_GRADE) / NEUTRAL_GRADE).clamp(-1.0, 1.0),
             shadows: inv.shadows.clamp(-1.0, 1.0),
@@ -1058,58 +556,14 @@ impl HDParams {
     }
 }
 
-/// Apply H&D curve to a normalized [0,1] RGB pixel.
-/// When `is_bw` is true, converts output to luminance (grayscale) matching
-/// the GPU shader's B&W mode.
-fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
-    let hr = hd_channel(
-        r,
-        p.pivot,
-        p.slope,
-        p.cmy_r,
-        p.s_cmy_r,
-        p.h_cmy_r,
-        p.toe,
-        p.toe_width,
-        p.shoulder,
-        p.shoulder_width,
-        D_MAX,
-    );
-    let hg = hd_channel(
-        g,
-        p.pivot,
-        p.slope,
-        p.cmy_g,
-        p.s_cmy_g,
-        p.h_cmy_g,
-        p.toe,
-        p.toe_width,
-        p.shoulder,
-        p.shoulder_width,
-        D_MAX,
-    );
-    let hb = hd_channel(
-        b,
-        p.pivot,
-        p.slope,
-        p.cmy_b,
-        p.s_cmy_b,
-        p.h_cmy_b,
-        p.toe,
-        p.toe_width,
-        p.shoulder,
-        p.shoulder_width,
-        D_MAX,
-    );
-
-    // Apply tone preset: gamma correction, midtone curve, black/white point.
-    // hd_channel outputs at gamma 2.2; re-gamma to preset gamma: out^(2.2/preset_gamma)
-    let gamma_exp = 2.2 / p.gamma;
-    let apply_preset = |mut v: f32| -> f32 {
-        // Gamma adjustment
-        if gamma_exp != 1.0 {
-            v = v.powf(gamma_exp);
-        }
+/// Print one normalized pixel: print curve or slide transfer → tone preset → tone
+/// stage. Mirrors `fs_main` in hd_curve.wgsl. A B&W print collapses to one density
+/// before the curve and to luminance after it, matching the shader's B&W mode.
+fn print_pixel(normalized: [f32; 3], curve: &FilmCurve, p: &ToneParams) -> [f32; 3] {
+    let inv_gamma = 1.0 / p.gamma;
+    let apply_preset = |t: f32| -> f32 {
+        // Encode with the preset gamma.
+        let mut v = t.max(0.0).powf(inv_gamma).clamp(0.0, 1.0);
         // Midtone S-curve: v + strength * v * (1-v) * (2v-1)
         if p.midtone_curve != 0.0 {
             v = (v + p.midtone_curve * v * (1.0 - v) * (2.0 * v - 1.0)).clamp(0.0, 1.0);
@@ -1118,10 +572,18 @@ fn hd_pixel(r: f32, g: f32, b: f32, p: &HDParams, is_bw: bool) -> [f32; 3] {
         ((v - p.black_point) / (p.white_point - p.black_point)).clamp(0.0, 1.0)
     };
 
-    let toned = apply_tone([apply_preset(hr), apply_preset(hg), apply_preset(hb)], p);
+    let rendered = curve.render(normalized);
+    let is_bw = matches!(curve, FilmCurve::Bw(_));
+    // The shader prints and encodes a B&W pixel once, on the collapsed density.
+    let printed = if is_bw {
+        [apply_preset(rendered[0]); 3]
+    } else {
+        rendered.map(apply_preset)
+    };
+    let toned = apply_tone(printed, p);
 
     // B&W mode: collapse to luminance (Rec. 709) last, exactly as the GPU
-    // shader does — preset and tone stage run per channel first.
+    // shader does. The channels are already equal; this is a safeguard.
     if is_bw {
         let lum = LUMA_R * toned[0] + LUMA_G * toned[1] + LUMA_B * toned[2];
         [lum, lum, lum]
@@ -1760,8 +1222,11 @@ fn tone_curve_pixel(
 /// - `pixels`: flat [R, G, B, R, G, B, ...] f32 in linear camera-native [0, 1].
 /// - `width`, `height`: image dimensions.
 /// - `edit`: the fully-resolved edit parameters.
-/// - `log_perc`: pre-computed log percentiles from the preview render (for negatives).
-///              If `None` and `edit.invert` is true, percentiles are computed from the data.
+/// - `analysis`: the analysis cached from the preview render (for negatives). When it
+///              is absent or stale and `edit.invert` is true, the frame is re-measured.
+/// - `scene_linear`: the pixels are a RAW decode (scene-linear, decoded without white
+///              balance on the inversion path) rather than an sRGB-expanded image. Only a
+///              slide reads it: its camera matrix and display rendering apply to RAW only.
 ///
 /// On return, `pixels` contains sRGB [0, 1] output.
 pub fn process_image(
@@ -1769,7 +1234,8 @@ pub fn process_image(
     width: usize,
     height: usize,
     edit: &EffectiveEdit,
-    log_perc: Option<&LogPercentiles>,
+    analysis: Option<&NegativeAnalysis>,
+    scene_linear: bool,
 ) {
     let pixel_count = width * height;
     assert_eq!(pixels.len(), pixel_count * 3);
@@ -1788,62 +1254,52 @@ pub fn process_image(
     };
 
     if edit.invert {
-        // ── Negative path ──────────────────────────────────────────────────
-        // negpy has NO camera color matrix — rawpy handles cam→AdobeRGB
-        // during demosaic via output_color.  The per-channel log
+        // ── Negative / slide path ──────────────────────────────────────────
+        // negpy has NO camera color matrix on a negative — rawpy handles
+        // cam→AdobeRGB during demosaic via output_color. The per-channel log
         // normalization (floors/ceils stretch) handles color separation
         // and orange mask removal independently per channel, making a
         // cam→sRGB matrix unnecessary (and harmful: applying it to
         // post-H&D gamma-encoded data produces incorrect color mixing).
+        // A RAW slide gets its camera matrix in linear light before the log.
 
-        // Compute or use provided log percentiles.
-        // No color matrix applied — percentiles operate on camera-native data.
-        // Honour the user's autoLevels / autoExposure toggles so batch export
-        // (which always passes log_perc = None) matches the WebGPU preview.
-        let owned_perc;
-        let perc = match log_perc {
-            Some(p) => p,
+        // Reuse the preview's analysis while it is current, so the export
+        // matches what the user approved in the editor; otherwise (frame never
+        // opened, older analysis version, roll baseline changed) measure the
+        // full-resolution data.
+        let inv = &edit.inversion_params;
+        let baseline = edit.roll_baseline.as_ref();
+        let film_type = FilmType::parse(&inv.film_type);
+        let measured;
+        let analysis = match analysis.filter(|a| negative::is_current(a, baseline)) {
+            Some(a) => a,
             None => {
-                owned_perc = compute_log_percentiles_full(
-                    pixels,
-                    width,
-                    height,
-                    None,
-                    edit.inversion_params.auto_levels,
-                    &edit.inversion_params.film_type,
-                    edit.inversion_params.auto_exposure,
-                );
-                &owned_perc
+                measured = negative::analyze(pixels, width, height, film_type, baseline);
+                &measured
             }
         };
 
-        let hd = HDParams::from_inversion(
-            &edit.inversion_params,
-            perc.auto_exposure.unwrap_or(0.0),
+        let (bounds, curve_params) = negative::solve(&inv.print_inputs(), analysis, baseline);
+        let source_matrix = negative::source_matrix(
+            film_type,
+            scene_linear,
+            &edit.camera_color_matrix,
+            edit.ashot_wb_coeffs,
         );
-        let is_bw = edit.inversion_params.film_type == "BW";
+        let normalizer = Normalizer::new(&bounds).with_source_matrix(source_matrix);
+        let curve = FilmCurve::new(film_type, &curve_params, scene_linear);
+        let tone = ToneParams::from_inversion(inv);
+        let is_bw = film_type == FilmType::Bw;
 
-        // Step 1+2: Log normalization + H&D curve (fused, parallel by row).
+        // Step 1+2: Log normalization + print curve or transfer (fused, parallel by row).
         pixels.par_chunks_mut(width * 3).for_each(|row| {
-            for i in (0..row.len()).step_by(3) {
-                let r = row[i];
-                let g = row[i + 1];
-                let b = row[i + 2];
-
-                // Step 1: Log normalization (on camera-native data)
-                let [nr, ng, nb] = normalize_pixel(r, g, b, perc);
-
-                // Step 2: H&D curve (converts to luminance for B&W mode)
-                let [hr, hg, hb] = hd_pixel(nr, ng, nb, &hd, is_bw);
-
-                row[i] = hr;
-                row[i + 1] = hg;
-                row[i + 2] = hb;
+            for px in row.chunks_exact_mut(3) {
+                let normalized = normalizer.apply([px[0], px[1], px[2]]);
+                px.copy_from_slice(&print_pixel(normalized, &curve, &tone));
             }
         });
 
-        // No color matrix in the negative path — per-channel log
-        // normalization already handles color separation (matching negpy).
+        // No color matrix after the curve — the encoded print must not be mixed.
 
         // Step 2.25: Vibrance + saturation — matches the preview's H&D shader,
         // which applies these immediately after the H&D curve (and skips them

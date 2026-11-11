@@ -10,7 +10,7 @@
 	 * behind the curve, showing the distribution of pixel values.
 	 */
 	import type { CurvePoints, CurvePoint } from '$lib/types';
-	import type { ChannelHistograms } from '$lib/image/pipeline';
+	import type { ChannelHistograms } from '$lib/image/negative/analysis';
 	import { buildLUT } from '$lib/image/curves';
 	import { untrack } from 'svelte';
 

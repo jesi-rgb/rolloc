@@ -89,6 +89,19 @@ export type Matrix3x3 = [
 	number, number, number,
 ];
 
+/** Per-channel RGB triple. */
+export type Vec3 = [number, number, number];
+
+/**
+ * Per-channel log10-density window of a negative. `floors` is the dense end
+ * (scene highlights, low log value), `ceils` the thin end (film base, high log
+ * value). The normalization pass maps floor → 0 and ceil → 1.
+ */
+export interface LogBounds {
+	floors: Vec3;
+	ceils: Vec3;
+}
+
 /** A single control point on a tone curve, both axes 0–1. */
 export interface CurvePoint {
 	x: number;
@@ -159,22 +172,15 @@ export const TONE_PRESETS: Record<TonePreset, TonePresetParams> = {
  *   Converts linear transmittance to log-density and per-channel stretches
  *   to [0,1], simultaneously inverting and removing the orange mask.
  *
- * Stage 2 — H&D sigmoid (paper response):
- *   Applies a logistic characteristic curve that simulates photographic paper.
+ * Stage 2 — Print curve (paper response):
+ *   A straight line in density between a shoulder (paper white) and a toe
+ *   (paper black), with slope and pivot metered per frame. Ported from NegPy.
  */
 export interface InversionParams {
 	/**
-	 * Auto-levels mode. When enabled, computes per-channel shadow floors
-	 * based on the first populated histogram bin (like Photoshop's Levels
-	 * "clip shadows to first data" technique). This provides automatic
-	 * white-balance and exposure correction as a baseline.
-	 */
-	autoLevels: boolean;
-
-	/**
-	 * Auto-exposure mode. When enabled, automatically adjusts density based
-	 * on the image's median luminance to target middle gray. Dark images get
-	 * brightened, bright images get darkened.
+	 * Auto Density. When enabled the print curve's pivot follows the frame's
+	 * metered midtone (textured areas only, a partial pull); when disabled every
+	 * frame prints from the same assumed midtone.
 	 */
 	autoExposure: boolean;
 
@@ -209,6 +215,14 @@ export interface InversionParams {
 	highlightMagenta: number;
 	highlightYellow: number;
 
+	// ── Cast removal ─────────────────────────────────────────────────────────
+	/**
+	 * Strength of the automatic gray balance, 0 (off) to 1. Fits the red and
+	 * blue curves to green's along the frame's near-neutral pixels, scaled by
+	 * how trustworthy those neutrals are. Colour negatives only.
+	 */
+	castRemoval: number;
+
 	// ── Tonal adjustments (post-curve tone stage) ────────────────────────────
 	/**
 	 * Shadow lift/pull in [−1, +1]. Gamma move under a wide luminance mask
@@ -221,15 +235,11 @@ export interface InversionParams {
 	 */
 	highlights: number;
 
-	// ── Toe (shadow rolloff) ──────────────────────────────────────────────────
+	// ── Toe / shoulder (print curve knees) ───────────────────────────────────
+	/** Lifts paper black: positive softens the shadow roll-off. [-1, +1] */
 	toe: number;
-	toeWidth: number;
-	toeHardness: number;
-
-	// ── Shoulder (highlight rolloff) ──────────────────────────────────────────
+	/** Lifts paper white: positive holds highlight density. [-1, +1] */
 	shoulder: number;
-	shoulderWidth: number;
-	shoulderHardness: number;
 
 	// ── CLAHE (local contrast enhancement) ────────────────────────────────────
 	/** CLAHE blend strength [0,1]. 0 = off, 0.25 = negpy default. */
@@ -258,7 +268,7 @@ export interface InversionParams {
 	 */
 	glow: number;
 
-	// ── Film type and E6-specific settings ────────────────────────────────────
+	// ── Film type ─────────────────────────────────────────────────────────────
 	/**
 	 * Film processing mode.
 	 * - C41: Color negative (default) — orange mask removal + inversion
@@ -266,12 +276,6 @@ export interface InversionParams {
 	 * - E6:  Slide/reversal (positive) — no inversion needed
 	 */
 	filmType: FilmType;
-	/**
-	 * E6 normalize mode. When true (default), applies per-channel percentile
-	 * stretch like C41. When false, uses a fixed density range from the floor.
-	 * Only relevant when filmType = 'E6'.
-	 */
-	e6Normalize: boolean;
 
 	// ── Tone preset ──────────────────────────────────────────────────────────
 	/**
@@ -377,6 +381,11 @@ export interface EffectiveEdit {
 	/** NegPy inversion pipeline parameters (only used when invert = true). */
 	inversionParams: InversionParams;
 	/**
+	 * Roll baseline bounds that apply to this frame, or null when the frame
+	 * normalizes against its own bounds.
+	 */
+	rollBaseline: AppliedBaseline | null;
+	/**
 	 * Quadrilateral crop with perspective correction.
 	 * When null, no crop is applied (full image).
 	 */
@@ -406,16 +415,77 @@ export interface Roll {
 	lens: string;
 	notes: string;
 	rollEdit: RollEditParams;
+	/** Pooled normalization bounds from the last roll analysis. Absent until one runs. */
+	baseline?: RollBaseline;
+}
+
+// ─── Negative analysis ────────────────────────────────────────────────────────
+
+/**
+ * Version of the negative analysis (bounds + meters). Bump whenever the
+ * measurement changes: cached analyses and roll baselines stamped with another
+ * version are ignored and re-measured.
+ */
+export const ANALYSIS_VERSION = 1;
+
+/**
+ * Near-neutral reference densities of a frame: per-channel raw log10 values of
+ * the lowest-chroma pixels in a midtone, shadow and (when present) highlight
+ * luma band. Cast Removal fits red and blue to green along it.
+ */
+export interface NeutralAxis {
+	mid: Vec3;
+	shadow: Vec3;
+	highlight: Vec3 | null;
+	/** How trustworthy the neutral sets are, 0–1. Scales the correction. */
+	confidence: number;
 }
 
 /**
- * Cached log percentiles from the preview pipeline — stored so batch export
- * can reproduce the exact same normalization the user saw on screen.
+ * Everything measured from a frame's pixels that the print curve is solved
+ * from. Computed by the preview and persisted so the native export renders the
+ * same picture; the exporter re-measures when it is absent or stale.
  */
-export interface CachedLogPercentiles {
-	floors: [number, number, number];
-	ceils: [number, number, number];
-	autoExposure: number;
+export interface NegativeAnalysis {
+	version: number;
+	/** The frame's own bounds — never the roll mix (see `LogBounds`). */
+	floors: Vec3;
+	ceils: Vec3;
+	/** Metered midtone in normalized luma, already pulled toward the assumed anchor and clamped. */
+	anchor: number;
+	/** Luma spread of the textured areas, in log10 density. */
+	texturalRange: number;
+	neutralAxis: NeutralAxis | null;
+	/** `AppliedBaseline.key` the meters were read against; null = the frame's own bounds. */
+	baselineKey: number | null;
+}
+
+/** Bounds pooled across a roll: the orange mask and base are roll properties. */
+export interface RollBaseline {
+	version: number;
+	floors: Vec3;
+	ceils: Vec3;
+	/** Frames whose colour sits far from the roll's; they keep their own bounds. */
+	outlierFrameIds: string[];
+	/** Take the roll's tonal range (luma-weighted centre and span). */
+	useLuma: boolean;
+	/** Take the roll's per-channel balance. */
+	useColor: boolean;
+	/** Unix ms of the analysis; identifies this baseline in cached analyses. */
+	analyzedAt: number;
+}
+
+/** A `RollBaseline` as it applies to one frame. */
+export interface AppliedBaseline {
+	floors: Vec3;
+	ceils: Vec3;
+	useLuma: boolean;
+	useColor: boolean;
+	/**
+	 * Identifies the baseline and its axis toggles: an analysis metered against
+	 * another key is stale. Opaque — compare for equality only.
+	 */
+	key: number;
 }
 
 export interface Frame {
@@ -432,11 +502,11 @@ export interface Frame {
 	capturedAt: number | null;
 	frameEdit: FrameEditOverrides;
 	/**
-	 * Log percentiles cached from the last preview render.  Used by batch
-	 * export to match the visual output the user approved in the editor.
-	 * `undefined` if the frame has never been opened in the editor.
+	 * Analysis cached from the last preview render, so batch export matches
+	 * what the user approved in the editor. `undefined` if the frame has never
+	 * been opened in the editor.
 	 */
-	cachedLogPerc?: CachedLogPercentiles;
+	cachedAnalysis?: NegativeAnalysis;
 }
 
 // ─── Library (image browsing mode) ────────────────────────────────────────────
@@ -480,7 +550,6 @@ const identityMatrix: Matrix3x3 = [
 ];
 
 export const DEFAULT_INVERSION_PARAMS: InversionParams = {
-	autoLevels: true,
 	autoExposure: true,
 	density: 1.0,
 	grade: 2.5,
@@ -493,21 +562,17 @@ export const DEFAULT_INVERSION_PARAMS: InversionParams = {
 	highlightCyan: 0.0,
 	highlightMagenta: 0.0,
 	highlightYellow: 0.0,
+	castRemoval: 0.5,
 	shadows: 0.0,
 	highlights: 0.0,
 	toe: 0.0,
-	toeWidth: 1.0,
-	toeHardness: 1.0,
 	shoulder: 0.0,
-	shoulderWidth: 1.0,
-	shoulderHardness: 1.0,
 	claheStrength: 0.25,
 	vibrance: 0.0,
 	saturation: 0.0,
 	sharpen: 0.25,
 	glow: 0.0,
 	filmType: 'C41',
-	e6Normalize: true,
 	tonePreset: 'standard',
 	borderWidth: 0,
 	borderColor: 'black',
@@ -541,6 +606,27 @@ export const DEFAULT_WHITE_BALANCE: WhiteBalance = {
 };
 
 // ─── Resolution helper ────────────────────────────────────────────────────────
+
+/**
+ * The roll baseline as it applies to `frame`: null when the roll has none, it
+ * was measured by another analysis version, both axes are switched off, or the
+ * frame is an outlier (shot under a different light — it keeps its own bounds).
+ */
+function appliedBaseline(roll: Roll, frame: Frame): AppliedBaseline | null {
+	const b = roll.baseline;
+	if (!b || b.version !== ANALYSIS_VERSION) return null;
+	if (!b.useLuma && !b.useColor) return null;
+	if (b.outlierFrameIds.includes(frame.id)) return null;
+	return {
+		floors: b.floors,
+		ceils: b.ceils,
+		useLuma: b.useLuma,
+		useColor: b.useColor,
+		// Toggling an axis changes the bounds the meters read, so the toggles
+		// are part of the identity (4× a unix-ms stamp stays exact in a double).
+		key: b.analyzedAt * 4 + (b.useLuma ? 2 : 0) + (b.useColor ? 1 : 0),
+	};
+}
 
 export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 	const r = roll.rollEdit;
@@ -590,6 +676,7 @@ export function resolveEdit(roll: Roll, frame: Frame): EffectiveEdit {
 				?? (r as { inversionParams?: InversionParams }).inversionParams
 				?? DEFAULT_INVERSION_PARAMS),
 		},
+		rollBaseline: appliedBaseline(roll, frame),
 		// Crop quad is frame-only (no roll-level default).
 		cropQuad: (f as { cropQuad?: CropQuad | null }).cropQuad ?? null,
 		// Transform is frame-only (no roll-level default).

@@ -7,16 +7,23 @@
  *   Pass 2 (colormatrix)  — 3×3 camera-to-sRGB colour matrix
  *   Pass 3 (tonecurve)    — white balance + RGB curves + global tone curve + γ encode
  *
- * Negative (invert = true) — NegPy pipeline (no camera colour matrix):
+ * Negative (invert = true) — print pipeline ported from NegPy (no camera colour matrix):
  *   Pass 0 (ingest_raw)     — rgba16uint linear → rgba16float  [RAW path only]
- *   Pass 1 (normalization)  — log10 conversion + per-channel percentile stretch
- *                             on camera-native data (per-channel stretch removes the
- *                             orange mask and inverts, matching negpy where rawpy
- *                             delivers Adobe RGB and normalization operates directly)
- *   Pass 2 (hd_curve)       — H&D sigmoid: CMY timing + toe/shoulder + paper response
- *                             outputs gamma-encoded transmittance (pow 1/2.2)
+ *   Pass 1 (normalization)  — log10 conversion + per-channel stretch between the
+ *                             measured density bounds, on camera-native data (the
+ *                             stretch removes the orange mask and inverts)
+ *   Pass 2 (hd_curve)       — print curve: CMY filtration + straight line between a
+ *                             shoulder and a toe, then the tone stage; outputs
+ *                             gamma-encoded transmittance
  *   Pass 2.5 (clahe)        — optional CLAHE local contrast enhancement
- *   Pass 3 (tonecurve)      — white balance + RGB curves + global tone curve (no sRGB γ)
+ *   Pass 3 (tonecurve)      — RGB curves + global tone curve (no sRGB γ)
+ *
+ * Slide (invert = true, film type E6) — the same passes with the transparency
+ * transfer in place of the print: the normalization applies the camera matrix
+ * (RAW only) and the transfer's fixed window, hd_curve runs the transfer.
+ *
+ * The bounds, meters and curve solve live in ./negative/ and are mirrored by
+ * src-tauri/src/negative/ for the native export and thumbnails.
  *
  * Usage:
  *   const gpu = await createPipeline(canvas);
@@ -43,26 +50,43 @@ import transformWGSL from './shaders/transform.wgsl?raw';
 import borderWGSL from './shaders/border.wgsl?raw';
 import { buildCurveLUTs } from './curves';
 import { rotationCoverZoom } from './geometry';
-import type { BorderColor, CropQuad, EffectiveEdit, FilmType, InversionParams, Matrix3x3, TransformParams } from '$lib/types';
+import { analyzeNegative } from './negative/analysis';
+import type { AnalysisResult, ChannelHistograms } from './negative/analysis';
+import type { LinearSource } from './negative/grid';
+import {
+	borderPixelsForContent,
+	computeCropHomography,
+	computeCropOutputDimensions,
+	sampleSourceLogAt,
+} from './negative/pick-geometry';
+import type { PickGeometry } from './negative/pick-geometry';
+import { packPrintCurveUniforms } from './negative/print-curve';
+import type { ToneStageParams } from './negative/print-curve';
+import { solvePrintCurve } from './negative/solve';
+import { slideCameraMatrix } from './negative/transfer';
+import type {
+	BorderColor,
+	CropQuad,
+	EffectiveEdit,
+	FilmType,
+	InversionParams,
+	LogBounds,
+	Matrix3x3,
+	NegativeAnalysis,
+	TransformParams,
+	Vec3,
+} from '$lib/types';
 import { TONE_PRESETS } from '$lib/types';
 import { DEFAULT_TRANSFORM } from '$lib/types';
 
-// ─── NegPy constants ───────────────────────────────────────────────────────────
+// ─── Tone stage constants ──────────────────────────────────────────────────────
 
-/** Maximum log-density shift per CMY slider unit (negpy EXPOSURE_CONSTANTS.cmy_max_density). */
-const CMY_MAX_DENSITY = 0.15;
-/** Maps the density slider to an exposure shift: shift = 0.01 + density * DENSITY_MULTIPLIER (negpy density_multiplier). */
-const DENSITY_MULTIPLIER = 0.15;
-/** Maps the grade slider to the sigmoid slope: slope = 1.0 + grade * GRADE_MULTIPLIER (negpy grade_multiplier). */
-const GRADE_MULTIPLIER = 1.75;
-/** Maximum print density (D_max) — deepest black photographic paper can produce. */
-const D_MAX = 4.0;
 /**
- * Neutral `density` / `grade` values. These now fix the film/paper base curve:
- * the Brightness and Contrast sliders are stored in these two fields but drive
- * the Lightroom-style tone stage (exposure in EV, contrast S-curve) instead of
- * sliding the H&D pivot and slope, which produced muddy shadows and erratic
- * contrast. Auto-exposure still nudges the pivot.
+ * Neutral `density` / `grade` values. The Brightness and Contrast sliders are
+ * stored in these two fields and drive the Lightroom-style tone stage
+ * (exposure in EV, contrast S-curve), never the print curve, whose slope and
+ * pivot are metered per frame (src/lib/image/negative/). Mirrored by
+ * NEUTRAL_DENSITY / NEUTRAL_GRADE in src-tauri/src/process.rs.
  */
 const NEUTRAL_DENSITY = 1.0;
 const NEUTRAL_GRADE = 2.5;
@@ -155,20 +179,13 @@ export async function previewMaxPx(): Promise<number> {
 	return Math.min(_gpuMaxTextureDimension, PREVIEW_MAX_PX);
 }
 
-// ─── Log-space percentile computation (NegPy normalization) ──────────────────
-
-/**
- * Default analysis buffer ratio — matches negpy's ProcessConfig.analysis_buffer.
- * Crops this fraction of each edge before computing percentiles, excluding the
- * film rebate border from the analysis.
- */
-const ANALYSIS_BUFFER = 0.10;
+// ─── sRGB source helpers ──────────────────────────────────────────────────────
 
 /**
  * 256-entry sRGB→linear lookup table, keyed on the 8-bit sample value.
  *
  * Mirrors `srgb_to_linear` in `normalization.wgsl` / `invert.wgsl` and
- * `export.rs:1087` so the CPU percentile analysis, the GPU preview and the
+ * `export.rs`, so the CPU-side source snapshot, the GPU preview and the
  * native export all operate on the same linear-light values.
  */
 const SRGB_TO_LINEAR_LUT: Float32Array = (() => {
@@ -181,9 +198,9 @@ const SRGB_TO_LINEAR_LUT: Float32Array = (() => {
 })();
 
 /**
- * Convert an 8-bit sRGB RGBA buffer to linear-light f32 in place-equivalent
- * form.  The alpha channel is expanded too — it is never read by the
- * percentile analysis, so the extra work is not worth a branch per sample.
+ * Convert an 8-bit sRGB RGBA buffer to linear-light f32. The alpha channel is
+ * expanded too — nothing reads it, so the extra work is not worth a branch
+ * per sample.
  */
 function srgbU8ToLinearF32(src: Uint8ClampedArray | Uint8Array): Float32Array {
 	const out = new Float32Array(src.length);
@@ -193,644 +210,11 @@ function srgbU8ToLinearF32(src: Uint8ClampedArray | Uint8Array): Float32Array {
 	return out;
 }
 
-
 /**
- * Number of histogram bins for auto-levels shadow floor computation.
- * Higher = more precise detection of the first populated bin.
- */
-const AUTO_LEVELS_BINS = 256;
-
-/**
- * Cumulative percentage threshold for auto-levels.
- * We find the bin where this percentage of total pixels have been seen.
- * Using 0.1% (0.001) means we ignore the darkest 0.1% as outliers.
- * This is more aggressive than pure "first populated bin" which would be ~0%.
- */
-const AUTO_LEVELS_CUMULATIVE_PERCENT = 0.001;
-
-/**
- * Number of bins for histogram valley detection.
- */
-const VALLEY_HISTOGRAM_BINS = 256;
-
-/**
- * Fraction of peak count to consider as "valley" threshold.
- * When scanning backward from the rebate spike, we look for bins
- * where the count drops below this fraction of the peak.
- * Lower = more conservative (only very clear valleys trigger).
- */
-const VALLEY_THRESHOLD = 0.02;
-
-/**
- * Minimum fraction of total pixels that must be in the bright region
- * for us to consider it a rebate spike worth detecting.
- * If less than this, we assume no rebate and use percentile fallback.
- * Higher = more conservative (needs more obvious rebate).
- */
-const REBATE_MIN_FRACTION = 0.05;
-
-/**
- * The rebate peak must be this many times larger than the median bin count
- * in the image region to be considered a true rebate spike.
- * This prevents false positives from normal highlight distributions.
- */
-const REBATE_PEAK_RATIO = 3.0;
-
-/**
- * Result from histogram valley detection.
- */
-interface ValleyResult {
-	/** The log-density value at the detected valley (use as white point). */
-	valleyValue: number;
-	/** The log-density value at the peak (rebate region). */
-	peakValue: number;
-	/** Whether a significant rebate spike was detected. */
-	rebateDetected: boolean;
-}
-
-/**
- * Find the "valley" in a histogram — the point where the rebate spike ends
- * and actual image data begins.
- *
- * For film negatives, the rebate (orange border) appears as a massive spike
- * at the bright end of the histogram. The actual image data forms a separate
- * distribution with a valley between it and the rebate.
- *
- * This function scans from the bright end looking for where the spike "ends"
- * by detecting either:
- * 1. A significant drop in bin count (below VALLEY_THRESHOLD * peakCount)
- * 2. A local minimum (bin count lower than both neighbors)
- *
- * The detection is conservative — it only triggers when there's a clear,
- * obvious rebate spike that's significantly larger than normal image data.
- *
- * @param values - Array of log-density values for one channel
- * @param channelName - Channel name for debug logging
- * @returns Valley detection result with value and metadata
- */
-function findHistogramValley(
-	values: number[],
-	channelName: string,
-): ValleyResult {
-	if (values.length === 0) {
-		return { valleyValue: 0, peakValue: 0, rebateDetected: false };
-	}
-
-	// Get range from sorted values
-	const sorted = values.slice().sort((a, b) => a - b);
-	const minVal = sorted[0];
-	const maxVal = sorted[sorted.length - 1];
-	const range = maxVal - minVal;
-
-	// Fallback percentile value (99.9th)
-	const fallbackIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
-	const fallbackValue = sorted[Math.min(sorted.length - 1, fallbackIdx)];
-
-	if (range < 0.001) {
-		return { valleyValue: fallbackValue, peakValue: fallbackValue, rebateDetected: false };
-	}
-
-	// Build histogram
-	const numBins = VALLEY_HISTOGRAM_BINS;
-	const binWidth = range / numBins;
-	const histogram = new Uint32Array(numBins);
-
-	for (const v of values) {
-		const bin = Math.min(numBins - 1, Math.floor((v - minVal) / binWidth));
-		histogram[bin]++;
-	}
-
-	// Compute median bin count for the lower 75% (image region, not rebate)
-	const imageRegionEnd = Math.floor(numBins * 0.75);
-	const imageRegionBins = Array.from(histogram.slice(0, imageRegionEnd)).sort((a, b) => a - b);
-	const medianImageBinCount = imageRegionBins[Math.floor(imageRegionBins.length / 2)];
-
-	// Find the peak in the upper portion (likely rebate).
-	// Look at the top 15% of the histogram range (more focused on the extreme).
-	const searchStart = Math.floor(numBins * 0.85);
-	let peakBin = searchStart;
-	let peakCount = histogram[searchStart];
-
-	for (let i = searchStart; i < numBins; i++) {
-		if (histogram[i] > peakCount) {
-			peakCount = histogram[i];
-			peakBin = i;
-		}
-	}
-
-	const totalPixels = values.length;
-	const peakValue = minVal + (peakBin + 0.5) * binWidth;
-
-	// Check if there's a significant rebate spike using multiple criteria:
-	// 1. Peak must contain at least REBATE_MIN_FRACTION of total pixels
-	// 2. Peak must be REBATE_PEAK_RATIO times larger than median image bin
-	const hasEnoughPixels = peakCount >= totalPixels * REBATE_MIN_FRACTION;
-	const isSignificantSpike = peakCount > medianImageBinCount * REBATE_PEAK_RATIO;
-
-	if (!hasEnoughPixels || !isSignificantSpike) {
-		console.debug(
-			`[valley] ${channelName}: no rebate spike ` +
-			`(peak=${peakCount}, needed=${Math.floor(totalPixels * REBATE_MIN_FRACTION)} pixels, ` +
-			`ratio=${(peakCount / Math.max(1, medianImageBinCount)).toFixed(1)}x, needed=${REBATE_PEAK_RATIO}x)`
-		);
-		return { valleyValue: fallbackValue, peakValue, rebateDetected: false };
-	}
-
-	// Scan backward from the peak looking for the valley.
-	// Valley = where count drops below threshold * peakCount, OR a local minimum.
-	const threshold = peakCount * VALLEY_THRESHOLD;
-	let valleyBin = peakBin;
-	let foundValley = false;
-
-	for (let i = peakBin - 1; i >= 1; i--) {
-		// Check for significant drop below threshold
-		if (histogram[i] < threshold) {
-			valleyBin = i;
-			foundValley = true;
-			break;
-		}
-		// Check for local minimum (count lower than both neighbors)
-		// This catches cases where there's a clear dip between distributions
-		if (histogram[i] < histogram[i - 1] && histogram[i] < histogram[i + 1]) {
-			// Verify it's actually a meaningful minimum (not just noise)
-			// Must be significantly lower than the peak
-			if (histogram[i] < peakCount * 0.1) {
-				valleyBin = i;
-				foundValley = true;
-				break;
-			}
-		}
-	}
-
-	if (!foundValley) {
-		// No valley found — rebate and image data may overlap
-		// Don't filter anything, fall back to percentile
-		console.debug(`[valley] ${channelName}: rebate detected but no clear valley, using percentile fallback`);
-		return { valleyValue: fallbackValue, peakValue, rebateDetected: false };
-	}
-
-	const valleyValue = minVal + (valleyBin + 0.5) * binWidth;
-
-	console.debug(
-		`[valley] ${channelName}: peak@bin${peakBin}(${peakValue.toFixed(4)}, n=${peakCount}), ` +
-		`valley@bin${valleyBin}(${valleyValue.toFixed(4)}), range=[${minVal.toFixed(4)}, ${maxVal.toFixed(4)}], ` +
-		`peakRatio=${(peakCount / Math.max(1, medianImageBinCount)).toFixed(1)}x`
-	);
-
-	return { valleyValue, peakValue, rebateDetected: true };
-}
-
-/**
- * Per-channel histogram data for visualization.
- * Each array contains bin counts normalized to [0, 1] where 1 = max bin count.
- * The histograms are computed in log-density space, then mapped to normalized
- * [0, 1] output space for display in the curves editor.
- */
-export interface ChannelHistograms {
-	/** Red channel histogram bins (256 values, normalized 0-1). */
-	r: Float32Array;
-	/** Green channel histogram bins (256 values, normalized 0-1). */
-	g: Float32Array;
-	/** Blue channel histogram bins (256 values, normalized 0-1). */
-	b: Float32Array;
-	/** Luminance histogram bins (256 values, normalized 0-1). */
-	luma: Float32Array;
-}
-
-/**
- * Per-channel log-density floor/ceil for the normalization shader.
- * The normalization pass does: normalized = (log10(pixel) - floor) / (ceil - floor)
- * For C-41 negatives: floor ≈ 0.5th percentile, ceil ≈ 99.5th percentile.
- * Since log10 of values < 1 is negative, floor < ceil < 0 for typical film.
- */
-export interface LogPercentiles {
-	floors: [number, number, number];
-	ceils: [number, number, number];
-	/**
-	 * Auto-exposure correction in density units.
-	 * Positive = image is dark, needs brightening (reduce density).
-	 * Negative = image is bright, needs darkening (increase density).
-	 * Computed from the median luminance relative to middle gray.
-	 */
-	autoExposure: number;
-	/**
-	 * Per-channel histograms for visualization in the curves editor.
-	 * Values are in normalized output space [0, 1] after floor/ceil mapping.
-	 */
-	histograms?: ChannelHistograms;
-}
-
-/**
- * Compute per-channel histogram-based floors AND ceils for auto-levels mode.
- *
- * This implements an enhanced "Levels" technique inspired by Photoshop:
- * - **Floors (black point)**: Standard percentile-based detection (0.1%)
- * - **Ceils (white point)**: Percentile computed AFTER excluding rebate pixels
- *
- * For film negatives, the rebate (orange border) creates a massive spike at the
- * bright end of the histogram. We detect the "valley" between image data and
- * rebate, then compute the white point percentile only on pixels BELOW the valley
- * (i.e., actual image content, excluding the rebate).
- *
- * This removes color casts and improves exposure automatically because each
- * channel is independently stretched to use the full range, with the rebate
- * properly excluded from the calculation.
- *
- * @param rLog - Array of log10 red channel values
- * @param gLog - Array of log10 green channel values
- * @param bLog - Array of log10 blue channel values
- * @param filmType - Film type (affects floor/ceil interpretation for E6)
- * @returns Object with per-channel floors and ceils
- */
-function computeAutoLevelsFloorsAndCeils(
-	rLog: number[],
-	gLog: number[],
-	bLog: number[],
-	filmType: FilmType,
-): { floors: [number, number, number]; ceils: [number, number, number] } {
-	if (rLog.length === 0) {
-		return {
-			floors: [-1, -1, -1],
-			ceils: [0, 0, 0],
-		};
-	}
-
-	const isE6 = filmType === 'E6';
-
-	/**
-	 * Find the floor value for a single channel using low percentile.
-	 * Floor: where AUTO_LEVELS_CUMULATIVE_PERCENT of pixels are below (0.1%)
-	 */
-	function findFloor(values: number[], channelName: string): number {
-		if (values.length === 0) return -1;
-
-		const sorted = values.slice().sort((a, b) => a - b);
-		const lowIdx = Math.floor(sorted.length * AUTO_LEVELS_CUMULATIVE_PERCENT);
-		const floor = sorted[Math.max(0, lowIdx)];
-
-		console.debug(`[autoLevels] ${channelName} floor: ${floor.toFixed(4)} (@${lowIdx}/${sorted.length})`);
-		return floor;
-	}
-
-	/**
-	 * Find the ceil value for a single channel, excluding rebate pixels.
-	 * 
-	 * 1. Detect the valley (boundary between image and rebate)
-	 * 2. Filter out pixels above the valley (rebate)
-	 * 3. Compute the high percentile on remaining pixels (actual image content)
-	 */
-	function findCeilExcludingRebate(values: number[], channelName: string): number {
-		if (values.length === 0) return 0;
-
-		// Detect valley to find rebate boundary
-		const valley = findHistogramValley(values, channelName);
-
-		let filteredValues: number[];
-		if (valley.rebateDetected) {
-			// Filter out pixels above the valley (rebate region)
-			filteredValues = values.filter(v => v <= valley.valleyValue);
-			console.debug(`[autoLevels] ${channelName}: filtered ${values.length - filteredValues.length} rebate pixels (${((values.length - filteredValues.length) / values.length * 100).toFixed(1)}%)`);
-		} else {
-			// No rebate detected, use all pixels
-			filteredValues = values;
-		}
-
-		if (filteredValues.length === 0) {
-			// Edge case: all pixels were filtered (shouldn't happen)
-			console.warn(`[autoLevels] ${channelName}: all pixels filtered as rebate, falling back`);
-			filteredValues = values;
-		}
-
-		// Compute high percentile on the filtered (non-rebate) pixels
-		const sorted = filteredValues.slice().sort((a, b) => a - b);
-		const highIdx = Math.floor(sorted.length * (1 - AUTO_LEVELS_CUMULATIVE_PERCENT));
-		const ceil = sorted[Math.min(sorted.length - 1, highIdx)];
-
-		console.debug(`[autoLevels] ${channelName} ceil: ${ceil.toFixed(4)} (@${highIdx}/${sorted.length} after rebate exclusion)`);
-		return ceil;
-	}
-
-	// Compute floors using percentile method
-	const rFloor = findFloor(rLog, 'R');
-	const gFloor = findFloor(gLog, 'G');
-	const bFloor = findFloor(bLog, 'B');
-
-	// Compute ceils using percentile AFTER excluding rebate pixels
-	const rCeil = findCeilExcludingRebate(rLog, 'R');
-	const gCeil = findCeilExcludingRebate(gLog, 'G');
-	const bCeil = findCeilExcludingRebate(bLog, 'B');
-
-	// For E6 (positive/slide film), swap floor and ceil semantics
-	// E6 has dark rebate (unexposed film base) instead of bright orange rebate
-	if (isE6) {
-		// For E6, the rebate is at the DARK end, so we'd need inverse logic
-		// For now, just swap the computed values (may need refinement for E6)
-		return {
-			floors: [rCeil, gCeil, bCeil],
-			ceils: [rFloor, gFloor, bFloor],
-		};
-	}
-
-	return {
-		floors: [rFloor, gFloor, bFloor],
-		ceils: [rCeil, gCeil, bCeil],
-	};
-}
-
-/**
- * Compute per-channel 0.5th / 99.5th log10 percentiles from a Float32Array of
- * linear RGBA pixels (length = w * h * 4, R at [0], G at [1], B at [2]).
- *
- * When `width` and `height` are provided, an analysis buffer crop is applied
- * (matching negpy's `analysis_buffer=0.10`) to exclude the film rebate border.
- *
- * When `colorMatrix` is provided (row-major 3×3), it is applied to each pixel
- * before the log transform — this is essential for the negative path where the
- * GPU applies the cam→sRGB matrix before the normalization shader.
- *
- * When `autoLevels` is true, uses histogram-based floor computation instead of
- * percentiles for the shadow input level (like Photoshop's Levels auto-adjust).
- *
- * Downsamples by `stride` to keep it fast for large images (default: every 8th pixel).
- */
-function computeLogPercentilesFromF32(
-	pixels: Float32Array,
-	width: number = 0,
-	height: number = 0,
-	stride: number = 8,
-	colorMatrix?: Matrix3x3,
-	filmType: FilmType = 'C41',
-	autoLevels: boolean = false,
-): LogPercentiles {
-	const LOG10_E = 0.43429448190325183;
-	const eps = 1e-6;
-
-	// Optional color matrix application (row-major [m00,m01,m02, m10,m11,m12, m20,m21,m22]).
-	const hasMatrix = colorMatrix !== undefined;
-	const m = colorMatrix;
-
-	// Collect per-pixel log10 values (r, g, b) and their mean luminance.
-	// We store tuples so we can later select "darkest" pixels by mean luminance
-	// and average their per-channel values — matching negpy's floor computation.
-	const rLog: number[] = [];
-	const gLog: number[] = [];
-	const bLog: number[] = [];
-	const meanLog: number[] = [];
-
-	function processPixel(rawR: number, rawG: number, rawB: number): void {
-		let r = rawR, g = rawG, b = rawB;
-		if (hasMatrix && m) {
-			r = Math.max(0, m[0] * rawR + m[1] * rawG + m[2] * rawB);
-			g = Math.max(0, m[3] * rawR + m[4] * rawG + m[5] * rawB);
-			b = Math.max(0, m[6] * rawR + m[7] * rawG + m[8] * rawB);
-		}
-		if (r > eps && g > eps && b > eps) {
-			const lr = Math.log(r) * LOG10_E;
-			const lg = Math.log(g) * LOG10_E;
-			const lb = Math.log(b) * LOG10_E;
-			rLog.push(lr);
-			gLog.push(lg);
-			bLog.push(lb);
-			meanLog.push((lr + lg + lb) / 3);
-		}
-	}
-
-	// Apply analysis buffer crop when dimensions are known.
-	const hasDims = width > 0 && height > 0;
-	const cutY = hasDims ? Math.floor(height * ANALYSIS_BUFFER) : 0;
-	const cutX = hasDims ? Math.floor(width * ANALYSIS_BUFFER) : 0;
-	const startY = cutY;
-	const endY = hasDims ? height - cutY : 0;
-	const startX = cutX;
-	const endX = hasDims ? width - cutX : 0;
-
-	if (hasDims) {
-		for (let y = startY; y < endY; y += stride) {
-			for (let x = startX; x < endX; x += stride) {
-				const i = (y * width + x) * 4;
-				processPixel(pixels[i], pixels[i + 1], pixels[i + 2]);
-			}
-		}
-	} else {
-		for (let i = 0; i < pixels.length; i += 4 * stride) {
-			processPixel(pixels[i], pixels[i + 1], pixels[i + 2]);
-		}
-	}
-
-	function percentile(arr: number[], p: number): number {
-		if (arr.length === 0) return -1.0;
-		const sorted = arr.slice().sort((a, b) => a - b);
-		const idx = Math.floor((p / 100) * (sorted.length - 1));
-		return sorted[idx];
-	}
-
-	// Percentile thresholds depend on film type.
-	// E6 (slide) film is a positive: darkest areas correspond to actual dark
-	// subjects, so we invert the percentile selection compared to negatives.
-	// negpy: C41/BW use p_low=0.001, p_high=99.999
-	//        E6 uses p_low=99.999, p_high=0.001
-	const isE6 = filmType === 'E6';
-	const pHigh = isE6 ? 0.001 : 99.999;
-
-	// Compute floors and ceils using either auto-levels or percentile method
-	let floors: [number, number, number];
-	let ceils: [number, number, number];
-
-	if (autoLevels) {
-		// Auto-levels: each channel finds its own floor AND ceil independently.
-		// This is key for removing color casts - channels are stretched independently.
-		const bounds = computeAutoLevelsFloorsAndCeils(rLog, gLog, bLog, filmType);
-		floors = bounds.floors;
-		ceils = bounds.ceils;
-		console.debug('[autoLevels ON] per-channel floors:', floors.map(f => f.toFixed(4)));
-		console.debug('[autoLevels ON] per-channel ceils:', ceils.map(c => c.toFixed(4)));
-	} else {
-		// Original negpy method: use low percentile of mean luminance to find
-		// the darkest pixels, then average their per-channel values.
-		// All channels use floors from the SAME set of pixels (darkest by average).
-		const pLow = isE6 ? 99.999 : 0.001;
-		const darkThreshold = percentile(meanLog, pLow);
-		let floorR = 0, floorG = 0, floorB = 0, darkCount = 0;
-		for (let i = 0; i < meanLog.length; i++) {
-			// E6 inverts the comparison: >= instead of <=
-			const isDark = isE6 ? (meanLog[i] >= darkThreshold) : (meanLog[i] <= darkThreshold);
-			if (isDark) {
-				floorR += rLog[i];
-				floorG += gLog[i];
-				floorB += bLog[i];
-				darkCount++;
-			}
-		}
-		floors = darkCount > 0
-			? [floorR / darkCount, floorG / darkCount, floorB / darkCount]
-			: [percentile(rLog, pLow), percentile(gLog, pLow), percentile(bLog, pLow)];
-
-		// Ceils use standard per-channel percentile
-		ceils = [
-			percentile(rLog, pHigh),
-			percentile(gLog, pHigh),
-			percentile(bLog, pHigh),
-		];
-		console.debug('[autoLevels OFF] darkest-pixels floors:', floors.map(f => f.toFixed(4)), `(${darkCount} pixels)`);
-		console.debug('[autoLevels OFF] percentile ceils:', ceils.map(c => c.toFixed(4)));
-	}
-
-	console.debug('[normalization] floor-ceil delta per channel:',
-		[(ceils[0] - floors[0]).toFixed(4), (ceils[1] - floors[1]).toFixed(4), (ceils[2] - floors[2]).toFixed(4)]);
-
-	// ── Auto-exposure calculation ────────────────────────────────────────────
-	// Compute how far the median luminance is from middle gray (0.5 in normalized space).
-	// After normalization, values are mapped from [floor, ceil] to [0, 1].
-	// We want the median to land around 0.5 for a well-exposed image.
-	//
-	// For each channel, find where the median sits in the normalized range:
-	//   normalizedMedian = (median - floor) / (ceil - floor)
-	// Then compute the average across channels.
-	//
-	// If normalizedMedian < 0.5, image is dark → positive autoExposure (brighten)
-	// If normalizedMedian > 0.5, image is bright → negative autoExposure (darken)
-	//
-	// The density slider works inversely: higher density = darker image.
-	// So autoExposure = (0.5 - normalizedMedian) * scale
-
-	const medianR = percentile(rLog, 50);
-	const medianG = percentile(gLog, 50);
-	const medianB = percentile(bLog, 50);
-
-	// Normalize medians to [0, 1] based on floors and ceils
-	const rangeR = ceils[0] - floors[0];
-	const rangeG = ceils[1] - floors[1];
-	const rangeB = ceils[2] - floors[2];
-
-	const normMedianR = rangeR > 0.001 ? (medianR - floors[0]) / rangeR : 0.5;
-	const normMedianG = rangeG > 0.001 ? (medianG - floors[1]) / rangeG : 0.5;
-	const normMedianB = rangeB > 0.001 ? (medianB - floors[2]) / rangeB : 0.5;
-
-	// Use luminance-weighted average (human eye is most sensitive to green)
-	const avgNormMedian = 0.2126 * normMedianR + 0.7152 * normMedianG + 0.0722 * normMedianB;
-
-	// Target is 0.5 (middle gray in normalized space).
-	// Scale factor converts the 0-1 deviation to density units.
-	// A deviation of 0.5 (completely dark) should give ~2-3 density units adjustment.
-	//
-	// For NEGATIVES: high normalized median = bright negative = dark positive output.
-	// So we INVERT the sign: (avgNormMedian - TARGET) instead of (TARGET - avgNormMedian).
-	// When median > 0.5 (negative is bright, output is dark), we get positive autoExposure,
-	// which will be SUBTRACTED from density, making the output brighter.
-	const TARGET_MEDIAN = 0.5;
-	const EXPOSURE_SCALE = 4.0;  // How aggressively to correct
-	const autoExposure = (avgNormMedian - TARGET_MEDIAN) * EXPOSURE_SCALE;
-
-	console.debug('[autoExposure] medians (normalized):',
-		`R=${normMedianR.toFixed(3)}, G=${normMedianG.toFixed(3)}, B=${normMedianB.toFixed(3)}, avg=${avgNormMedian.toFixed(3)}`);
-	console.debug('[autoExposure] correction:', autoExposure.toFixed(3), 'density units');
-
-	// ── Build histograms for visualization ───────────────────────────────────
-	// Histograms are computed in normalized output space [0, 1] after floor/ceil mapping.
-	// This shows what the image will look like after the normalization pass.
-	const HIST_BINS = 256;
-	const histR = new Uint32Array(HIST_BINS);
-	const histG = new Uint32Array(HIST_BINS);
-	const histB = new Uint32Array(HIST_BINS);
-	const histLuma = new Uint32Array(HIST_BINS);
-
-	for (let i = 0; i < rLog.length; i++) {
-		// Normalize log values to [0, 1] using floors and ceils
-		const normR = rangeR > 0.001 ? (rLog[i] - floors[0]) / rangeR : 0.5;
-		const normG = rangeG > 0.001 ? (gLog[i] - floors[1]) / rangeG : 0.5;
-		const normB = rangeB > 0.001 ? (bLog[i] - floors[2]) / rangeB : 0.5;
-
-		// Clamp to [0, 1] and map to bin index
-		const binR = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normR)) * (HIST_BINS - 1))));
-		const binG = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normG)) * (HIST_BINS - 1))));
-		const binB = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, normB)) * (HIST_BINS - 1))));
-
-		histR[binR]++;
-		histG[binG]++;
-		histB[binB]++;
-
-		// Luminance using standard weights
-		const luma = 0.2126 * normR + 0.7152 * normG + 0.0722 * normB;
-		const binLuma = Math.max(0, Math.min(HIST_BINS - 1, Math.floor(Math.max(0, Math.min(1, luma)) * (HIST_BINS - 1))));
-		histLuma[binLuma]++;
-	}
-
-	// Normalize histograms to [0, 1] range (relative to max bin count)
-	// Use a logarithmic scale to make small peaks visible alongside large ones
-	function normalizeHistogram(hist: Uint32Array): Float32Array {
-		const result = new Float32Array(HIST_BINS);
-		let maxCount = 0;
-		for (let i = 0; i < HIST_BINS; i++) {
-			if (hist[i] > maxCount) maxCount = hist[i];
-		}
-		if (maxCount > 0) {
-			// Use log scale: log(1 + count) / log(1 + maxCount)
-			const logMax = Math.log(1 + maxCount);
-			for (let i = 0; i < HIST_BINS; i++) {
-				result[i] = Math.log(1 + hist[i]) / logMax;
-			}
-		}
-		return result;
-	}
-
-	const histograms: ChannelHistograms = {
-		r: normalizeHistogram(histR),
-		g: normalizeHistogram(histG),
-		b: normalizeHistogram(histB),
-		luma: normalizeHistogram(histLuma),
-	};
-
-	return {
-		floors,
-		ceils,
-		autoExposure,
-		histograms,
-	};
-}
-
-/**
- * Compute log percentiles from a Uint16Array of linear u16 RGBA pixels
- * (as returned by `raw_decode`).  Values are divided by 65535 to normalise
- * to [0, 1] before the log transform.
- *
- * `width` and `height` are used to apply the analysis buffer crop.
- * `colorMatrix` — optional row-major 3×3 camera→sRGB matrix applied before log.
- * `filmType` — controls percentile logic (E6 inverts floor/ceil selection).
- * `autoLevels` — when true, uses histogram-based floors instead of percentiles.
- */
-function computeLogPercentilesFromU16(
-	pixels: Uint16Array,
-	width: number,
-	height: number,
-	stride: number = 8,
-	colorMatrix?: Matrix3x3,
-	filmType: FilmType = 'C41',
-	autoLevels: boolean = false,
-): LogPercentiles {
-	// Normalise u16 → [0,1] float and reuse the float percentile path.
-	// Do NOT truncate to the first N pixels — that produces a biased sample
-	// from only the top rows of the image at high resolutions.  Instead let
-	// the stride parameter do the downsampling so the entire image is covered.
-	const f32 = new Float32Array(pixels.length);
-	for (let i = 0; i < pixels.length; i++) {
-		f32[i] = pixels[i] / 65535.0;
-	}
-	return computeLogPercentilesFromF32(f32, width, height, stride, colorMatrix, filmType, autoLevels);
-}
-
-/**
- * Read the pixels of an `ImageBitmap` to a Float32Array via OffscreenCanvas.
- *
- * The result is **linear-light** [0,1] f32: the sRGB EOTF is applied here so
- * the log-percentile analysis measures the same quantity as the normalization
- * shader (which gamma-expands when `srgbExpand = 1`) and as the native export
- * path (`export.rs` expands via a 256/65536-entry LUT before `process_image`).
- *
- * This matters beyond preview/export parity: the floors and ceils derived here
- * are persisted as `frame.cachedLogPerc` and handed to the Rust exporter, which
- * applies them to linear data.  `log10(sRGB)` and `log10(linear)` are not
- * related by an affine map, so mixing the two silently mis-places every
- * per-channel bound.
+ * Read the pixels of an `ImageBitmap` to a linear-light RGBA Float32Array via
+ * OffscreenCanvas. The negative analysis and the WB picker both read this
+ * snapshot, so they see the same linear values the normalization shader
+ * produces when it gamma-expands (`srgbExpand = 1`).
  */
 async function bitmapToF32Pixels(bitmap: ImageBitmap): Promise<Float32Array> {
 	const oc = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -933,17 +317,22 @@ export interface GpuPipeline {
 	/**
 	 * Re-render the canvas from a RAW linear source.
 	 * `rawBuffer` is the ArrayBuffer returned by the `raw_decode` Tauri command.
-	 * `logPercOverride` — when provided, skips recomputing percentiles from the
-	 * buffer and uses these values instead.  Pass `lastLogPerc` on export so the
-	 * full-res render uses the same normalization as the preview.
 	 */
-	renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer, logPercOverride?: LogPercentiles): Promise<void>;
+	renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void>;
 	/**
 	 * Read back a rectangle of sRGB pixels from the last rendered output.
 	 * Returns `null` if no render has completed yet or if the region is out of bounds.
 	 * The returned array has length `w * h * 4` (RGBA, 0–255).
 	 */
 	readPixels(x: number, y: number, w: number, h: number): Promise<Uint8ClampedArray | null>;
+	/**
+	 * Mean per-channel log10 density of the resident source around the point
+	 * displayed at `(nx, ny)` (normalized over the whole displayed output, matte
+	 * included), read through the last render's geometry. The WB picker's
+	 * sample; normalize it with `lastBounds`. Null on the matte, outside the
+	 * image, or when no CPU-side source is resident.
+	 */
+	sampleSourceLog(nx: number, ny: number): Vec3 | null;
 	/** Release all GPU resources. Call when the editor unmounts. */
 	destroy(): void;
 	/**
@@ -953,8 +342,16 @@ export interface GpuPipeline {
 	 * sending data over IPC.
 	 */
 	maxTextureDimension: number;
-	/** The log percentiles from the last RAW preview render, or null if not yet rendered. */
-	lastLogPerc: LogPercentiles | null;
+	/**
+	 * The analysis of the negative from the last render (the frame's own
+	 * measurements — persist this for the exporter), or null when the last
+	 * render was not a negative.
+	 */
+	lastAnalysis: NegativeAnalysis | null;
+	/** The bounds the last negative render normalized with (roll baseline applied). */
+	lastBounds: LogBounds | null;
+	/** Histograms of the last negative render's normalized source, for the curves editor. */
+	lastHistograms: ChannelHistograms | null;
 	/**
 	 * The output dimensions from the last render (after crop is applied).
 	 * Use these for readPixels() after rendering to get the correct cropped size.
@@ -1048,215 +445,66 @@ function makeUniformBuffer(device: GPUDevice, data: Float32Array): GPUBuffer {
 	return buf;
 }
 
-// ─── NegPy uniform builders ───────────────────────────────────────────────────
+// ─── Negative uniform builders ────────────────────────────────────────────────
 
 /**
- * Convert FilmType string to numeric value for shader.
- */
-function filmTypeToNumber(filmType: FilmType): number {
-	switch (filmType) {
-		case 'C41': return 0;
-		case 'BW': return 1;
-		case 'E6': return 2;
-		default: return 0;
-	}
-}
-
-/**
- * Build the normalization pass uniform buffer.
+ * Build the normalization pass uniform buffer (layout in normalization.wgsl).
  *
- * NormUniforms layout (all vec4 + scalars, 16-byte aligned, total 80 bytes):
- *   floors         : vec4<f32>  @ 0   (rgb + pad)
- *   ceils          : vec4<f32>  @ 16  (rgb + pad)
- *   shadowCast     : vec4<f32>  @ 32  (rgb + pad)
- *   shadowStrength : f32        @ 48
- *   wpOffset       : f32        @ 52
- *   bpOffset       : f32        @ 56
- *   filmType       : u32        @ 60  (0 = C41, 1 = BW, 2 = E6)
- *   srgbExpand     : f32        @ 64  (1 = gamma-expand source, 0 = already linear)
- *   _pad0..2       : f32        @ 68..76
- *   struct size = 80 bytes
- *
- * @param srgbExpand - true for sRGB-encoded sources (JPEG/TIFF preview), false
- *                     for the RAW path whose data is already scene-linear.
+ * @param srgbExpand   - true for sRGB-encoded sources (JPEG/TIFF preview), false
+ *                       for the RAW path whose data is already scene-linear.
+ * @param sourceMatrix - linear-light matrix applied before the log (a RAW slide's
+ *                       camera matrix); null for the identity.
  */
 function makeNormalizationUniforms(
 	device: GPUDevice,
-	perc: LogPercentiles,
-	filmType: FilmType,
+	bounds: LogBounds,
 	srgbExpand: boolean,
+	sourceMatrix: Matrix3x3 | null,
 ): GPUBuffer {
-	const SIZE = 80;
-	const buffer = device.createBuffer({
-		size: SIZE,
-		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-	});
-	const data = new ArrayBuffer(SIZE);
-	const floatView = new Float32Array(data);
-	const uintView = new Uint32Array(data);
-
-	// floors (vec4) @ 0
-	floatView[0] = perc.floors[0];
-	floatView[1] = perc.floors[1];
-	floatView[2] = perc.floors[2];
-	floatView[3] = 0;  // pad
-
-	// ceils (vec4) @ 16
-	floatView[4] = perc.ceils[0];
-	floatView[5] = perc.ceils[1];
-	floatView[6] = perc.ceils[2];
-	floatView[7] = 0;  // pad
-
-	// shadowCast (vec4) @ 32
-	floatView[8] = 0;  // no shadow cast correction for now
-	floatView[9] = 0;
-	floatView[10] = 0;
-	floatView[11] = 0;  // pad
-
-	// scalars @ 48
-	floatView[12] = 0.0;  // shadowStrength
-	floatView[13] = 0.0;  // wpOffset
-	floatView[14] = 0.0;  // bpOffset
-	uintView[15] = filmTypeToNumber(filmType);  // filmType as u32
-
-	// srgbExpand @ 64 (floatView[16]); floatView[17..19] are padding.
-	floatView[16] = srgbExpand ? 1.0 : 0.0;
-
-	device.queue.writeBuffer(buffer, 0, data);
-	return buffer;
+	// Row-major source → WGSL columns: col0 = [m00, m10, m20], …
+	const m = sourceMatrix ?? [1, 0, 0, 0, 1, 0, 0, 0, 1];
+	return makeUniformBuffer(device, new Float32Array([
+		bounds.floors[0], bounds.floors[1], bounds.floors[2], 0,
+		bounds.ceils[0], bounds.ceils[1], bounds.ceils[2], 0,
+		m[0], m[3], m[6], 0,
+		m[1], m[4], m[7], 0,
+		m[2], m[5], m[8], 0,
+		srgbExpand ? 1 : 0, 0, 0, 0,
+	]));
 }
 
 /**
- * Build the H&D curve pass uniform buffer from InversionParams.
- *
- * HDCurveUniforms layout (total 128 bytes):
- *   pivots           : vec4<f32>  @ 0
- *   slopes           : vec4<f32>  @ 16
- *   cmyOffsets       : vec4<f32>  @ 32   (r=cyan, g=magenta, b=yellow in log-density)
- *   shadowCmy        : vec4<f32>  @ 48
- *   highlightCmy     : vec4<f32>  @ 64
- *   toe              : f32        @ 80
- *   toeWidth         : f32        @ 84
- *   filmType         : u32        @ 88   (0 = C41, 1 = BW, 2 = E6)
- *   shoulder         : f32        @ 92
- *   shoulderWidth    : f32        @ 96
- *   exposure         : f32        @ 100  (Lightroom-style exposure, EV stops)
- *   shadows          : f32        @ 104
- *   highlights       : f32        @ 108
- *   dMax             : f32        @ 112
- *   vibrance         : f32        @ 116
- *   saturation       : f32        @ 120
- *   contrast         : f32        @ 124  (Lightroom-style contrast, [-1, +1])
- *
- * Note: gamma is applied here as pow(transmittance, 1/2.2) matching negpy.
- * The tonecurve pass skips sRGB encode on the negpy path (skipSrgb flag).
- *
- * @param autoExposureAdj - Auto-exposure correction in density units (added to density).
+ * The linear-light matrix a render applies before the log: a RAW slide's camera
+ * matrix with the as-shot white balance folded back in (the inversion path always
+ * decodes RAW without it: every `raw_decode` / `export_native` call passes
+ * `skipWb: rollEdit.invert`). Negatives and display-referred slides use none.
  */
-function makeHDCurveUniforms(
-	device: GPUDevice,
-	inv: InversionParams,
-	autoExposureAdj: number = 0,
-): GPUBuffer {
-	// Pivot and slope match NegPy's PhotometricProcessor formula:
-	//   exposure_shift = 0.01 + (density * DENSITY_MULTIPLIER)
-	//   pivot          = 1.0 - exposure_shift
-	//   slope          = 1.0 + (grade * GRADE_MULTIPLIER)
-	// At defaults (density=1.0, grade=2.5): pivot=0.84, slope=5.375.
-	//
-	// The base curve is fixed at the neutral density/grade; the user's Brightness
-	// and Contrast values ride in `density`/`grade` but are applied post-curve by
-	// the tone stage in hd_curve.wgsl.
-	//
-	// Auto-exposure: subtract from density to brighten (positive autoExposureAdj = dark image = needs less density).
-	const effectiveDensity = NEUTRAL_DENSITY - autoExposureAdj;
-	const pivot = 1.0 - (0.01 + effectiveDensity * DENSITY_MULTIPLIER);
-	const slope = 1.0 + NEUTRAL_GRADE * GRADE_MULTIPLIER;
+function sourceMatrixFor(edit: EffectiveEdit, isLinear: boolean): Matrix3x3 | null {
+	return edit.invert && isLinear && edit.inversionParams.filmType === 'E6'
+		? slideCameraMatrix(edit.cameraColorMatrix, edit.ashotWBCoeffs)
+		: null;
+}
 
-	// Tone-stage params. Brightness is stored inverted (higher density = darker),
-	// so exposure in EV stops is the offset from neutral. Contrast maps the
-	// 0–5 grade domain onto [-1, +1] with the neutral grade at 0.
-	const exposureEV = NEUTRAL_DENSITY - inv.density;
-	const contrast = Math.max(-1, Math.min(1, (inv.grade - NEUTRAL_GRADE) / NEUTRAL_GRADE));
-	const shadows = Math.max(-1, Math.min(1, inv.shadows));
-	const highlights = Math.max(-1, Math.min(1, inv.highlights));
-
-	// CMY offsets convert slider values [-1,+1] to log-density via CMY_MAX_DENSITY.
-	// NegPy convention: Cyan shifts Red channel, Magenta shifts Green, Yellow shifts Blue.
-	const cmyR = inv.cmyCyan * CMY_MAX_DENSITY;
-	const cmyG = inv.cmyMagenta * CMY_MAX_DENSITY;
-	const cmyB = inv.cmyYellow * CMY_MAX_DENSITY;
-
-	const sCmyR = inv.shadowCyan * CMY_MAX_DENSITY;
-	const sCmyG = inv.shadowMagenta * CMY_MAX_DENSITY;
-	const sCmyB = inv.shadowYellow * CMY_MAX_DENSITY;
-
-	const hCmyR = inv.highlightCyan * CMY_MAX_DENSITY;
-	const hCmyG = inv.highlightMagenta * CMY_MAX_DENSITY;
-	const hCmyB = inv.highlightYellow * CMY_MAX_DENSITY;
-
-	// Create buffer with mixed float32 and uint32 values
-	const buffer = device.createBuffer({
-		size: 144,
-		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-	});
-	const data = new ArrayBuffer(144);
-	const floatView = new Float32Array(data);
-	const uintView = new Uint32Array(data);
-
-	// pivots (vec4) @ 0
-	floatView[0] = pivot;
-	floatView[1] = pivot;
-	floatView[2] = pivot;
-	floatView[3] = 0;  // pad
-
-	// slopes (vec4) @ 16
-	floatView[4] = slope;
-	floatView[5] = slope;
-	floatView[6] = slope;
-	floatView[7] = 0;  // pad
-
-	// cmyOffsets (vec4) @ 32
-	floatView[8] = cmyR;
-	floatView[9] = cmyG;
-	floatView[10] = cmyB;
-	floatView[11] = 0;  // pad
-
-	// shadowCmy (vec4) @ 48
-	floatView[12] = sCmyR;
-	floatView[13] = sCmyG;
-	floatView[14] = sCmyB;
-	floatView[15] = 0;  // pad
-
-	// highlightCmy (vec4) @ 64
-	floatView[16] = hCmyR;
-	floatView[17] = hCmyG;
-	floatView[18] = hCmyB;
-	floatView[19] = 0;  // pad
-
-	// scalars @ 80
-	floatView[20] = inv.toe;          // toe @ 80
-	floatView[21] = inv.toeWidth;     // toeWidth @ 84
-	uintView[22] = filmTypeToNumber(inv.filmType);  // filmType @ 88 (u32)
-	floatView[23] = inv.shoulder;     // shoulder @ 92
-	floatView[24] = inv.shoulderWidth; // shoulderWidth @ 96
-	floatView[25] = exposureEV;       // exposure @ 100
-	floatView[26] = shadows;          // shadows @ 104
-	floatView[27] = highlights;       // highlights @ 108
-	floatView[28] = D_MAX;            // dMax @ 112
-	floatView[29] = inv.vibrance;     // vibrance @ 116
-	floatView[30] = inv.saturation;   // saturation @ 120
-	floatView[31] = contrast;         // contrast @ 124
-
-	// Tone preset params (vec4 @ 128)
+/**
+ * The post-curve tone stage of hd_curve.wgsl. Brightness is stored inverted
+ * (higher density = darker), so exposure in EV stops is the offset from
+ * neutral; Contrast maps the 0–5 grade domain onto [-1, +1] with the neutral
+ * grade at 0. Mirrored by `ToneParams::from_inversion` in process.rs.
+ */
+function toneStageParams(inv: InversionParams): ToneStageParams {
 	const preset = TONE_PRESETS[inv.tonePreset];
-	floatView[32] = preset.gamma;        // toneGamma @ 128
-	floatView[33] = preset.blackPoint;   // blackPoint @ 132
-	floatView[34] = preset.whitePoint;   // whitePoint @ 136
-	floatView[35] = preset.midtoneCurve; // midtoneCurve @ 140
-
-	device.queue.writeBuffer(buffer, 0, data);
-	return buffer;
+	return {
+		exposure: NEUTRAL_DENSITY - inv.density,
+		contrast: Math.max(-1, Math.min(1, (inv.grade - NEUTRAL_GRADE) / NEUTRAL_GRADE)),
+		shadows: Math.max(-1, Math.min(1, inv.shadows)),
+		highlights: Math.max(-1, Math.min(1, inv.highlights)),
+		vibrance: inv.vibrance,
+		saturation: inv.saturation,
+		toneGamma: preset.gamma,
+		blackPoint: preset.blackPoint,
+		whitePoint: preset.whitePoint,
+		midtoneCurve: preset.midtoneCurve,
+	};
 }
 
 // ─── Glow uniform builder ─────────────────────────────────────────────────────
@@ -1333,17 +581,6 @@ function isIdentityTransform(t: TransformParams): boolean {
 // ─── Border (matting) helpers ──────────────────────────────────────────────────
 
 /**
- * Compute the matting border thickness in pixels for a content image of the
- * given dimensions. `borderWidth` is a percentage of the shorter edge. Returns
- * 0 when disabled. Shared conceptually with `border_pixels` in the Rust export
- * so the preview and the written file match.
- */
-function borderPixelsForContent(contentW: number, contentH: number, borderWidth: number): number {
-	if (!(borderWidth > 0)) return 0;
-	return Math.round((borderWidth / 100) * Math.min(contentW, contentH));
-}
-
-/**
  * Build the border pass uniform buffer.
  *
  * BorderUniforms layout (total 32 bytes):
@@ -1368,63 +605,6 @@ function makeBorderUniforms(
 		c, c, c, 1,                              // color
 	]);
 	return makeUniformBuffer(device, data);
-}
-
-/**
- * Compute the 8 projective homography coefficients mapping the unit square
- * (0,0)-(1,1) to the given crop quad. For non-parallelogram quads this maps
- * straight lines in the output to straight lines in the source, giving true
- * perspective correction. For rectangles/parallelograms the denominator is 1
- * and the result is equivalent to the previous bilinear sampling.
- *
- * Output order [a,b,c,d,e,f,g,h] so that for an output position (u,v):
- *     W     = g*u + h*v + 1
- *     src.x = (a*u + b*v + c) / W
- *     src.y = (d*u + e*v + f) / W
- *
- * Mirrors the helper added to `src-tauri/src/export.rs` to guarantee identical
- * GPU/CPU results.
- */
-function computeCropHomography(quad: CropQuad): [number, number, number, number, number, number, number, number] {
-	const x0 = quad.tl.x;
-	const y0 = quad.tl.y;
-	const x1 = quad.tr.x;
-	const y1 = quad.tr.y;
-	const x2 = quad.bl.x;
-	const y2 = quad.bl.y;
-	const x3 = quad.br.x;
-	const y3 = quad.br.y;
-
-	// Solve for the projective map from the unit square (0,0)-(1,1) to the quad.
-	// Mapping: src = ((a*u+b*v+c)/(g*u+h*v+1), (d*u+e*v+f)/(g*u+h*v+1)).
-	// System for the perspective coefficients g and h:
-	//   g*(x1-x3) + h*(x2-x3) = x0-x1-x2+x3
-	//   g*(y1-y3) + h*(y2-y3) = y0-y1-y2+y3
-	const a = x1 - x3;
-	const b = x2 - x3;
-	const rx = x0 - x1 - x2 + x3;
-	const c = y1 - y3;
-	const d = y2 - y3;
-	const ry = y0 - y1 - y2 + y3;
-
-	const det = a * d - b * c;
-	let g = 0.0;
-	let h = 0.0;
-	if (Math.abs(det) > 1e-10) {
-		g = (rx * d - b * ry) / det;
-		h = (a * ry - rx * c) / det;
-	}
-
-	return [
-		(g + 1) * x1 - x0, // a
-		(h + 1) * x2 - x0, // b
-		x0,                // c
-		(g + 1) * y1 - y0, // d
-		(h + 1) * y2 - y0, // e
-		y0,                // f
-		g,                 // g
-		h,                 // h
-	];
 }
 
 /**
@@ -1469,50 +649,6 @@ function isRotation90Multiple(rotation: number): boolean {
 	const nearest90 = Math.round(rotation / 90);
 	// Odd multiples of 90° (1, 3, 5, -1, -3, ...) swap dimensions
 	return ((nearest90 % 2) + 2) % 2 === 1;
-}
-
-/**
- * Calculate the output dimensions for a crop operation.
- *
- * For a quadrilateral crop, we compute the average width and height of the quad
- * in source pixels. This gives a natural aspect ratio that preserves the cropped
- * region without distortion.
- *
- * - Width: average of top edge (tl→tr) and bottom edge (bl→br)
- * - Height: average of left edge (tl→bl) and right edge (tr→br)
- */
-function computeCropOutputDimensions(
-	quad: CropQuad,
-	srcWidth: number,
-	srcHeight: number
-): { width: number; height: number } {
-	// Calculate edge lengths in pixel space
-	const topWidth = Math.sqrt(
-		Math.pow((quad.tr.x - quad.tl.x) * srcWidth, 2) +
-		Math.pow((quad.tr.y - quad.tl.y) * srcHeight, 2)
-	);
-	const bottomWidth = Math.sqrt(
-		Math.pow((quad.br.x - quad.bl.x) * srcWidth, 2) +
-		Math.pow((quad.br.y - quad.bl.y) * srcHeight, 2)
-	);
-	const leftHeight = Math.sqrt(
-		Math.pow((quad.bl.x - quad.tl.x) * srcWidth, 2) +
-		Math.pow((quad.bl.y - quad.tl.y) * srcHeight, 2)
-	);
-	const rightHeight = Math.sqrt(
-		Math.pow((quad.br.x - quad.tr.x) * srcWidth, 2) +
-		Math.pow((quad.br.y - quad.tr.y) * srcHeight, 2)
-	);
-
-	// Average the opposite edges for the output dimensions
-	const width = Math.round((topWidth + bottomWidth) / 2);
-	const height = Math.round((leftHeight + rightHeight) / 2);
-
-	// Ensure minimum size of 1 pixel
-	return {
-		width: Math.max(1, width),
-		height: Math.max(1, height),
-	};
 }
 
 // ─── Pipeline creation ────────────────────────────────────────────────────────
@@ -1736,65 +872,71 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 */
 	let readbackTexture: GPUTexture | null = null;
 	/**
-	 * Log percentiles cached from the last RAW preview render.
-	 * Reused on export so full-res and preview-res produce identical normalization.
-	 */
-	let lastLogPerc: LogPercentiles | null = null;
-
-	/**
-	 * Per-bitmap cache for the non-RAW (JPEG/TIFF) invert path.
+	 * Linear RGBA snapshot of the resident bitmap (JPEG/TIFF fallback path).
 	 *
-	 * `bitmapToF32Pixels()` (OffscreenCanvas draw → getImageData → f32 copy) and
-	 * the subsequent log-percentile computation are expensive (a full GPU→CPU
-	 * readback plus a multi-million-element loop) yet their inputs do not change
-	 * while the user drags sliders: the source bitmap is constant, and the
-	 * percentiles depend only on `filmType` + `autoLevels`. Caching both turns
-	 * them into no-ops on every render except the first for a given bitmap (or
-	 * when filmType/autoLevels change), matching the RAW path's smoothness.
+	 * `bitmapToF32Pixels()` is a full GPU→CPU readback plus an f32 copy, and its
+	 * input does not change while the user drags sliders, so it is taken once
+	 * per bitmap. The analysis and the WB picker both read it.
 	 */
 	let cachedF32Bitmap: ImageBitmap | null = null;
 	let cachedF32Pixels: Float32Array | null = null;
-	let cachedInvertLogPerc: LogPercentiles | null = null;
-	let cachedInvertFilmType: string | null = null;
-	let cachedInvertAutoLevels: boolean | null = null;
 
 	/**
-	 * Log-percentile cache for the buffer-based paths (`renderRaw` /
-	 * `renderDecodedRgba`), which have no `ImageBitmap` to key on.
+	 * Analysis of the resident source.
 	 *
-	 * The analysis walks every pixel on the main thread, so at full resolution
-	 * it alone costs more than the entire GPU pass chain.  It depends only on
-	 * the source pixels plus `filmType` / `autoLevels`, never on the edit
-	 * parameters being dragged.
+	 * The analysis walks the source on the main thread, which costs more than
+	 * the entire GPU pass chain. It depends only on the source pixels, the film
+	 * type, the roll baseline and (for a RAW slide's histograms) the camera
+	 * matrix — never on the edit parameters being dragged — so it is reused
+	 * until one of those changes.
 	 */
-	let cachedPercSource: object | null = null;
-	let cachedPercFilmType: string | null = null;
-	let cachedPercAutoLevels: boolean | null = null;
-	let cachedPercValue: LogPercentiles | null = null;
+	let cachedAnalysis: {
+		source: object;
+		filmType: FilmType;
+		baselineKey: number | null;
+		/** `sourceMatrix` joined, '' for none. */
+		matrixKey: string;
+		result: AnalysisResult;
+	} | null = null;
+	/** The analysis the last render used; null when it was not a negative. */
+	let lastResult: AnalysisResult | null = null;
 
 	/**
-	 * Return cached percentiles for `source`, computing them via `compute` only
-	 * when the source or the two parameters that affect them have changed.
+	 * Analyse `source` for a negative or slide render (cached), remember it as
+	 * the last result, and return it. `linearSource` is only called on a cache
+	 * miss; `isLinear` is true for the RAW path.
 	 */
-	function cachedPercentiles(
+	function measureNegative(
+		edit: EffectiveEdit,
 		source: object,
-		filmType: FilmType,
-		autoLevels: boolean,
-		compute: () => LogPercentiles,
-	): LogPercentiles {
+		w: number,
+		h: number,
+		isLinear: boolean,
+		linearSource: () => LinearSource,
+	): NegativeAnalysis {
+		const filmType = edit.inversionParams.filmType;
+		const baselineKey = edit.rollBaseline?.key ?? null;
+		const sourceMatrix = sourceMatrixFor(edit, isLinear);
+		const matrixKey = sourceMatrix?.join(',') ?? '';
 		if (
-			cachedPercValue !== null &&
-			cachedPercSource === source &&
-			cachedPercFilmType === filmType &&
-			cachedPercAutoLevels === autoLevels
+			cachedAnalysis === null ||
+			cachedAnalysis.source !== source ||
+			cachedAnalysis.filmType !== filmType ||
+			cachedAnalysis.baselineKey !== baselineKey ||
+			cachedAnalysis.matrixKey !== matrixKey
 		) {
-			return cachedPercValue;
+			const result = analyzeNegative(
+				linearSource(),
+				w,
+				h,
+				filmType,
+				edit.rollBaseline,
+				sourceMatrix,
+			);
+			cachedAnalysis = { source, filmType, baselineKey, matrixKey, result };
 		}
-		cachedPercValue = compute();
-		cachedPercSource = source;
-		cachedPercFilmType = filmType;
-		cachedPercAutoLevels = autoLevels;
-		return cachedPercValue;
+		lastResult = cachedAnalysis.result;
+		return lastResult.analysis;
 	}
 
 	/** Track last output dimensions to detect when resize is needed. */
@@ -1818,7 +960,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 	 *
 	 * @param isLinear  true for the RAW path (input is linear light);
 	 *                  false for JPEG/TIFF (sRGB-encoded, needs gamma expand in invert pass).
-	 * @param logPerc   Per-channel log percentiles required for the normalization pass.
+	 * @param analysis  The negative's analysis, required for the print curve.
 	 *                  Must be provided when edit.invert = true.
 	 */
 	async function runMainPasses(
@@ -1826,8 +968,16 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		w: number,
 		h: number,
 		isLinear: boolean,
-		logPerc: LogPercentiles | null,
+		analysis: NegativeAnalysis | null,
 	): Promise<void> {
+		lastGeometry = {
+			sourceWidth: w,
+			sourceHeight: h,
+			transform: edit.transform,
+			cropQuad: edit.cropQuad,
+			borderWidth: edit.inversionParams.borderWidth,
+		};
+		lastSourceMatrix = sourceMatrixFor(edit, isLinear);
 		// ── Compute output dimensions (may differ from source if cropped/rotated) ───
 		const hasCrop = edit.cropQuad !== null;
 		const hasTransform = !isIdentityTransform(edit.transform);
@@ -1962,15 +1112,14 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		// Texture that feeds the final tonecurve pass.
 		let beforeToneCurve: GPUTextureView;
 
-		if (edit.invert && logPerc) {
-			// ── NegPy inversion path ──────────────────────────────────────────
-			// negpy has NO camera color matrix — rawpy converts cam→AdobeRGB
-			// during demosaic via output_color.  The per-channel log
-			// normalization (floors/ceils stretch) handles color separation
-			// and orange mask removal independently per channel, making a
-			// cam→sRGB matrix unnecessary (and harmful: applying it to
-			// post-H&D gamma-encoded data produces incorrect color mixing,
-			// causing a magenta tint).
+		if (edit.invert && analysis) {
+			// ── Negative / slide path ────────────────────────────────────────
+			// No cam→sRGB colour matrix pass: a negative's per-channel log
+			// normalization (floors/ceils stretch) handles color separation and
+			// orange mask removal independently per channel, and a matrix after
+			// the print curve mixes encoded data (a magenta tint). A RAW slide
+			// gets its camera matrix in linear light inside the normalization
+			// pass instead, before the log (`sourceMatrixFor`).
 			//
 			// Pass 1: normalization    — sourceTexture  → intermediateA
 			// Pass 2: hd_curve         — intermediateA  → intermediateB
@@ -1979,19 +1128,18 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			// Pass 2.6: clahe_remap    — fragment: intermediateE/B + CDF → intermediateC
 			// Pass 3: tonecurve        — intermediateC/E/B  → outputTexture
 
-			const normBuf = makeNormalizationUniforms(
+			const inv = edit.inversionParams;
+			const { bounds, curve } = solvePrintCurve(inv, analysis, edit.rollBaseline);
+			const normBuf = makeNormalizationUniforms(device, bounds, !isLinear, lastSourceMatrix);
+			const hdBuf = makeUniformBuffer(
 				device,
-				logPerc,
-				edit.inversionParams.filmType,
-				!isLinear,
+				new Float32Array(
+					packPrintCurveUniforms(curve, toneStageParams(inv), inv.filmType, isLinear),
+				),
 			);
-
-			// Apply auto-exposure correction if enabled
-			const autoExposureAdj = edit.inversionParams.autoExposure ? logPerc.autoExposure : 0;
-			const hdBuf = makeHDCurveUniforms(device, edit.inversionParams, autoExposureAdj);
 			toClean.push(normBuf, hdBuf);
 
-			// Normalization: camera-native linear → normalized log-density
+			// Normalization: linear source → normalized log-density
 			const normBG = device.createBindGroup({
 				layout: normalizationPipeline.getBindGroupLayout(0),
 				entries: [
@@ -2003,7 +1151,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			drawFullscreenTriangle(encoder, normalizationPipeline, normBG, intermediateA!.createView());
 
-			// H&D curve: normalized log-density → gamma-encoded positive transmittance
+			// H&D curve (or slide transfer): normalized log-density → gamma-encoded positive
 			const hdBG = device.createBindGroup({
 				layout: hdCurvePipeline.getBindGroupLayout(0),
 				entries: [
@@ -2015,8 +1163,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 
 			drawFullscreenTriangle(encoder, hdCurvePipeline, hdBG, intermediateB!.createView());
 
-			// No color matrix in the negative path — per-channel log
-			// normalization already handles color separation (matching negpy).
+			// No color matrix after the curve — the encoded print must not be mixed.
 
 			// ── Glow pass (skip when amount is zero) ─────────────────────────
 			// Glow applies highlight bloom effect after H&D curve.
@@ -2485,48 +1632,26 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastDecodedBuffer = null;
 		}
 
-		// Compute log percentiles for the NegPy normalization pass.
-		// No color matrix applied — percentiles operate on camera-native data,
-		// matching negpy where rawpy delivers already-converted RGB and
-		// normalization works directly on those values.
-		//
-		// Both the f32 readback and the percentile computation are cached: their
-		// inputs (the bitmap, plus filmType/autoLevels) don't change while the
-		// user drags sliders, so this is a no-op on all but the first render for
-		// a given bitmap. Without the cache, every slider tick paid for a full
-		// GPU→CPU readback plus a multi-million-element loop (see bitmapToF32Pixels).
-		let logPerc: LogPercentiles | null = null;
+		// Measure the negative. No color matrix applied — the analysis operates
+		// on camera-native data, as the normalization pass does.
+		let analysis: NegativeAnalysis | null = null;
 		if (edit.invert) {
-			const filmType = edit.inversionParams.filmType;
-			const autoLevels = edit.inversionParams.autoLevels;
-
 			// Refresh the f32 snapshot only when the source bitmap changes.
 			if (bitmap !== cachedF32Bitmap || cachedF32Pixels === null) {
 				cachedF32Pixels = await bitmapToF32Pixels(bitmap);
 				cachedF32Bitmap = bitmap;
-				// Force a percentile recompute below.
-				cachedInvertLogPerc = null;
 			}
-
-			// Recompute percentiles only when the inputs that affect them change.
-			if (
-				cachedInvertLogPerc === null ||
-				cachedInvertFilmType !== filmType ||
-				cachedInvertAutoLevels !== autoLevels
-			) {
-				cachedInvertLogPerc = computeLogPercentilesFromF32(
-					cachedF32Pixels, w, h, 8, undefined,
-					filmType,
-					autoLevels,
-				);
-				cachedInvertFilmType = filmType;
-				cachedInvertAutoLevels = autoLevels;
-			}
-
-			logPerc = cachedInvertLogPerc;
+			const snapshot = cachedF32Pixels;
+			analysis = measureNegative(edit, bitmap, w, h, false, () => ({
+				kind: 'linear-f32',
+				pixels: snapshot,
+				channels: 4,
+			}));
+		} else {
+			lastResult = null;
 		}
 
-		await runMainPasses(edit, w, h, false, logPerc);
+		await runMainPasses(edit, w, h, false, analysis);
 	}
 
 	// ─── Decoded-image render path ────────────────────────────────────────────
@@ -2540,7 +1665,6 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastBitmap = null;
 			cachedF32Bitmap = null;
 			cachedF32Pixels = null;
-			cachedInvertLogPerc = null;
 
 			ensureRgba8Source(w, h);
 			// bytesPerRow must be 256-aligned for writeTexture.
@@ -2571,60 +1695,37 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastRawBuffer = null;
 		}
 
-		// Compute log percentiles for the NegPy normalization pass.
-		// Gamma-expand to linear first — the normalization shader does the same
-		// (srgbExpand = 1 on this path), and the exporter measures linear data.
-		let logPerc: LogPercentiles | null = null;
+		// Measure the negative. The 8-bit source is sRGB-encoded; the analysis
+		// gamma-expands it, as the normalization shader does (srgbExpand = 1 on
+		// this path) and as the exporter does before measuring.
+		let analysis: NegativeAnalysis | null = null;
 		if (edit.invert) {
-			logPerc = cachedPercentiles(
-				rgbaBuffer,
-				edit.inversionParams.filmType,
-				edit.inversionParams.autoLevels,
-				() => computeLogPercentilesFromF32(
-					srgbU8ToLinearF32(pixels as Uint8ClampedArray), w, h, 8, undefined,
-					edit.inversionParams.filmType,
-					edit.inversionParams.autoLevels,
-				),
-			);
-			lastLogPerc = logPerc;
+			analysis = measureNegative(edit, rgbaBuffer, w, h, false, () => ({
+				kind: 'srgb-u8',
+				pixels,
+			}));
 		} else {
-			lastLogPerc = null;
+			lastResult = null;
 		}
 
-		await runMainPasses(edit, w, h, false, logPerc);
+		await runMainPasses(edit, w, h, false, analysis);
 	}
 
 	// ─── RAW render path ──────────────────────────────────────────────────────
 
-	async function renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer, logPercOverride?: LogPercentiles): Promise<void> {
+	async function renderRaw(edit: EffectiveEdit, rawBuffer: ArrayBuffer): Promise<void> {
 		const { width: w, height: h, pixels } = parseRawDecodeBuffer(rawBuffer);
 
-		// Compute log percentiles for the NegPy normalization pass.
-		// Always recompute when invert is on; cache the result so the export
-		// render (which uses a higher-res buffer with different pixel statistics)
-		// can reuse the percentiles from the preview render, keeping colours
-		// consistent between what the user sees and the exported file.
-		// No color matrix applied — percentiles operate on camera-native data,
-		// matching negpy where normalization runs on raw linear RGB directly.
-		let logPerc: LogPercentiles | null = null;
+		// Measure the negative. No color matrix applied — the analysis operates
+		// on camera-native linear data, as the normalization pass does.
+		let analysis: NegativeAnalysis | null = null;
 		if (edit.invert) {
-			if (logPercOverride) {
-				logPerc = logPercOverride;
-			} else {
-				logPerc = cachedPercentiles(
-					rawBuffer,
-					edit.inversionParams.filmType,
-					edit.inversionParams.autoLevels,
-					() => computeLogPercentilesFromU16(
-						pixels, w, h, 8, undefined,
-						edit.inversionParams.filmType,
-						edit.inversionParams.autoLevels,
-					),
-				);
-				lastLogPerc = logPerc;
-			}
+			analysis = measureNegative(edit, rawBuffer, w, h, true, () => ({
+				kind: 'linear-u16',
+				pixels,
+			}));
 		} else {
-			lastLogPerc = null;
+			lastResult = null;
 		}
 
 		// Push error scopes to surface any WebGPU validation/OOM errors.
@@ -2699,7 +1800,7 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 			lastBitmap = null;
 		}
 
-		await runMainPasses(edit, w, h, true, logPerc);
+		await runMainPasses(edit, w, h, true, analysis);
 
 		rawTexture?.destroy();
 
@@ -2731,11 +1832,11 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		readbackTexture?.destroy();
 		cachedF32Bitmap = null;
 		cachedF32Pixels = null;
-		cachedInvertLogPerc = null;
-		cachedPercSource = null;
-		cachedPercValue = null;
+		cachedAnalysis = null;
+		lastResult = null;
 		lastRawBuffer = null;
 		lastDecodedBuffer = null;
+		lastGeometry = null;
 		device.destroy();
 	}
 
@@ -2781,14 +1882,41 @@ export async function createPipeline(canvas: HTMLCanvasElement): Promise<GpuPipe
 		return result;
 	}
 
+	/** Geometry of the last render, for `sampleSourceLog`. */
+	let lastGeometry: PickGeometry | null = null;
+	/** Linear-light matrix the last render applied before the log, for `sampleSourceLog`. */
+	let lastSourceMatrix: Matrix3x3 | null = null;
+
+	function sampleSourceLog(nx: number, ny: number): Vec3 | null {
+		if (!lastGeometry) return null;
+		if (lastRawBuffer) {
+			const { width, height, pixels } = parseRawDecodeBuffer(lastRawBuffer);
+			const src: LinearSource = { kind: 'linear-u16', pixels };
+			return sampleSourceLogAt(src, width, height, nx, ny, lastGeometry, lastSourceMatrix);
+		}
+		if (lastDecodedBuffer) {
+			const { width, height, pixels } = parseDecodeImageRgbBuffer(lastDecodedBuffer);
+			return sampleSourceLogAt({ kind: 'srgb-u8', pixels }, width, height, nx, ny, lastGeometry);
+		}
+		// The bitmap path keeps a linear RGBA snapshot of the resident bitmap.
+		if (lastBitmap && cachedF32Bitmap === lastBitmap && cachedF32Pixels) {
+			const src: LinearSource = { kind: 'linear-f32', pixels: cachedF32Pixels, channels: 4 };
+			return sampleSourceLogAt(src, lastBitmap.width, lastBitmap.height, nx, ny, lastGeometry);
+		}
+		return null;
+	}
+
 	return {
 		render,
 		renderDecodedRgba,
 		renderRaw,
 		readPixels,
+		sampleSourceLog,
 		destroy,
 		maxTextureDimension,
-		get lastLogPerc() { return lastLogPerc; },
+		get lastAnalysis() { return lastResult?.analysis ?? null; },
+		get lastBounds() { return lastResult?.bounds ?? null; },
+		get lastHistograms() { return lastResult?.histograms ?? null; },
 		get lastOutputWidth() { return lastOutputWidth; },
 		get lastOutputHeight() { return lastOutputHeight; },
 		setDisplayBox(cssWidth: number, cssHeight: number): void {
