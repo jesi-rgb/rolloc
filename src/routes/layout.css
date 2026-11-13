@@ -358,3 +358,24 @@ body {
 @utility animate-fadein {
 	animation: fadein 0.2s var(--ease-out) both;
 }
+
+/* Roll grid tiles: a roll switch remounts the grid, so each tile settles in
+   once, staggered in reading order by `--tile-i`.  The cap sits past a
+   36-exposure roll so the wave never collapses on screen; tiles beyond it
+   are long offscreen and enter together.  `backwards` (not `both`) so no
+   fill lingers after the entrance. */
+@keyframes tile-in {
+	from {
+		opacity: 0;
+		transform: translateY(8px);
+	}
+}
+
+@utility animate-tile-in {
+	animation: tile-in 260ms var(--ease-out) backwards;
+	animation-delay: calc(min(var(--tile-i, 0), 40) * 16ms);
+
+	@media (prefers-reduced-motion: reduce) {
+		animation-name: fadein;
+	}
+}

@@ -813,18 +813,21 @@
 							<div inert={!thumbsReady || undefined} class="overflow-y-auto h-full">
 								<div class="p-l grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-px">
 									{#each frames as frame, i (frame.id)}
-										<FrameThumb
-											{frame}
-											dirPath={dirPath!}
-											fullRes={warmFrameIds.has(frame.id)}
-											selected={!selecting && i === selIdx}
-											{selecting}
-											picked={pickedIds.has(frame.id)}
-											onSelect={selecting
-												? togglePicked
-												: selectFrame}
-											onDblClick={selecting ? undefined : openFrame}
-										/>
+										<!-- Grid item; staggers the tiles in when a roll (re)mounts the grid. -->
+										<div class="animate-tile-in" style:--tile-i={i}>
+											<FrameThumb
+												{frame}
+												dirPath={dirPath!}
+												fullRes={warmFrameIds.has(frame.id)}
+												selected={!selecting && i === selIdx}
+												{selecting}
+												picked={pickedIds.has(frame.id)}
+												onSelect={selecting
+													? togglePicked
+													: selectFrame}
+												onDblClick={selecting ? undefined : openFrame}
+											/>
+										</div>
 									{/each}
 								</div>
 							</div>
@@ -893,7 +896,7 @@
 			       text-primary-content text-sm font-medium hover:bg-primary-muted
 			       transition-[background-color,transform] duration-150 ease-out active:scale-[0.97]"
 		>
-			<PlusIcon size={14} weight="bold" />
+			<PlusIcon size={14} />
 			{action}
 		</button>
 	</div>
