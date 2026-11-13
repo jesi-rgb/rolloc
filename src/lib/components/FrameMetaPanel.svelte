@@ -213,7 +213,7 @@
 						size={20}
 						weight={rating >= star
 							? "fill"
-							: "regular"}
+							: "bold"}
 					/>
 				</button>
 			{/each}
@@ -241,7 +241,7 @@
 					size={14}
 					weight={hasFlag("pick")
 						? "fill"
-						: "regular"}
+						: "bold"}
 				/> Pick
 			</button>
 			<button
@@ -256,7 +256,7 @@
 					size={14}
 					weight={hasFlag("reject")
 						? "fill"
-						: "regular"}
+						: "bold"}
 				/> Reject
 			</button>
 		</div>

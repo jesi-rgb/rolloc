@@ -283,7 +283,7 @@
 						onclick={onToggleWbPicker}
 						title="Pick a neutral white or gray pixel on the image to auto-set color balance"
 					>
-						<EyedropperSampleIcon weight="duotone" size={18} />
+						<EyedropperSampleIcon size={18} />
 						White Balance
 					</ToggleButton>
 				{/if}

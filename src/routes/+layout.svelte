@@ -4,6 +4,7 @@
 	import { initTheme, getTheme } from '$lib/theme.svelte';
 	import { initUpdater } from '$lib/updater.svelte';
 	import BackgroundJobsDock from '$lib/components/BackgroundJobsDock.svelte';
+	import { IconContext } from 'phosphor-svelte';
 
 	let { children } = $props();
 
@@ -26,5 +27,8 @@
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
-{@render children()}
-<BackgroundJobsDock />
+<!-- App-wide icon style: every Phosphor icon is bold unless a state needs `fill`. -->
+<IconContext values={{ weight: 'bold' }}>
+	{@render children()}
+	<BackgroundJobsDock />
+</IconContext>

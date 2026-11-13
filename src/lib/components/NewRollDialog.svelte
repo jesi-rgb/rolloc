@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { XIcon } from 'phosphor-svelte';
 	import { pickDirectory } from '$lib/fs/directory';
 	import { createRoll, checkForSidecar, restoreRoll, getGearHistory } from '$lib/db/rolls';
 	import type { Roll, FilmType } from '$lib/types';
@@ -142,7 +143,7 @@
 				onclick={onClose}
 				class="text-content-muted hover:text-content transition-colors"
 				aria-label="Close"
-			>✕</button>
+			><XIcon size={16} /></button>
 		</div>
 
 		<!-- Directory picker -->

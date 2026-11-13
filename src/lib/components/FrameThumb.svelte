@@ -159,7 +159,7 @@
 					: 'bg-black/40 border-white/70 text-transparent'}"
 				aria-hidden="true"
 			>
-				<CheckIcon size={12} weight="bold" />
+				<CheckIcon size={12} />
 			</div>
 		{/if}
 

@@ -1495,7 +1495,7 @@
     class="absolute inset-0 flex flex-col items-center justify-center gap-sm text-center px-l
            bg-base-muted animate-fadein"
   >
-    <WarningIcon size={40} weight="thin" class="mb-xs text-content-subtle" />
+    <WarningIcon size={40} class="mb-xs text-content-subtle" />
     <h2 class="text-l font-semibold text-content">{title}</h2>
     <p class="max-w-96 text-sm text-content-muted text-balance wrap-break-word">{message}</p>
     <a
@@ -1660,7 +1660,7 @@
           in:fly={{ y: 8, duration: 200, easing: quintOut }}
           out:fade={{ duration: 120 }}
         >
-          <EyedropperSampleIcon size={14} weight="duotone" class="shrink-0 text-primary" />
+          <EyedropperSampleIcon size={14} class="shrink-0 text-primary" />
           Click a neutral white or gray area to set color balance
           <button
             class="pointer-events-auto px-sm py-0.5 rounded-full text-content-muted

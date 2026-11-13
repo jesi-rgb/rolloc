@@ -53,7 +53,7 @@
 		       text-primary-content text-sm font-medium hover:bg-primary-muted
 		       transition-[background-color,transform] duration-150 ease-out active:scale-[0.97]"
 	>
-		<PlusIcon size={14} weight="bold" />
+		<PlusIcon size={14} />
 		{actionLabel}
 	</button>
 </header>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { XIcon } from 'phosphor-svelte';
 	import { pickDirectory } from '$lib/fs/directory';
 	import { createLibrary } from '$lib/db/libraries';
 	import type { Library } from '$lib/types';
@@ -73,7 +74,7 @@
 				onclick={onClose}
 				class="text-content-muted hover:text-content transition-colors"
 				aria-label="Close"
-			>✕</button>
+			><XIcon size={16} /></button>
 		</div>
 
 		<!-- Directory picker -->

@@ -883,7 +883,7 @@
 	onAction: () => void,
 )}
 	<div class="flex flex-col items-center justify-center py-24 gap-sm text-center">
-		<Icon size={48} weight="thin" class="text-content-subtle" />
+		<Icon size={48} class="text-content-subtle" />
 		<h2 class="text-l font-semibold text-content mt-sm">{title}</h2>
 		<p class="text-content-muted text-sm max-w-80">{body}</p>
 		<button

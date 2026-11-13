@@ -12,6 +12,8 @@
 		SpinnerIcon,
 		ArrowsClockwiseIcon,
 		CropIcon,
+		FlipHorizontalIcon,
+		FlipVerticalIcon,
 	} from "phosphor-svelte";
 
 	interface Props {
@@ -395,22 +397,7 @@
 			fill
 			block
 		>
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				width="14"
-				height="14"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				aria-hidden="true"
-			>
-				<path
-					d="M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M12 20v2M12 14v2M12 8v2M12 2v2"
-				/>
-			</svg>
+			<FlipHorizontalIcon size={14} />
 			H
 		</ToggleButton>
 		<ToggleButton
@@ -421,22 +408,7 @@
 			fill
 			block
 		>
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				width="14"
-				height="14"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				aria-hidden="true"
-			>
-				<path
-					d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M20 12h2M14 12h2M8 12h2M2 12h2"
-				/>
-			</svg>
+			<FlipVerticalIcon size={14} />
 			V
 		</ToggleButton>
 	</div>
