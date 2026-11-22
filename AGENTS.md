@@ -42,6 +42,11 @@ bunx vitest run --project client
 # Build
 bun run build
 bun run preview
+
+# Release — never bump versions or tag by hand
+bun run tag v1.2.3     # scripts/tag.sh: bumps tauri.conf.json + Cargo.toml, commits
+                       # "chore: bump version to 1.2.3", tags, pushes HEAD + tag;
+                       # the v* tag triggers .github/workflows/release.yml
 ```
 
 ### Test file conventions
