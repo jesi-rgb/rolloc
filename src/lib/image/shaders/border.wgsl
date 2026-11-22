@@ -52,6 +52,9 @@ fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
 		return vec4<f32>(U.color.rgb, 1.0);
 	}
 
-	let col = textureSample(uTexture, uSampler, inner);
+	// Explicit LOD: this runs after a per-fragment early return, where the
+	// implicit derivatives of textureSample() are not allowed. The content
+	// texture has a single mip level, so level 0 is the same texel.
+	let col = textureSampleLevel(uTexture, uSampler, inner, 0.0);
 	return vec4<f32>(col.rgb, 1.0);
 }

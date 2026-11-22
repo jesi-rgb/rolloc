@@ -95,7 +95,11 @@ fn main(
 	scratch[bin] = atomicLoad(&hist[bin]);
 	workgroupBarrier();
 
-	// Iterative redistribution (up to 4 rounds — converges quickly).
+	// Iterative redistribution — always 4 rounds. No early exit when the excess
+	// reaches zero: `excess` is read from workgroup memory, which WGSL treats as
+	// non-uniform, so a `break` on it would put every later workgroupBarrier()
+	// in non-uniform control flow (a compile error). A zero-excess round is a
+	// no-op, so the result is the same.
 	for (var round = 0u; round < 4u; round++) {
 		// Count excess above clip limit.
 		// Use shared atomics for reduction — thread 0 collects.
@@ -109,7 +113,6 @@ fn main(
 		workgroupBarrier();
 
 		let excess = atomicLoad(&hist[0]);
-		if (excess == 0u) { break; }
 
 		// Distribute excess evenly across all bins.
 		let per_bin = excess / NUM_BINS;
